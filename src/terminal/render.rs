@@ -142,9 +142,9 @@ impl TerminalView {
         (x, y)
     }
 
-    /// Physical keys (and printable text) are encoded by Ghostty against the
-    /// terminal's current modes. Whitelisted font shortcuts are allowed to
-    /// reach the global action handlers instead.
+    /// Control keys are encoded by Ghostty against the terminal's current
+    /// modes. Plain printable text propagates to GPUI's native text handler,
+    /// which owns it on every platform; font shortcuts are consumed here.
     fn on_key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
         let name = event.keystroke.key.as_str();
         // Handle the font commands here as well as via global actions: a
