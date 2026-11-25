@@ -1,0 +1,3 @@
+// The first icon resource is what Explorer, the taskbar and the window use.
+#define IDI_PAIN 1
+IDI_PAIN ICON "pain.ico"

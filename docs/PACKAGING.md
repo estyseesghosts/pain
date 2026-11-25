@@ -30,6 +30,15 @@ wherever it will be launched; there is no installer or registry step. Close the
 window to exit; the child shell is reaped and the console-less build leaves no
 dangling console.
 
+The executable carries the app icon as its first Windows icon resource, so
+Explorer, the taskbar and the window use it. `build.rs` compiles
+`resources\windows\pain.rc` with `windres` and links the object into the binary;
+the shim on `PATH` is needed for the icon for the same reason as GPUI's manifest.
+`resources\windows\pain.ico` is checked in with 16/24/32/48/64/128/256 px
+entries, generated from the `pain.png` master and its `0.25x`/`0.5x` exports in
+`~\Documents\app-icons\pain`. MSVC builds skip the resource; the GNU toolchain
+above is the Windows release target.
+
 ## Linux release (native or WSLg)
 
 ```sh
