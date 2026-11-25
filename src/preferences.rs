@@ -192,6 +192,7 @@ impl Global for PreferencesWindow {}
 
 /// Open (or focus) the single preferences window.
 pub fn open_preferences(cx: &mut App) {
+    crate::log::info("preferences", "opening");
     if let Some(handle) = cx
         .try_global::<PreferencesWindow>()
         .and_then(|global| global.0)
