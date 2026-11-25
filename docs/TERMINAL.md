@@ -298,6 +298,11 @@ text path owns the event.
 - Held keys use `GHOSTTY_KEY_ACTION_REPEAT` so kitty `report_events` can tell a
   repeat from a fresh press.
 - Encoding grows its buffer once on `out_of_space` so a key is never dropped.
+- App shortcuts (`Ctrl+Shift+C/V/A`, `Shift+Insert`, and the font keys) are
+  dispatched by GPUI **before** the view's `on_key_down` listener. The view
+  skips them via `is_app_shortcut`, so a clipboard copy never leaves a stray
+  escape sequence in the PTY. `Ctrl+V` deliberately remains a terminal control
+  byte, as shells use it for quoted-insert.
 
 ## 11. Focus and command routing
 
@@ -326,6 +331,25 @@ Ghostty owns selection positions because selection must survive scrollback/grid 
 Copy requests terminal selection text through Ghostty's formatter/selection APIs rather than concatenating cached visual runs. Cached runs are rendering artifacts and may not preserve newline/wrap semantics correctly.
 
 Selection must continue to work after scrollback movement and resize. Avoid storing selection only in pixel coordinates.
+
+### Pointer policy
+
+Mouse reporting and local selection stay separate, with an explicit escape
+modifier (Shift or Super) requesting local selection. The view sends every
+pointer event to the Ghostty encoder when reporting is active and lets Ghostty
+decide what the active mode reports:
+
+- Motion is sent on every move with `None` as the button when nothing is held.
+  Ghostty's encoder drops it in mode 1000, requires a button in 1002, and
+  reports hover motion in 1003. The old view required `pressed_button`, so
+  1003 any-motion never worked.
+- The view tracks held buttons and passes `any_button_pressed` to the encoder.
+  Without it, Ghostty silently drops a drag once the pointer leaves the
+  surface — the reported bug for TUI drag interactions.
+- Right/middle buttons do not start a local selection when reporting is off;
+  they belong to the platform context menu. Only the left button selects.
+- Mouse moves call `stop_propagation()` once handled so they do not leak into
+  the Silvestris window frame.
 
 ## 14. Scrollback
 

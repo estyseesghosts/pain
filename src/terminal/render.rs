@@ -5,7 +5,7 @@
 //! paint only consumes precomputed quads and shaped lines. No cell widgets,
 //! scroll container, or second grid model are created.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::sync::Arc;
 
 use gpui::{
@@ -24,8 +24,8 @@ use crate::terminal::geometry::{
 };
 use crate::terminal::ghostty::{Cursor, KeyEvent};
 use crate::terminal::input::{
-    font_command, key_for_keystroke, FontCommand, Modifiers as InputModifiers, MouseAction,
-    MouseButton as PtyButton,
+    font_command, is_app_shortcut, key_for_keystroke, mouse_escape, FontCommand,
+    Modifiers as InputModifiers, MouseAction, MouseButton as PtyButton,
 };
 use crate::terminal::selection::{
     accumulate_wheel, line_bounds, scrollbar_geometry, scrollbar_row_at, wheel_button,
@@ -79,6 +79,9 @@ pub struct TerminalView {
     /// Ghostty-derived scrollbar thumb, recomputed once in prepaint.
     scrollbar: RefCell<Option<ScrollbarGeometry>>,
     scrollbar_drag: bool,
+    /// Which pointer buttons are held, as bits from `PtyButton::bit`. Ghostty
+    /// needs this to keep reporting drags that leave the terminal surface.
+    held_mouse: Cell<u8>,
 }
 
 impl TerminalView {
@@ -99,6 +102,7 @@ impl TerminalView {
             scroll_remainder: 0.0,
             scrollbar: RefCell::new(None),
             scrollbar_drag: false,
+            held_mouse: Cell::new(0),
         }
     }
 
@@ -166,6 +170,12 @@ impl TerminalView {
         }
         let m = event.keystroke.modifiers;
         let mods = InputModifiers::new(m.shift, m.control, m.alt, m.platform);
+        // GPUI dispatches these bindings before this listener. Let the action
+        // own the key entirely; encoding it too would send a stray sequence
+        // to the PTY after a clipboard copy or paste.
+        if is_app_shortcut(name, mods) {
+            return;
+        }
         // The pure policy decides whether this key belongs to Ghostty's
         // encoder or to the platform's native text handler, and always keeps
         // the committed text for printable keys such as space.
@@ -228,6 +238,7 @@ impl TerminalView {
                     mods.ghostty_bits(),
                     px,
                     py,
+                    self.held_mouse.get() != 0,
                     u32::from(w),
                     u32::from(h),
                     self.geometry.borrow().cell_width.max(1.0) as u32,
@@ -317,31 +328,37 @@ impl TerminalView {
         let Some(button) = pty_button(event.button) else {
             return;
         };
+        self.held_mouse.set(self.held_mouse.get() | button.bit());
+        let held = self.held_mouse.get() != 0;
         let tracking = self.session.mouse_tracking_enabled().unwrap_or(false);
-        if tracking && !mods.super_key {
+        if tracking && !mouse_escape(mods) {
             let _ = self.session.encode_mouse(
                 MouseAction::Press.ghostty(),
                 button.ghostty(),
                 mods.ghostty_bits(),
                 px,
                 py,
+                held,
                 u32::from(w),
                 u32::from(h),
                 self.geometry.borrow().cell_width.max(1.0) as u32,
                 self.geometry.borrow().line_height.max(1.0) as u32,
             );
-        } else {
+            cx.stop_propagation();
+        } else if button == PtyButton::Left {
+            // Only the left button starts a local selection. Right/middle with
+            // reporting off belong to the platform (context menu), not Ghostty.
             *self.selection_anchor.borrow_mut() = Some((x, y));
             self.select_gesture(x, y, event.click_count);
+            cx.stop_propagation();
         }
-        cx.stop_propagation();
     }
 
     fn on_mouse_move(
         &mut self,
         event: &MouseMoveEvent,
         _window: &mut Window,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) {
         if self.scrollbar_drag {
             if let (Some(bar), Ok(state)) = (*self.scrollbar.borrow(), self.session.scrollbar()) {
@@ -349,11 +366,16 @@ impl TerminalView {
                     scrollbar_row_at(&bar, f32::from(event.position.y), state.total, state.len);
                 let _ = self.session.scroll_to_row(row);
             }
+            cx.stop_propagation();
             return;
         }
         let (x, y, w, h, px, py, mods) = self.mouse_event(event.position, event.modifiers);
+        let held = self.held_mouse.get() != 0;
         let tracking = self.session.mouse_tracking_enabled().unwrap_or(false);
-        if tracking && event.pressed_button.is_some() && !mods.super_key {
+        if tracking && !mouse_escape(mods) {
+            // Ghostty decides whether this motion is reported: mode 1000 drops
+            // all motion, 1002 requires a held button, 1003 reports hover too.
+            // A `None` button is the correct "motion, nothing held" encoding.
             let button = event
                 .pressed_button
                 .and_then(pty_button)
@@ -364,13 +386,16 @@ impl TerminalView {
                 mods.ghostty_bits(),
                 px,
                 py,
+                held,
                 u32::from(w),
                 u32::from(h),
                 self.geometry.borrow().cell_width.max(1.0) as u32,
                 self.geometry.borrow().line_height.max(1.0) as u32,
             );
+            cx.stop_propagation();
         } else if let Some((start_x, start_y)) = *self.selection_anchor.borrow() {
             let _ = self.session.select_between(start_x, start_y, x, y);
+            cx.stop_propagation();
         }
     }
 
@@ -384,23 +409,27 @@ impl TerminalView {
         let Some(button) = pty_button(event.button) else {
             return;
         };
+        self.held_mouse.set(self.held_mouse.get() & !button.bit());
+        let held = self.held_mouse.get() != 0;
         let tracking = self.session.mouse_tracking_enabled().unwrap_or(false);
-        if tracking && !mods.super_key {
+        if tracking && !mouse_escape(mods) {
             let _ = self.session.encode_mouse(
                 MouseAction::Release.ghostty(),
                 button.ghostty(),
                 mods.ghostty_bits(),
                 px,
                 py,
+                held,
                 u32::from(w),
                 u32::from(h),
                 self.geometry.borrow().cell_width.max(1.0) as u32,
                 self.geometry.borrow().line_height.max(1.0) as u32,
             );
-        } else {
+            cx.stop_propagation();
+        } else if button == PtyButton::Left {
             *self.selection_anchor.borrow_mut() = None;
+            cx.stop_propagation();
         }
-        cx.stop_propagation();
     }
 }
 

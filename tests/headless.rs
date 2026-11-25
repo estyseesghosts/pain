@@ -109,6 +109,83 @@ fn keyboard_policy_reaches_the_pty_correctly() {
     assert_eq!(session.drain_writer(8), vec![vec![0x03]]);
 }
 
+/// Mouse reporting must be decided by Ghostty's current modes, not by a Rust
+/// mode table in the view. The view now sends every motion (with `None` when no
+/// button is held); the encoder drops it in modes 1000/1002 and reports it in
+/// 1003. This guards the "mouse reporting feels off" regression.
+#[test]
+fn mouse_motion_follows_terminal_tracking_modes() {
+    use pain::terminal::input::{MouseAction, MouseButton};
+
+    let session = TerminalSession::new(80, 24, Box::new(NoopWakeup)).expect("session");
+    let encode = |session: &TerminalSession, button, held, x, y| {
+        session
+            .encode_mouse(
+                MouseAction::Motion.ghostty(),
+                button,
+                0,
+                x,
+                y,
+                held,
+                800,
+                600,
+                10,
+                25,
+            )
+            .expect("encode motion")
+    };
+
+    // No tracking: nothing is ever reported.
+    assert!(encode(&session, None, false, 100.0, 100.0).is_empty());
+
+    // 1003 any-event + 1006 SGR: hover motion with no button is a real report.
+    session.write_vt(b"\x1b[?1003h\x1b[?1006h");
+    let hover = encode(&session, None, false, 100.0, 100.0);
+    assert!(
+        hover.starts_with(b"\x1b[<35;"),
+        "any-motion should be SGR button 35, got {hover:?}"
+    );
+    assert!(hover.ends_with(b"M"));
+
+    // A drag that leaves the surface is only reported when a button is held.
+    let outside = encode(&session, None, true, -5.0, 100.0);
+    assert!(
+        !outside.is_empty(),
+        "held drag outside viewport must report"
+    );
+    let outside_no_button = encode(&session, None, false, -5.0, 200.0);
+    assert!(
+        outside_no_button.is_empty(),
+        "unheld motion outside viewport must be dropped"
+    );
+
+    // 1002 button-event: hover is dropped, a held-button drag is reported.
+    session.write_vt(b"\x1b[?1003l\x1b[?1002h");
+    assert!(encode(&session, None, false, 300.0, 300.0).is_empty());
+    let drag = encode(&session, MouseButton::Left.ghostty(), true, 300.0, 300.0);
+    assert!(
+        drag.starts_with(b"\x1b[<32;"),
+        "left drag should be SGR button 32, got {drag:?}"
+    );
+}
+
+/// Clipboard paste must use Ghostty's bracketed-paste policy, never a raw
+/// write. The action path calls exactly this method on both platforms.
+#[test]
+fn clipboard_paste_uses_bracketed_mode() {
+    let session = TerminalSession::new(80, 24, Box::new(NoopWakeup)).expect("session");
+    let plain = session.paste("hello").expect("plain paste");
+    assert_eq!(plain, b"hello");
+
+    session.write_vt(b"\x1b[?2004h");
+    let bracketed = session.paste("hello").expect("bracketed paste");
+    assert_eq!(bracketed, b"\x1b[200~hello\x1b[201~");
+    assert_eq!(
+        session.drain_writer(8),
+        vec![b"hello".to_vec(), bracketed.clone()]
+    );
+}
+
 fn line_text(snapshot: &RenderSnapshot, y: usize) -> String {
     snapshot.lines[y]
         .iter()

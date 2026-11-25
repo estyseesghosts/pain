@@ -19,11 +19,15 @@ Run the manual half on each platform before calling a build shippable.
 5. Produce more than a screen of output. Wheel up scrolls history, wheel down
    returns to the active area; the thumb on the right follows.
 6. Drag select text, double-click a word, triple-click a line, then
-   `Ctrl+Shift+C`. Paste with `Ctrl+Shift+V` inside the shell and confirm the
-   text arrives as one bracketed paste.
+   `Ctrl+Shift+C`. Paste with both `Ctrl+Shift+V` and `Shift+Insert` inside the
+   shell and confirm the text arrives as one bracketed paste, with no extra
+   escape sequence reaching the shell after the copy.
 7. `Ctrl+Shift+A` selects all; copying it yields the whole buffer.
-8. In `vim` with mouse mode enabled, wheel and drag are reported to the child;
-   holding the platform/Super key keeps selection local.
+8. In `vim` (or a TUI requesting mode 1003/any-motion) with mouse enabled:
+   wheel and drag are reported to the child, hovering moves the cursor, and a
+   drag that leaves the surface keeps reporting. Holding Shift (or Super)
+   keeps selection local instead. Right-click with reporting off is left to the
+   platform context menu.
 9. Set a title with `printf '\033]0;smoke title\007'` and confirm the window
    title changes. Clear it and confirm the `pain` fallback returns.
 10. Close the window. The child shell exits, no process is left behind, and the

@@ -1436,6 +1436,20 @@ impl MouseEncoder {
         })
     }
 
+    /// Reflect whether a button is held. Ghostty uses this to keep reporting a
+    /// drag after the pointer leaves the terminal surface; without it those
+    /// motion events are silently dropped.
+    pub fn set_any_button_pressed(&mut self, pressed: bool) -> Result<(), GhosttyError> {
+        // SAFETY: the option's value type is `bool`; Ghostty copies it.
+        check(unsafe {
+            sys::ghostty_mouse_encoder_set(
+                self.as_raw(),
+                sys::GHOSTTY_MOUSE_ENCODER_OPT_ANY_BUTTON_PRESSED,
+                &pressed as *const bool as *const c_void,
+            )
+        })
+    }
+
     /// Encode an event. Returns zero bytes when tracking is off or deduplicated.
     pub fn encode(&mut self, event: &MouseEvent, buf: &mut [u8]) -> Result<usize, GhosttyError> {
         let mut written = 0usize;

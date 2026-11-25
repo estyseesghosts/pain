@@ -215,6 +215,10 @@ pub fn run() {
             gpui::KeyBinding::new("ctrl-0", ResetFont, None),
             gpui::KeyBinding::new("ctrl-shift-c", CopySelection, None),
             gpui::KeyBinding::new("ctrl-shift-v", PasteClipboard, None),
+            // Shift+Insert is the portable paste binding on both Windows and
+            // Linux (Zed's pinned terminal keymaps use it too). Ctrl+V stays a
+            // terminal control byte: shells use it for quoted-insert.
+            gpui::KeyBinding::new("shift-insert", PasteClipboard, None),
             gpui::KeyBinding::new("ctrl-shift-a", SelectAllTerminal, None),
         ]);
         install_actions(cx, &view);
@@ -280,6 +284,10 @@ fn install_actions(cx: &mut App, window: &gpui::WindowHandle<AppView>) {
             if !command_reaches_app(&app.chain, &CommandId::new(INCREASE_FONT), window, cx) {
                 return;
             }
+            // GPUI dispatches bindings before the terminal's key listener.
+            // Claim the event here so the view does not apply the same step
+            // again (and does not encode the key into the PTY).
+            cx.stop_propagation();
             app.terminal
                 .update(cx, |terminal, cx| terminal.adjust_font(FONT_SIZE_STEP, cx));
         });
@@ -290,6 +298,7 @@ fn install_actions(cx: &mut App, window: &gpui::WindowHandle<AppView>) {
             if !command_reaches_app(&app.chain, &CommandId::new(DECREASE_FONT), window, cx) {
                 return;
             }
+            cx.stop_propagation();
             app.terminal
                 .update(cx, |terminal, cx| terminal.adjust_font(-FONT_SIZE_STEP, cx));
         });
@@ -301,6 +310,7 @@ fn install_actions(cx: &mut App, window: &gpui::WindowHandle<AppView>) {
             if !command_reaches_app(&app.chain, &CommandId::new(RESET_FONT), window, cx) {
                 return;
             }
+            cx.stop_propagation();
             app.terminal
                 .update(cx, |terminal, cx| terminal.set_font_size(default_size, cx));
         });
@@ -311,6 +321,7 @@ fn install_actions(cx: &mut App, window: &gpui::WindowHandle<AppView>) {
             if !command_reaches_app(&app.chain, &CommandId::new(COPY_SELECTION), window, cx) {
                 return;
             }
+            cx.stop_propagation();
             match app.terminal.read(cx).session().copy_selection() {
                 Ok(text) if !text.is_empty() => {
                     cx.write_to_clipboard(ClipboardItem::new_string(text));
@@ -329,6 +340,7 @@ fn install_actions(cx: &mut App, window: &gpui::WindowHandle<AppView>) {
             if !command_reaches_app(&app.chain, &CommandId::new(PASTE_CLIPBOARD), window, cx) {
                 return;
             }
+            cx.stop_propagation();
             if let Err(error) = app.terminal.read(cx).session().paste(&text) {
                 log::error("paste", &format!("paste failed: {error}"));
             }
@@ -340,6 +352,7 @@ fn install_actions(cx: &mut App, window: &gpui::WindowHandle<AppView>) {
             if !command_reaches_app(&app.chain, &CommandId::new(SELECT_ALL), window, cx) {
                 return;
             }
+            cx.stop_propagation();
             if let Err(error) = app.terminal.read(cx).session().select_all() {
                 log::error("selection", &format!("select all failed: {error}"));
             }

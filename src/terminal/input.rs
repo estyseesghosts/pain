@@ -239,6 +239,34 @@ pub fn key_for_keystroke(
     })
 }
 
+/// Keys bound to application commands rather than the PTY. GPUI dispatches
+/// these bindings before the terminal's `on_key_down` listener; the view must
+/// not also encode them, or a Ctrl+Shift+C in a TUI becomes a stray escape
+/// sequence after the clipboard copy. Zed's pinned keymaps use the same
+/// bindings for the terminal: Ctrl+Shift+C/V and Shift+Insert.
+#[must_use]
+pub fn is_app_shortcut(name: &str, mods: Modifiers) -> bool {
+    let exact = |expected: &str, ctrl: bool, shift: bool| {
+        name == expected
+            && mods.control == ctrl
+            && mods.shift == shift
+            && !mods.alt
+            && !mods.super_key
+    };
+    exact("c", true, true) // Ctrl+Shift+C: copy
+        || exact("v", true, true) // Ctrl+Shift+V: paste
+        || exact("a", true, true) // Ctrl+Shift+A: select all
+        || (name == "insert" && mods.shift && !mods.control && !mods.alt && !mods.super_key)
+}
+
+/// True when the user is asking for local selection instead of terminal mouse
+/// reporting. Shift is the conventional override (xterm/kitty); Super is kept
+/// as a second explicit escape because it is already the platform menu key.
+#[must_use]
+pub fn mouse_escape(mods: Modifiers) -> bool {
+    mods.shift || mods.super_key
+}
+
 fn key_for_ascii(ch: char) -> Option<i32> {
     let key = match ch.to_ascii_lowercase() {
         '`' => sys::GHOSTTY_KEY_BACKQUOTE,
@@ -329,6 +357,19 @@ impl MouseButton {
             Self::Right => Some(sys::GHOSTTY_MOUSE_BUTTON_RIGHT),
             Self::Middle => Some(sys::GHOSTTY_MOUSE_BUTTON_MIDDLE),
             Self::None => None,
+        }
+    }
+
+    /// Bit used to track which buttons are currently held. Ghostty needs this
+    /// as `any_button_pressed` so drags that leave the surface are still
+    /// reported in motion-tracking modes.
+    #[must_use]
+    pub fn bit(self) -> u8 {
+        match self {
+            Self::Left => 1,
+            Self::Right => 2,
+            Self::Middle => 4,
+            Self::None => 0,
         }
     }
 }
@@ -499,5 +540,51 @@ mod tests {
             Some(sys::GHOSTTY_MOUSE_BUTTON_LEFT)
         );
         assert_eq!(MouseButton::None.ghostty(), None);
+    }
+
+    #[test]
+    fn app_shortcuts_are_not_key_sequences_for_the_pty() {
+        assert!(is_app_shortcut(
+            "c",
+            Modifiers::new(true, true, false, false)
+        ));
+        assert!(is_app_shortcut(
+            "v",
+            Modifiers::new(true, true, false, false)
+        ));
+        assert!(is_app_shortcut(
+            "a",
+            Modifiers::new(true, true, false, false)
+        ));
+        assert!(is_app_shortcut(
+            "insert",
+            Modifiers::new(true, false, false, false)
+        ));
+        // Plain Ctrl+C and unmodified keys still belong to the PTY.
+        assert!(!is_app_shortcut(
+            "c",
+            Modifiers::new(false, true, false, false)
+        ));
+        assert!(!is_app_shortcut("c", Modifiers::default()));
+        assert!(!is_app_shortcut("insert", Modifiers::default()));
+    }
+
+    #[test]
+    fn shift_or_super_requests_local_mouse_selection() {
+        assert!(!mouse_escape(Modifiers::default()));
+        assert!(mouse_escape(Modifiers::new(true, false, false, false)));
+        assert!(mouse_escape(Modifiers::new(false, false, false, true)));
+        assert!(!mouse_escape(Modifiers::new(false, true, false, false)));
+    }
+
+    #[test]
+    fn held_mouse_buttons_have_distinct_bits() {
+        let bits = [
+            MouseButton::Left.bit(),
+            MouseButton::Right.bit(),
+            MouseButton::Middle.bit(),
+        ];
+        assert_eq!(bits, [1, 2, 4]);
+        assert_eq!(MouseButton::None.bit(), 0);
     }
 }

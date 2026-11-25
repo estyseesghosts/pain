@@ -618,6 +618,7 @@ impl TerminalSession {
         mods: u16,
         x: f32,
         y: f32,
+        any_button_pressed: bool,
         screen_width: u32,
         screen_height: u32,
         cell_width: u32,
@@ -630,6 +631,7 @@ impl TerminalSession {
             encoder.sync_from_terminal(&terminal)?;
         }
         encoder.track_last_cell(true)?;
+        encoder.set_any_button_pressed(any_button_pressed)?;
         let mut size = sys::GhosttyMouseEncoderSize::sized();
         size.screen_width = screen_width;
         size.screen_height = screen_height;
