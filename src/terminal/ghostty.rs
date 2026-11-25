@@ -254,10 +254,7 @@ impl GhosttyTerminal {
 
     /// Query a terminal mode (e.g. bracketed paste) from Ghostty state.
     pub fn mode(&self, mode: u16) -> Result<bool, GhosttyError> {
-        let mut query = sys::GhosttyTerminalModeConfig {
-            mode,
-            value: false,
-        };
+        let mut query = sys::GhosttyTerminalModeConfig { mode, value: false };
         // SAFETY: the query struct has the frozen layout documented by the C
         // header and the terminal handle is valid for this call.
         check(unsafe {
@@ -288,7 +285,12 @@ impl GhosttyTerminal {
 
     /// Select an inclusive viewport range on one row. Used by the M1 selection
     /// fixture so selection comes from Ghostty rather than a second model.
-    pub fn set_row_selection(&mut self, y: u16, start_x: u16, end_x: u16) -> Result<(), GhosttyError> {
+    pub fn set_row_selection(
+        &mut self,
+        y: u16,
+        start_x: u16,
+        end_x: u16,
+    ) -> Result<(), GhosttyError> {
         let mut start = sys::GhosttyGridRef::default();
         let mut end = sys::GhosttyGridRef::default();
         // SAFETY: both out-parameters are valid and the points name viewport
@@ -552,11 +554,7 @@ impl GhosttyTerminal {
         // SAFETY: `userdata` is a strong Arc reference kept alive by the token
         // and by the terminal option until both are torn down.
         let result = unsafe {
-            sys::ghostty_terminal_set(
-                self.as_raw(),
-                sys::GHOSTTY_TERMINAL_OPT_USERDATA,
-                userdata,
-            )
+            sys::ghostty_terminal_set(self.as_raw(), sys::GHOSTTY_TERMINAL_OPT_USERDATA, userdata)
         };
         if let Err(error) = check(result) {
             // SAFETY: reclaim the reference because installation failed.
@@ -566,12 +564,16 @@ impl GhosttyTerminal {
         // SAFETY: each function pointer matches the callback signature Ghostty
         // documents for its option; Ghostty copies the pointers.
         for (option, callback) in [
-            (sys::GHOSTTY_TERMINAL_OPT_WRITE_PTY, write_pty_callback as *const c_void),
-            (sys::GHOSTTY_TERMINAL_OPT_TITLE_CHANGED, title_changed_callback as *const c_void),
+            (
+                sys::GHOSTTY_TERMINAL_OPT_WRITE_PTY,
+                write_pty_callback as *const c_void,
+            ),
+            (
+                sys::GHOSTTY_TERMINAL_OPT_TITLE_CHANGED,
+                title_changed_callback as *const c_void,
+            ),
         ] {
-            let result = unsafe {
-                sys::ghostty_terminal_set(self.as_raw(), option, callback)
-            };
+            let result = unsafe { sys::ghostty_terminal_set(self.as_raw(), option, callback) };
             if let Err(error) = check(result) {
                 // SAFETY: clear userdata so Ghostty holds no stale pointer.
                 unsafe {
@@ -627,10 +629,7 @@ unsafe extern "C" fn write_pty_callback(
 
 /// `GhosttyTerminalTitleChangedFn`: copy the borrowed title and hand it to the
 /// sink. The sink only posts to the UI; it must not call back into Ghostty.
-unsafe extern "C" fn title_changed_callback(
-    terminal: sys::GhosttyTerminal,
-    userdata: *mut c_void,
-) {
+unsafe extern "C" fn title_changed_callback(terminal: sys::GhosttyTerminal, userdata: *mut c_void) {
     if userdata.is_null() || terminal.is_null() {
         return;
     }
@@ -1355,12 +1354,15 @@ impl MouseEncoder {
     }
 
     fn as_raw(&self) -> sys::GhosttyMouseEncoder {
-        self.raw.expect("owned mouse encoder handle is still present")
+        self.raw
+            .expect("owned mouse encoder handle is still present")
     }
 
     pub fn sync_from_terminal(&mut self, terminal: &GhosttyTerminal) -> Result<(), GhosttyError> {
         // SAFETY: both handles are valid and the terminal is not mutated here.
-        check(unsafe { sys::ghostty_mouse_encoder_set_from_terminal(self.as_raw(), terminal.as_raw()) })
+        check(unsafe {
+            sys::ghostty_mouse_encoder_set_from_terminal(self.as_raw(), terminal.as_raw())
+        })
     }
 
     pub fn set_size(&mut self, size: &sys::GhosttyMouseEncoderSize) -> Result<(), GhosttyError> {
@@ -1461,10 +1463,7 @@ impl MouseEvent {
         }
         check(unsafe { sys::ghostty_mouse_event_set_mods(self.as_raw(), mods) })?;
         check(unsafe {
-            sys::ghostty_mouse_event_set_position(
-                self.as_raw(),
-                sys::GhosttyMousePosition { x, y },
-            )
+            sys::ghostty_mouse_event_set_position(self.as_raw(), sys::GhosttyMousePosition { x, y })
         })
     }
 }

@@ -190,10 +190,7 @@ mod tests {
             })
         );
         assert_eq!(shell_from_args(&["pain".into()]), None);
-        assert_eq!(
-            shell_from_args(&["pain".into(), "--shell".into()]),
-            None
-        );
+        assert_eq!(shell_from_args(&["pain".into(), "--shell".into()]), None);
     }
 
     #[test]

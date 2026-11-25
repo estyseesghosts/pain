@@ -37,7 +37,10 @@ fn m1_canned_fixtures_render_styled_wide_and_selected_cells() {
                 assert!(snapshot.lines[0].iter().any(|c| c.style.underline() != 0));
             }
             Fixture::Selection => {
-                assert_eq!(snapshot.selections[0].map(|s| (s.start_x, s.end_x)), Some((0, 7)));
+                assert_eq!(
+                    snapshot.selections[0].map(|s| (s.start_x, s.end_x)),
+                    Some((0, 7))
+                );
                 assert!(snapshot.lines[0][0].selected);
                 assert!(!snapshot.lines[0][8].selected);
                 assert_eq!(selection_span(snapshot.selections[0]), Some((0, 8)));

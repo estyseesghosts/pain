@@ -6,13 +6,17 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use gpui::{App, AppContext, Bounds, ClipboardItem, Entity, IntoElement, Render, SharedString, Window};
+use gpui::{
+    App, AppContext, Bounds, ClipboardItem, Entity, IntoElement, Render, SharedString, Window,
+};
 use silvestris::chrome::{open_window, window_options, WindowFrame};
+use silvestris::core::command::CommandId;
+use silvestris::responder::{ResponderChain, ResponderEntry, ResponderScope};
 use silvestris::{ActiveTheme, ThemePreference};
 
 use crate::config::{parse_args, usage, version_line};
 use crate::log;
-use crate::platform::{default_shell, spawn_pty, PtyConfig, PlatformPty};
+use crate::platform::{default_shell, spawn_pty, PlatformPty, PtyConfig};
 use crate::terminal::fixtures::Fixture;
 use crate::terminal::geometry::FONT_SIZE_STEP;
 use crate::terminal::render::TerminalView;
@@ -30,6 +34,30 @@ gpui::actions!(
         SelectAllTerminal
     ]
 );
+
+const INCREASE_FONT: &str = "pain.increase-font";
+const DECREASE_FONT: &str = "pain.decrease-font";
+const RESET_FONT: &str = "pain.reset-font";
+const COPY_SELECTION: &str = "pain.copy-selection";
+const PASTE_CLIPBOARD: &str = "pain.paste-clipboard";
+const SELECT_ALL: &str = "pain.select-all";
+
+/// The only commands allowed out of a focused terminal canvas.
+fn whitelisted_commands() -> [CommandId; 6] {
+    [
+        CommandId::new(INCREASE_FONT),
+        CommandId::new(DECREASE_FONT),
+        CommandId::new(RESET_FONT),
+        CommandId::new(COPY_SELECTION),
+        CommandId::new(PASTE_CLIPBOARD),
+        CommandId::new(SELECT_ALL),
+    ]
+}
+
+/// True when the focused responder does not claim this app command.
+fn command_reaches_app(chain: &ResponderChain, id: &CommandId, window: &Window, cx: &App) -> bool {
+    chain.resolve(id, window, cx).is_none()
+}
 
 /// Start the one-window app with a live shell by default.
 pub fn run() {
@@ -141,14 +169,30 @@ pub fn run() {
         }
 
         let bounds = Bounds::centered(None, gpui::size(gpui::px(1040.), gpui::px(660.)), cx);
-        let options = window_options("pain", bounds, gpui::size(gpui::px(480.), gpui::px(320.)), cx);
+        let options = window_options(
+            "pain",
+            bounds,
+            gpui::size(gpui::px(480.), gpui::px(320.)),
+            cx,
+        );
         let holder_for_view = Arc::clone(&pty_holder);
         let view = open_window(options, cx, |window: &mut Window, cx| {
             let terminal = cx.new(|cx| TerminalView::new(Arc::clone(&session), window, cx));
+            // Silvestris responder policy: a focused terminal canvas captures
+            // every command except the six app-owned ones. GPUI still owns key
+            // dispatch; this chain decides which app commands may fire.
+            let focus = terminal.read(cx).focus();
+            let mut chain = ResponderChain::new();
+            chain.push(
+                ResponderEntry::custom(ResponderScope::Control, "terminal-canvas")
+                    .when_focused(&focus)
+                    .capture_keys(whitelisted_commands()),
+            );
             cx.new(|_| AppView {
                 terminal,
                 pty: holder_for_view,
                 title: SharedString::from("pain"),
+                chain,
             })
         })
         .expect("open terminal window");
@@ -232,14 +276,20 @@ pub fn run() {
 fn install_actions(cx: &mut App, window: &gpui::WindowHandle<AppView>) {
     let w = window.clone();
     cx.on_action(move |_: &IncreaseFont, cx| {
-        let _ = w.update(cx, |app, _, cx| {
+        let _ = w.update(cx, |app, window, cx| {
+            if !command_reaches_app(&app.chain, &CommandId::new(INCREASE_FONT), window, cx) {
+                return;
+            }
             app.terminal
                 .update(cx, |terminal, cx| terminal.adjust_font(FONT_SIZE_STEP, cx));
         });
     });
     let w = window.clone();
     cx.on_action(move |_: &DecreaseFont, cx| {
-        let _ = w.update(cx, |app, _, cx| {
+        let _ = w.update(cx, |app, window, cx| {
+            if !command_reaches_app(&app.chain, &CommandId::new(DECREASE_FONT), window, cx) {
+                return;
+            }
             app.terminal
                 .update(cx, |terminal, cx| terminal.adjust_font(-FONT_SIZE_STEP, cx));
         });
@@ -247,14 +297,20 @@ fn install_actions(cx: &mut App, window: &gpui::WindowHandle<AppView>) {
     let w = window.clone();
     cx.on_action(move |_: &ResetFont, cx| {
         let default_size = cx.theme().type_.size_mono;
-        let _ = w.update(cx, |app, _, cx| {
+        let _ = w.update(cx, |app, window, cx| {
+            if !command_reaches_app(&app.chain, &CommandId::new(RESET_FONT), window, cx) {
+                return;
+            }
             app.terminal
                 .update(cx, |terminal, cx| terminal.set_font_size(default_size, cx));
         });
     });
     let w = window.clone();
     cx.on_action(move |_: &CopySelection, cx| {
-        let _ = w.update(cx, |app, _, cx| {
+        let _ = w.update(cx, |app, window, cx| {
+            if !command_reaches_app(&app.chain, &CommandId::new(COPY_SELECTION), window, cx) {
+                return;
+            }
             match app.terminal.read(cx).session().copy_selection() {
                 Ok(text) if !text.is_empty() => {
                     cx.write_to_clipboard(ClipboardItem::new_string(text));
@@ -269,7 +325,10 @@ fn install_actions(cx: &mut App, window: &gpui::WindowHandle<AppView>) {
         let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
             return;
         };
-        let _ = w.update(cx, |app, _, cx| {
+        let _ = w.update(cx, |app, window, cx| {
+            if !command_reaches_app(&app.chain, &CommandId::new(PASTE_CLIPBOARD), window, cx) {
+                return;
+            }
             if let Err(error) = app.terminal.read(cx).session().paste(&text) {
                 log::error("paste", &format!("paste failed: {error}"));
             }
@@ -277,7 +336,10 @@ fn install_actions(cx: &mut App, window: &gpui::WindowHandle<AppView>) {
     });
     let w = window.clone();
     cx.on_action(move |_: &SelectAllTerminal, cx| {
-        let _ = w.update(cx, |app, _, cx| {
+        let _ = w.update(cx, |app, window, cx| {
+            if !command_reaches_app(&app.chain, &CommandId::new(SELECT_ALL), window, cx) {
+                return;
+            }
             if let Err(error) = app.terminal.read(cx).session().select_all() {
                 log::error("selection", &format!("select all failed: {error}"));
             }
@@ -291,6 +353,7 @@ struct AppView {
     #[allow(dead_code)]
     pty: Arc<Mutex<Option<Box<dyn PlatformPty>>>>,
     title: SharedString,
+    chain: ResponderChain,
 }
 
 impl Render for AppView {
@@ -301,6 +364,28 @@ impl Render for AppView {
 
 /// Synthetic byte producer: exactly the entry point a ConPTY/POSIX reader will
 /// use, but with fixture chunks instead of OS output.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn responder_allowlist_is_exactly_the_app_commands() {
+        let allowed = whitelisted_commands();
+        assert_eq!(allowed.len(), 6);
+        for expected in [
+            INCREASE_FONT,
+            DECREASE_FONT,
+            RESET_FONT,
+            COPY_SELECTION,
+            PASTE_CLIPBOARD,
+            SELECT_ALL,
+        ] {
+            assert!(allowed.iter().any(|id| id.as_str() == expected));
+        }
+        assert!(!allowed.iter().any(|id| id.as_str() == "edit.paste"));
+    }
+}
+
 fn start_producer(session: Arc<TerminalSession>, stop: Arc<AtomicBool>) {
     std::thread::Builder::new()
         .name("pain-fixture-producer".into())

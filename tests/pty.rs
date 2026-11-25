@@ -149,7 +149,10 @@ fn windows_conpty_runs_vim_alternate_screen_and_mouse_mode() {
     while Instant::now() < deadline && snapshot_text(&session).is_empty() {
         std::thread::sleep(Duration::from_millis(20));
     }
-    assert!(!snapshot_text(&session).is_empty(), "vim produced no output");
+    assert!(
+        !snapshot_text(&session).is_empty(),
+        "vim produced no output"
+    );
 
     // A mouse TUI enables tracking through a terminal mode report, which
     // Ghostty owns. The session must observe it without any Rust-side table.

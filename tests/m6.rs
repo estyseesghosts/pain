@@ -86,17 +86,16 @@ fn cursor_only_frame_rebuilds_no_rows() {
     let mut cache = RowCache::new(usize::from(snapshot.rows));
     // Prime the cache with the preceding complete frame.
     let _ = cache.rows_to_rebuild(1, sys::GHOSTTY_RENDER_STATE_DIRTY_FULL, &[]);
-    let rebuild = cache.rows_to_rebuild(
-        2,
-        snapshot.dirty,
-        &snapshot.dirty_rows,
-    );
+    let rebuild = cache.rows_to_rebuild(2, snapshot.dirty, &snapshot.dirty_rows);
 
     let counters = session.snapshot_counters();
     report("cursor-only", &counters);
     assert_eq!(snapshot.dirty, sys::GHOSTTY_RENDER_STATE_DIRTY_FALSE);
     assert!(snapshot.dirty_rows.is_empty());
-    assert!(rebuild.is_empty(), "cursor blink must not reshape visible rows");
+    assert!(
+        rebuild.is_empty(),
+        "cursor blink must not reshape visible rows"
+    );
     assert_eq!(counters.cursor_only_frames, 1);
 }
 

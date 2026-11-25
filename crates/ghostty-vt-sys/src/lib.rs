@@ -797,14 +797,8 @@ unsafe extern "C" {
         event: *mut GhosttyMouseEvent,
     ) -> GhosttyResult;
     pub fn ghostty_mouse_event_free(event: GhosttyMouseEvent);
-    pub fn ghostty_mouse_event_set_action(
-        event: GhosttyMouseEvent,
-        action: i32,
-    ) -> GhosttyResult;
-    pub fn ghostty_mouse_event_set_button(
-        event: GhosttyMouseEvent,
-        button: i32,
-    ) -> GhosttyResult;
+    pub fn ghostty_mouse_event_set_action(event: GhosttyMouseEvent, action: i32) -> GhosttyResult;
+    pub fn ghostty_mouse_event_set_button(event: GhosttyMouseEvent, button: i32) -> GhosttyResult;
     pub fn ghostty_mouse_event_clear_button(event: GhosttyMouseEvent) -> GhosttyResult;
     pub fn ghostty_mouse_event_set_mods(event: GhosttyMouseEvent, mods: u16) -> GhosttyResult;
     pub fn ghostty_mouse_event_set_position(

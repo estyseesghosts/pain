@@ -1,8 +1,10 @@
 # Release Smoke Checklist
 
 Automated coverage: `scripts/smoke.ps1` (Windows) and `scripts/smoke.sh`
-(Linux/WSLg) run the headless suite, the M6 stress counters, a release build and
-a one-window launch/close check. They never synthesize input on your desktop.
+(Linux/WSLg) run the headless suite, the M6 stress counters and a release build
+by default. They never synthesize input or foreground a window. The launch check
+is opt-in: pass `-Gui` on Windows or `--gui` on Linux only when you are not
+using the desktop at that moment.
 
 Run the manual half on each platform before calling a build shippable.
 

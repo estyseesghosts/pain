@@ -11,7 +11,7 @@ use std::thread::{self, JoinHandle};
 
 use libc::{c_int, pid_t};
 
-use super::{terminal_environment, PtyConfig, PtyError, PlatformPty};
+use super::{terminal_environment, PlatformPty, PtyConfig, PtyError};
 use crate::terminal::session::TerminalSession;
 
 /// `TIOCSWINSZ` payload derived from the terminal grid. Pixel dimensions are
@@ -316,7 +316,8 @@ impl PlatformPty for LinuxPty {
             return Ok(());
         }
         // SAFETY: the winsize value is POD and the master fd is alive.
-        let result = unsafe { libc::ioctl(self.master.raw(), libc::TIOCSWINSZ, &winsize_for(next)) };
+        let result =
+            unsafe { libc::ioctl(self.master.raw(), libc::TIOCSWINSZ, &winsize_for(next)) };
         if result != 0 {
             return Err(PtyError::new(
                 "TIOCSWINSZ",
@@ -359,7 +360,10 @@ mod tests {
 
     #[test]
     fn winsize_uses_grid_dimensions_only() {
-        let size = winsize_for(GridSize { cols: 132, rows: 43 });
+        let size = winsize_for(GridSize {
+            cols: 132,
+            rows: 43,
+        });
         assert_eq!(size.ws_col, 132);
         assert_eq!(size.ws_row, 43);
         assert_eq!(size.ws_xpixel, 0);

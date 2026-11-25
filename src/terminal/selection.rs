@@ -5,8 +5,8 @@
 //! event means. Keeping it free of GPUI and FFI makes the policies testable in
 //! headless builds and prevents a second terminal model from appearing.
 
-use crate::terminal::ghostty::Cell;
 use crate::terminal::geometry::display_columns;
+use crate::terminal::ghostty::Cell;
 
 /// Gesture selected by the number of consecutive clicks on one cell.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -142,7 +142,8 @@ pub fn scrollbar_geometry(
         .min(f64::from(height)) as f32;
     let max_offset = total - len;
     let travel = height - thumb_height;
-    let thumb_y = y + ((offset.min(max_offset) as f64 / max_offset as f64) * f64::from(travel)) as f32;
+    let thumb_y =
+        y + ((offset.min(max_offset) as f64 / max_offset as f64) * f64::from(travel)) as f32;
     Some(ScrollbarGeometry {
         track_x,
         track_y: y,
@@ -155,7 +156,12 @@ pub fn scrollbar_geometry(
 
 /// Map a pointer Y position on the track to an absolute Ghostty scrollbar row.
 #[must_use]
-pub fn scrollbar_row_at(geometry: &ScrollbarGeometry, pointer_y: f32, total: u64, len: u64) -> usize {
+pub fn scrollbar_row_at(
+    geometry: &ScrollbarGeometry,
+    pointer_y: f32,
+    total: u64,
+    len: u64,
+) -> usize {
     let max_offset = total.saturating_sub(len);
     if max_offset == 0 {
         return 0;
@@ -198,10 +204,22 @@ mod tests {
 
     #[test]
     fn click_count_selects_gesture() {
-        assert_eq!(SelectionGesture::from_click_count(1), SelectionGesture::Character);
-        assert_eq!(SelectionGesture::from_click_count(2), SelectionGesture::Word);
-        assert_eq!(SelectionGesture::from_click_count(3), SelectionGesture::Line);
-        assert_eq!(SelectionGesture::from_click_count(9), SelectionGesture::Line);
+        assert_eq!(
+            SelectionGesture::from_click_count(1),
+            SelectionGesture::Character
+        );
+        assert_eq!(
+            SelectionGesture::from_click_count(2),
+            SelectionGesture::Word
+        );
+        assert_eq!(
+            SelectionGesture::from_click_count(3),
+            SelectionGesture::Line
+        );
+        assert_eq!(
+            SelectionGesture::from_click_count(9),
+            SelectionGesture::Line
+        );
     }
 
     #[test]
@@ -248,8 +266,8 @@ mod tests {
             crate::terminal::ghostty::ghostty_vt_sys::GHOSTTY_MOUSE_BUTTON_FIVE
         );
         assert!(scrollbar_geometry(100, 0, 100, 0.0, 0.0, 400.0, 200.0).is_none());
-        let geometry = scrollbar_geometry(200, 50, 100, 0.0, 0.0, 400.0, 200.0)
-            .expect("history is present");
+        let geometry =
+            scrollbar_geometry(200, 50, 100, 0.0, 0.0, 400.0, 200.0).expect("history is present");
         assert!((geometry.track_x - 392.0).abs() < f32::EPSILON);
         assert!((geometry.thumb_height - 100.0).abs() < f32::EPSILON);
         assert!((geometry.thumb_y - 50.0).abs() < f32::EPSILON);

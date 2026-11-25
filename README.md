@@ -114,7 +114,9 @@ M0–M7 are implemented and smoke-tested on Windows and Linux/WSLg.
 - M5: `ghostty_terminal_scroll_viewport` drives wheel/trackpad history
   scrolling and a thin scrollbar view; mouse-reporting TUIs receive wheel
   reports instead. Double/triple click selects Ghostty-owned word/line ranges.
-  OSC 0/2 title effects update both window titles with a `pain` fallback.
+  OSC 0/2 title effects update both window titles with a `pain` fallback. A
+  Silvestris `ResponderChain` entry captures commands while the terminal canvas
+  is focused and lets only the six app-owned commands through.
 - M6: `tests/m6.rs` is the repeatable stress suite; its measured counters are
   recorded in [docs/PERFORMANCE.md](docs/PERFORMANCE.md). Scrollback caps are
   set deliberately (10,000 lines / 16 MiB by default), cursor-only frames do

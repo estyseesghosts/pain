@@ -9,27 +9,27 @@ use std::cell::RefCell;
 use std::sync::Arc;
 
 use gpui::{
-    div, fill, hsla, point, prelude::*, px, relative, rgba, size, App, Bounds, ClipboardItem, Context,
-    Element, ElementId, FocusHandle, Focusable, GlobalElementId, Hsla, InputHandler,
-    InspectorElementId, InteractiveElement, KeyContext, KeyDownEvent, LayoutId, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, Render, Rgba, ScrollDelta, ScrollEvent,
-    ShapedLine, SharedString, StrikethroughStyle, Style, TextAlign, TextRun, UTF16Selection,
-    UnderlineStyle, Window,
+    div, fill, hsla, point, prelude::*, px, relative, rgba, size, App, Bounds, ClipboardItem,
+    Context, Element, ElementId, FocusHandle, Focusable, GlobalElementId, Hsla, InputHandler,
+    InspectorElementId, InteractiveElement, KeyContext, KeyDownEvent, LayoutId, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, Render, Rgba,
+    ScrollDelta, ScrollEvent, ShapedLine, SharedString, StrikethroughStyle, Style, TextAlign,
+    TextRun, UTF16Selection, UnderlineStyle, Window,
 };
 use silvestris::ActiveTheme;
 
-use crate::terminal::ghostty::{Cursor, KeyEvent};
 use crate::terminal::geometry::{
     adjust_font_size, background_runs, batch_row, selection_span, BgRun, CellMetrics, RowCache,
     TextRun as CellRun,
 };
+use crate::terminal::ghostty::{Cursor, KeyEvent};
 use crate::terminal::input::{
-    font_command, key_for_name, FontCommand, MouseAction, MouseButton as PtyButton,
-    Modifiers as InputModifiers,
+    font_command, key_for_name, FontCommand, Modifiers as InputModifiers, MouseAction,
+    MouseButton as PtyButton,
 };
 use crate::terminal::selection::{
     accumulate_wheel, line_bounds, scrollbar_geometry, scrollbar_row_at, wheel_button,
-    SelectionGesture, ScrollbarGeometry,
+    ScrollbarGeometry, SelectionGesture,
 };
 use crate::terminal::session::{CountersHandle, TerminalSession};
 
@@ -105,6 +105,13 @@ impl TerminalView {
     #[must_use]
     pub fn session(&self) -> &Arc<TerminalSession> {
         &self.session
+    }
+
+    /// Focus handle used by the Silvestris responder chain to gate app
+    /// commands while the terminal canvas owns the keyboard.
+    #[must_use]
+    pub fn focus(&self) -> FocusHandle {
+        self.focus.clone()
     }
 
     /// Change the renderer's font size. `cx.notify()` schedules one repaint;
@@ -256,7 +263,11 @@ impl TerminalView {
         let _ = self.session.select_between(start as u16, y, end as u16, y);
     }
 
-    fn mouse_event(&self, position: Point<Pixels>, modifiers: gpui::Modifiers) -> (u16, u16, u16, u16, f32, f32, InputModifiers) {
+    fn mouse_event(
+        &self,
+        position: Point<Pixels>,
+        modifiers: gpui::Modifiers,
+    ) -> (u16, u16, u16, u16, f32, f32, InputModifiers) {
         let geometry = *self.geometry.borrow();
         let (x, y) = self.cell_at(position);
         let mods = InputModifiers::new(
@@ -335,12 +346,8 @@ impl TerminalView {
     ) {
         if self.scrollbar_drag {
             if let (Some(bar), Ok(state)) = (*self.scrollbar.borrow(), self.session.scrollbar()) {
-                let row = scrollbar_row_at(
-                    &bar,
-                    f32::from(event.position.y),
-                    state.total,
-                    state.len,
-                );
+                let row =
+                    scrollbar_row_at(&bar, f32::from(event.position.y), state.total, state.len);
                 let _ = self.session.scroll_to_row(row);
             }
             return;
@@ -514,28 +521,27 @@ impl Element for TerminalElement {
             origin: (f32::from(bounds.origin.x), f32::from(bounds.origin.y)),
             cell_width,
             line_height,
-            screen_width: (f32::from(bounds.size.width).max(0.0) as u32).min(u16::MAX as u32) as u16,
-            screen_height: (f32::from(bounds.size.height).max(0.0) as u32).min(u16::MAX as u32) as u16,
+            screen_width: (f32::from(bounds.size.width).max(0.0) as u32).min(u16::MAX as u32)
+                as u16,
+            screen_height: (f32::from(bounds.size.height).max(0.0) as u32).min(u16::MAX as u32)
+                as u16,
         };
         let (cols, rows) =
             metrics.grid_for(f32::from(bounds.size.width), f32::from(bounds.size.height));
 
         // The scrollbar thumb is a view over Ghostty's row counts, never a GPUI
         // ScrollHandle or a second history model.
-        let bar = session
-            .scrollbar()
-            .ok()
-            .and_then(|state| {
-                scrollbar_geometry(
-                    state.total,
-                    state.offset,
-                    state.len,
-                    f32::from(bounds.origin.x),
-                    f32::from(bounds.origin.y),
-                    f32::from(bounds.size.width),
-                    f32::from(bounds.size.height),
-                )
-            });
+        let bar = session.scrollbar().ok().and_then(|state| {
+            scrollbar_geometry(
+                state.total,
+                state.offset,
+                state.len,
+                f32::from(bounds.origin.x),
+                f32::from(bounds.origin.y),
+                f32::from(bounds.size.width),
+                f32::from(bounds.size.height),
+            )
+        });
         *view.scrollbar.borrow_mut() = bar;
 
         let origin_key = (f32::from(bounds.origin.x), f32::from(bounds.origin.y));
@@ -555,7 +561,9 @@ impl Element for TerminalElement {
                 && cache.cell_metrics == Some(metric_key)
                 && cache.rows.len() == usize::from(rows)
             {
-                counters.prepaint_micros(u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX));
+                counters.prepaint_micros(
+                    u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX),
+                );
                 return FrameState {
                     rows: cache.rows.clone(),
                     cursor: cache.cursor.clone(),
@@ -577,17 +585,18 @@ impl Element for TerminalElement {
         let snapshot = session.render_snapshot().expect("render snapshot");
         let (previous, rebuild, row_cache): (Vec<CachedRow>, Vec<usize>, RowCache) = {
             let mut cache = view.cache.borrow_mut();
-            let listed = cache.row_cache.rows_to_rebuild(
-                generation,
-                snapshot.dirty,
-                &snapshot.dirty_rows,
-            );
+            let listed =
+                cache
+                    .row_cache
+                    .rows_to_rebuild(generation, snapshot.dirty, &snapshot.dirty_rows);
             let invalid = cache.origin != origin_key
                 || cache.cell_metrics != Some(metric_key)
                 || cache.rows.len() != usize::from(rows);
             let rebuild = if invalid {
                 cache.row_cache = RowCache::new(usize::from(rows));
-                let _ = cache.row_cache.rows_to_rebuild(generation, snapshot.dirty, &[]);
+                let _ = cache
+                    .row_cache
+                    .rows_to_rebuild(generation, snapshot.dirty, &[]);
                 (0..usize::from(rows)).collect()
             } else {
                 listed
@@ -598,10 +607,7 @@ impl Element for TerminalElement {
         let palette = &snapshot.colors.palette;
         let default_bg = rgb(snapshot.colors.background);
         let default_fg = rgb(snapshot.colors.foreground);
-        let origin = (
-            f32::from(bounds.origin.x),
-            f32::from(bounds.origin.y),
-        );
+        let origin = (f32::from(bounds.origin.x), f32::from(bounds.origin.y));
 
         let mut built: Vec<CachedRow> = Vec::with_capacity(usize::from(rows));
         for y in 0..usize::from(rows) {
@@ -616,11 +622,14 @@ impl Element for TerminalElement {
             let mut quads = Vec::new();
             let mut lines = Vec::new();
 
-            for run_bg in background_runs(cells, default_spec(snapshot.colors.background), palette) {
+            for run_bg in background_runs(cells, default_spec(snapshot.colors.background), palette)
+            {
                 quads.push(bg_quad(&metrics, origin, y, run_bg));
                 counters.background_quads(1);
             }
-            if let Some((start_x, cells_len)) = selection_span(snapshot.selections.get(y).copied().flatten()) {
+            if let Some((start_x, cells_len)) =
+                selection_span(snapshot.selections.get(y).copied().flatten())
+            {
                 let (x, top, w, h) = metrics.span_bounds(origin, start_x, y as u16, cells_len);
                 quads.push(fill(
                     Bounds::new(point(px(x), px(top)), size(px(w), px(h))),
@@ -632,14 +641,7 @@ impl Element for TerminalElement {
             for run in batch_row(cells) {
                 let text: SharedString = run.text.clone().into();
                 let shape = shape_run(
-                    &run,
-                    text,
-                    &mono_font,
-                    font_size,
-                    &metrics,
-                    default_fg,
-                    window,
-                    &counters,
+                    &run, text, &mono_font, font_size, &metrics, default_fg, window, &counters,
                 );
                 let (x, top, _, _) = metrics.span_bounds(origin, run.start_col, y as u16, 1);
                 lines.push((point(px(x), px(top)), shape));
@@ -863,11 +865,7 @@ fn shape_run(
     if run.style.italic {
         font = font.italic();
     }
-    let color = run
-        .style
-        .foreground
-        .map(rgb)
-        .unwrap_or(default_fg);
+    let color = run.style.foreground.map(rgb).unwrap_or(default_fg);
     let underline = if run.style.underline == 0 {
         None
     } else {
@@ -896,9 +894,12 @@ fn shape_run(
     // GPUI's `force_width` is the advance assigned to EACH glyph cell, not
     // the total run width. Passing the run width spreads glyphs apart (Zed's
     // pinned terminal element also passes one cell width here).
-    let shaped = window
-        .text_system()
-        .shape_line(text.clone(), font_size, &[text_run], Some(px(metrics.cell_width)));
+    let shaped = window.text_system().shape_line(
+        text.clone(),
+        font_size,
+        &[text_run],
+        Some(px(metrics.cell_width)),
+    );
     counters.shape_line(text.len());
     shaped
 }

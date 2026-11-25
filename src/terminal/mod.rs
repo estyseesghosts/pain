@@ -14,8 +14,8 @@ pub mod writer;
 pub mod render;
 
 pub use ghostty::{
-    paste_encode, paste_is_safe, Cell, Colors, Cursor, GhosttyError, GhosttyRenderState,
-    CallbackRegistration, GhosttyTerminal, KeyEncoder, KeyEvent, MouseEncoder, MouseEvent,
+    paste_encode, paste_is_safe, CallbackRegistration, Cell, Colors, Cursor, GhosttyError,
+    GhosttyRenderState, GhosttyTerminal, KeyEncoder, KeyEvent, MouseEncoder, MouseEvent,
     RenderSnapshot, RowSelection, Style,
 };
 pub use session::{CountersSnapshot, TerminalSession, WakeupSink};

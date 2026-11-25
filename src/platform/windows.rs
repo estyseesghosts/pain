@@ -10,28 +10,28 @@ use std::thread::{self, JoinHandle};
 
 use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Foundation::{
-    CloseHandle, DuplicateHandle, HANDLE, GENERIC_READ, DUPLICATE_SAME_ACCESS,
+    CloseHandle, DuplicateHandle, DUPLICATE_SAME_ACCESS, GENERIC_READ, HANDLE,
 };
 use windows::Win32::Security::SECURITY_ATTRIBUTES;
 use windows::Win32::Storage::FileSystem::{
-    CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_FIRST_PIPE_INSTANCE, OPEN_EXISTING,
-    PIPE_ACCESS_OUTBOUND, SearchPathW,
+    CreateFileW, SearchPathW, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_FIRST_PIPE_INSTANCE, OPEN_EXISTING,
+    PIPE_ACCESS_OUTBOUND,
 };
-use windows::Win32::System::Pipes::{CreateNamedPipeW, PIPE_TYPE_BYTE};
 use windows::Win32::System::Console::{
     ClosePseudoConsole, CreatePseudoConsole, ResizePseudoConsole, COORD, HPCON,
 };
-use windows::Win32::System::IO::CancelSynchronousIo;
 use windows::Win32::System::Pipes::CreatePipe;
+use windows::Win32::System::Pipes::{CreateNamedPipeW, PIPE_TYPE_BYTE};
 use windows::Win32::System::Threading::{
     CreateProcessW, DeleteProcThreadAttributeList, GetCurrentProcess, GetCurrentThread,
     GetExitCodeProcess, InitializeProcThreadAttributeList, TerminateProcess,
-    UpdateProcThreadAttribute, WaitForSingleObject, LPPROC_THREAD_ATTRIBUTE_LIST,
-    PROCESS_INFORMATION, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, STARTUPINFOEXW,
-    CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT, INFINITE, STARTF_USESTDHANDLES,
+    UpdateProcThreadAttribute, WaitForSingleObject, CREATE_UNICODE_ENVIRONMENT,
+    EXTENDED_STARTUPINFO_PRESENT, INFINITE, LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION,
+    PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, STARTF_USESTDHANDLES, STARTUPINFOEXW,
 };
+use windows::Win32::System::IO::CancelSynchronousIo;
 
-use super::{terminal_environment, PtyConfig, PtyError, PlatformPty};
+use super::{terminal_environment, PlatformPty, PtyConfig, PtyError};
 use crate::terminal::session::TerminalSession;
 
 static NEXT_PIPE_ID: AtomicU32 = AtomicU32::new(0);
@@ -251,7 +251,9 @@ impl WindowsPty {
                 FILE_ATTRIBUTE_NORMAL,
                 None,
             )
-            .map_err(|error| PtyError::new("CreateFileW (conpty input)", error.message().to_string()))?
+            .map_err(|error| {
+                PtyError::new("CreateFileW (conpty input)", error.message().to_string())
+            })?
         };
         let input_read = OwnedHandle::from_raw(input_read_raw, "CreateFileW (conpty input)")?;
         let input_write = Arc::new(OwnedHandle::from_raw(input_write_raw, "CreateNamedPipeW")?);
@@ -260,8 +262,9 @@ impl WindowsPty {
         let mut output_write = HANDLE::default();
         // SAFETY: both out-parameters are valid, non-null HANDLE slots.
         unsafe {
-            CreatePipe(&mut output_read, &mut output_write, None, 0)
-                .map_err(|error| PtyError::new("CreatePipe (output)", error.message().to_string()))?;
+            CreatePipe(&mut output_read, &mut output_write, None, 0).map_err(|error| {
+                PtyError::new("CreatePipe (output)", error.message().to_string())
+            })?;
         }
         let output_read = Arc::new(OwnedHandle::from_raw(output_read, "CreatePipe (output)")?);
         let output_write = OwnedHandle::from_raw(output_write, "CreatePipe (output)")?;
@@ -273,10 +276,9 @@ impl WindowsPty {
         // SAFETY: the two pipe handles are valid and exclusively ours; on
         // success ConPTY owns its copies and we close ours below.
         let hpcon = unsafe {
-            CreatePseudoConsole(coord, input_read.as_raw(), output_write.as_raw(), 0)
-                .map_err(|error| {
-                    PtyError::new("CreatePseudoConsole", error.message().to_string())
-                })?
+            CreatePseudoConsole(coord, input_read.as_raw(), output_write.as_raw(), 0).map_err(
+                |error| PtyError::new("CreatePseudoConsole", error.message().to_string()),
+            )?
         };
         let conpty = Arc::new(ConPty { raw: hpcon });
 
@@ -302,15 +304,18 @@ impl WindowsPty {
         // The attribute list must be pointer-aligned; a Vec<u8> is not.
         let words = size.div_ceil(size_of::<usize>());
         let mut attribute_buffer = vec![0usize; words];
-        let attributes_list =
-            LPPROC_THREAD_ATTRIBUTE_LIST(attribute_buffer.as_mut_ptr().cast());
+        let attributes_list = LPPROC_THREAD_ATTRIBUTE_LIST(attribute_buffer.as_mut_ptr().cast());
         // SAFETY: `attribute_buffer` is at least `size` bytes and stays alive
         // until after CreateProcessW has consumed the attribute list.
         unsafe {
-            InitializeProcThreadAttributeList(Some(attributes_list), 1, None, &mut size)
-                .map_err(|error| {
-                    PtyError::new("InitializeProcThreadAttributeList", error.message().to_string())
-                })?;
+            InitializeProcThreadAttributeList(Some(attributes_list), 1, None, &mut size).map_err(
+                |error| {
+                    PtyError::new(
+                        "InitializeProcThreadAttributeList",
+                        error.message().to_string(),
+                    )
+                },
+            )?;
             // Microsoft's ConPTY sample passes the HPCON itself as lpValue:
             // UpdateProcThreadAttribute copies the bytes it points at.
             let conpty_value = hpcon.0 as *const c_void;
@@ -367,7 +372,6 @@ impl WindowsPty {
         )?);
         // SAFETY: the primary thread handle is not needed after creation.
         let _ = unsafe { CloseHandle(process_info.hThread) };
-
 
         let stop = Arc::new(AtomicBool::new(false));
         let reader_thread = Arc::new(Mutex::new(None));
@@ -532,8 +536,9 @@ impl PlatformPty for WindowsPty {
         // SAFETY: the ConPTY handle is alive and the COORD is POD. A failed
         // resize leaves the old size valid for a later distinct size.
         unsafe {
-            ResizePseudoConsole(self.conpty.raw, coord)
-                .map_err(|error| PtyError::new("ResizePseudoConsole", error.message().to_string()))?
+            ResizePseudoConsole(self.conpty.raw, coord).map_err(|error| {
+                PtyError::new("ResizePseudoConsole", error.message().to_string())
+            })?
         }
         *current = next;
         Ok(())
@@ -546,7 +551,12 @@ impl PlatformPty for WindowsPty {
     fn shutdown(self: Box<Self>) {
         self.stop.store(true, Ordering::Release);
         self.session.close_writer();
-        if let Some(handle) = self.reader_thread.lock().expect("reader slot poisoned").as_ref() {
+        if let Some(handle) = self
+            .reader_thread
+            .lock()
+            .expect("reader slot poisoned")
+            .as_ref()
+        {
             // SAFETY: cancelling the reader's synchronous I/O unblocks it.
             let _ = unsafe { CancelSynchronousIo(handle.as_raw()) };
         }
@@ -556,8 +566,8 @@ impl PlatformPty for WindowsPty {
         let mut code = 0u32;
         // SAFETY: process handle is owned and alive inside this method.
         let still_running = unsafe {
-            GetExitCodeProcess(self.process.as_raw(), &mut code).is_ok()
-                && code == 259 // STILL_ACTIVE
+            GetExitCodeProcess(self.process.as_raw(), &mut code).is_ok() && code == 259
+            // STILL_ACTIVE
         };
         if still_running {
             // SAFETY: targeting only our own child process with exit code 1.
@@ -580,7 +590,10 @@ mod tests {
     #[test]
     fn quote_argument_handles_spaces_and_quotes() {
         assert_eq!(quote_argument("plain"), "plain");
-        assert_eq!(quote_argument("C:\\Program Files\\cmd.exe"), "\"C:\\Program Files\\cmd.exe\"");
+        assert_eq!(
+            quote_argument("C:\\Program Files\\cmd.exe"),
+            "\"C:\\Program Files\\cmd.exe\""
+        );
         assert_eq!(quote_argument("a\"b"), "\"a\\\"b\"");
         assert_eq!(quote_argument(""), "\"\"");
     }
@@ -599,7 +612,10 @@ mod tests {
 
     #[test]
     fn environment_overrides_are_applied_once() {
-        let inherited = [("TERM".into(), "dumb".into()), ("PATH".into(), "C:\\bin".into())];
+        let inherited = [
+            ("TERM".into(), "dumb".into()),
+            ("PATH".into(), "C:\\bin".into()),
+        ];
         let block = environment_block(&terminal_environment(), inherited).expect("block");
         let flat: Vec<u16> = block;
         let as_string = String::from_utf16_lossy(&flat);

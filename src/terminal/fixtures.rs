@@ -69,9 +69,22 @@ impl Fixture {
     #[must_use]
     pub fn chunks(self) -> Vec<&'static [u8]> {
         match self {
-            Fixture::Ansi => vec![b"\x1b[2J\x1b[H", b"chunk ", b"\x1b[1;32mone\x1b[0m\r\n", b"chunk two"],
-            Fixture::Colors => vec![b"\x1b[2J\x1b[H", b"\x1b[38;5;196mred\x1b[0m ", b"\x1b[38;2;1;2;3mrgb\x1b[0m"],
-            Fixture::WideAndStyles => vec![b"\x1b[2J\x1b[H", b"\xE7\x95\x8C\xE7\x95\x8C", b" \x1b[4munder\x1b[0m"],
+            Fixture::Ansi => vec![
+                b"\x1b[2J\x1b[H",
+                b"chunk ",
+                b"\x1b[1;32mone\x1b[0m\r\n",
+                b"chunk two",
+            ],
+            Fixture::Colors => vec![
+                b"\x1b[2J\x1b[H",
+                b"\x1b[38;5;196mred\x1b[0m ",
+                b"\x1b[38;2;1;2;3mrgb\x1b[0m",
+            ],
+            Fixture::WideAndStyles => vec![
+                b"\x1b[2J\x1b[H",
+                b"\xE7\x95\x8C\xE7\x95\x8C",
+                b" \x1b[4munder\x1b[0m",
+            ],
             Fixture::Selection => vec![b"\x1b[2J\x1b[H", b"selected stream"],
         }
     }
@@ -90,8 +103,17 @@ mod tests {
             let mut state = GhosttyRenderState::new().expect("render state created");
             state.update(&terminal).expect("update");
             let snapshot = state.snapshot().expect("snapshot");
-            assert_eq!((snapshot.cols, snapshot.rows), (80, 24), "{}", fixture.name());
-            assert!(snapshot.lines[0].iter().any(|c| !c.text.is_empty()), "{}", fixture.name());
+            assert_eq!(
+                (snapshot.cols, snapshot.rows),
+                (80, 24),
+                "{}",
+                fixture.name()
+            );
+            assert!(
+                snapshot.lines[0].iter().any(|c| !c.text.is_empty()),
+                "{}",
+                fixture.name()
+            );
         }
     }
 
@@ -104,7 +126,10 @@ mod tests {
         let snapshot = state.snapshot().expect("snapshot");
         assert_eq!(
             snapshot.selections[0],
-            Some(crate::terminal::ghostty::RowSelection { start_x: 0, end_x: 7 })
+            Some(crate::terminal::ghostty::RowSelection {
+                start_x: 0,
+                end_x: 7
+            })
         );
         assert!(snapshot.lines[0][3].selected);
         assert!(!snapshot.lines[0][9].selected);

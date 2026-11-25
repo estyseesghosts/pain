@@ -335,11 +335,17 @@ cargo test --release --test m6 --features shell -- --nocapture
 Windows host, release profile, 80x24 session, synthetic fixture lines, four
 producer threads. Counters are `TerminalSession::snapshot_counters()`:
 
-| Workload | Writes | Bytes | Wakeups scheduled / coalesced | Render updates | Dirty full / partial / clean | Max lock hold |
-|---|---:|---:|---:|---:|---:|---:|
-| Output flood | 8,000 | 216,000 | 1 / 7,999 | 60 | 60 / 0 / 0 | 210 us |
-| Cursor-only frame | 2 | 15 | 1 / 1 | 2 | 1 / 0 / 1 | 97 us |
-| Resize storm | 0 | 0 | 1 / 8 | 0 | 0 / 0 / 0 | 0 us |
+| Platform | Workload | Writes | Bytes | Wakeups scheduled / coalesced | Render updates | Dirty full / partial / clean | Max lock hold |
+|---|---|---:|---:|---:|---:|---:|---:|
+| Windows | Output flood | 8,000 | 216,000 | 1 / 7,999 | 60 | 60 / 0 / 0 | 210 us |
+| Windows | Cursor-only frame | 2 | 15 | 1 / 1 | 2 | 1 / 0 / 1 | 97 us |
+| Windows | Resize storm | 0 | 0 | 1 / 8 | 0 | 0 / 0 / 0 | 0 us |
+| Linux (WSL ext4) | Output flood | 8,000 | 216,000 | 1 / 7,999 | 152 | 152 / 0 / 0 | 577 us |
+| Linux (WSL ext4) | Cursor-only frame | 2 | 15 | 1 / 1 | 2 | 1 / 0 / 1 | 186 us |
+| Linux (WSL ext4) | Resize storm | 0 | 0 | 1 / 8 | 0 | 0 / 0 / 0 | 0 us |
+
+Linux renders more frames during the same flood because its producer is slower
+relative to the renderer; wakeup coalescing and lock bounds still hold.
 
 What these numbers prove:
 

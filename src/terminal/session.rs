@@ -427,7 +427,12 @@ impl TerminalSession {
         Counters::add(&self.counters.ghostty_resize_calls, 1);
         // The platform PTY sees only cell counts, never pixels, and only for
         // distinct grid sizes. Callbacks run with no terminal lock held.
-        if let Some(resize) = self.pty_resize.lock().expect("pty_resize poisoned").as_ref() {
+        if let Some(resize) = self
+            .pty_resize
+            .lock()
+            .expect("pty_resize poisoned")
+            .as_ref()
+        {
             resize(cols, rows);
         }
         self.schedule_wakeup();
@@ -773,7 +778,9 @@ mod tests {
     fn resize_suppresses_duplicate_grid_sizes() {
         let session = TerminalSession::new(80, 24, Box::new(NoopWakeup)).expect("session created");
         assert!(session.resize(40, 12, 9, 18).expect("resize"));
-        assert!(!session.resize(40, 12, 10, 19).expect("duplicate suppressed"));
+        assert!(!session
+            .resize(40, 12, 10, 19)
+            .expect("duplicate suppressed"));
         assert!(session.resize(80, 24, 9, 18).expect("resize back"));
         let counters = session.snapshot_counters();
         assert_eq!(counters.ghostty_resize_calls, 2);
@@ -803,7 +810,8 @@ mod tests {
     fn rendering_overlaps_a_live_producer_without_starvation() {
         use std::thread;
 
-        let session = Arc::new(TerminalSession::new(80, 24, Box::new(NoopWakeup)).expect("session"));
+        let session =
+            Arc::new(TerminalSession::new(80, 24, Box::new(NoopWakeup)).expect("session"));
         let producer = {
             let session = Arc::clone(&session);
             thread::spawn(move || {

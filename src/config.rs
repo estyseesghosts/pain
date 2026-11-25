@@ -78,11 +78,15 @@ pub fn parse_args(args: &[String]) -> Result<Config, String> {
             }
             "--scrollback-lines" => {
                 config.scrollback_lines =
-                    parse_value(args, &mut index, "--scrollback-lines", |text| text.parse::<usize>().ok())?;
+                    parse_value(args, &mut index, "--scrollback-lines", |text| {
+                        text.parse::<usize>().ok()
+                    })?;
             }
             "--scrollback-bytes" => {
                 config.scrollback_bytes =
-                    parse_value(args, &mut index, "--scrollback-bytes", |text| text.parse::<usize>().ok())?;
+                    parse_value(args, &mut index, "--scrollback-bytes", |text| {
+                        text.parse::<usize>().ok()
+                    })?;
             }
             "--help" | "-h" => {
                 config.help = true;
@@ -141,7 +145,11 @@ pub fn usage() -> &'static str {
 /// Version/source attribution for the bundled terminal engine.
 #[must_use]
 pub fn version_line() -> String {
-    format!("pain {} (libghostty-vt {})", env!("CARGO_PKG_VERSION"), ghostty_version())
+    format!(
+        "pain {} (libghostty-vt {})",
+        env!("CARGO_PKG_VERSION"),
+        ghostty_version()
+    )
 }
 
 #[cfg(test)]

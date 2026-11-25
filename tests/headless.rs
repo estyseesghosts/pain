@@ -16,9 +16,7 @@ fn named_control_keys_encode_to_pty_bytes() {
     let session = TerminalSession::new(80, 24, Box::new(NoopWakeup)).expect("session");
 
     let mut enter = KeyEvent::new().expect("key event");
-    enter
-        .press(sys::GHOSTTY_KEY_ENTER, 0)
-        .expect("press enter");
+    enter.press(sys::GHOSTTY_KEY_ENTER, 0).expect("press enter");
     let bytes = session.encode_key(&enter).expect("encode enter");
     assert!(
         bytes.contains(&b'\r') || bytes.contains(&b'\n'),

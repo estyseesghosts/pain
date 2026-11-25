@@ -67,8 +67,12 @@ impl WriterQueue {
             inner.messages.len()
         };
         self.stats.messages.fetch_add(1, Ordering::Relaxed);
-        self.stats.bytes.fetch_add(byte_count as u64, Ordering::Relaxed);
-        self.stats.max_depth.fetch_max(depth as u64, Ordering::Relaxed);
+        self.stats
+            .bytes
+            .fetch_add(byte_count as u64, Ordering::Relaxed);
+        self.stats
+            .max_depth
+            .fetch_max(depth as u64, Ordering::Relaxed);
         self.changed.notify_one();
         depth
     }

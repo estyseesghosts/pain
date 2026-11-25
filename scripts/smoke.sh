@@ -13,10 +13,12 @@ echo '== release build =='
 cargo build --release --features shell
 exe=target/release/pain
 
-if [[ -z "${DISPLAY:-}" && -z "${WAYLAND_DISPLAY:-}" ]]; then
+if [[ "${1:-}" != "--gui" ]]; then
+  echo 'Skipping GUI launch (pass --gui to opt in when you are not using the desktop).'
+elif [[ -z "${DISPLAY:-}" && -z "${WAYLAND_DISPLAY:-}" ]]; then
   echo 'No display exported; skipping GUI launch. Set DISPLAY/WAYLAND_DISPLAY for WSLg.'
 else
-  echo '== launch and close check =='
+  echo '== launch and close check (foregrounds a window; opt-in only) =='
   "$exe" &
   pid=$!
   sleep 4
@@ -28,5 +30,5 @@ else
   wait "$pid" 2>/dev/null || true
 fi
 
-echo 'SMOKE OK: tests, counters, release build and launch passed.'
+echo 'SMOKE OK: tests, counters and release build passed.'
 echo 'Manual checks: docs/SMOKE.md'

@@ -403,4 +403,5 @@ following evidence. Re-run the commands when changing hot paths.
   scripts are in [docs/SMOKE.md](docs/SMOKE.md).
 
 Run `scripts/smoke.ps1` on Windows and `scripts/smoke.sh` on Linux/WSLg. No
-synthetic keystrokes or clicks are sent to the desktop by those scripts.
+synthetic keystrokes or clicks are sent to the desktop, and a window is only
+launched with the explicit `-Gui` / `--gui` flag.

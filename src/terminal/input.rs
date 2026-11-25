@@ -265,8 +265,14 @@ mod tests {
         assert_eq!(font_command("-", None, true), Some(FontCommand::Decrease));
         assert_eq!(font_command("0", None, true), Some(FontCommand::Reset));
         // Named and shifted spellings.
-        assert_eq!(font_command("equal", None, true), Some(FontCommand::Increase));
-        assert_eq!(font_command("minus", None, true), Some(FontCommand::Decrease));
+        assert_eq!(
+            font_command("equal", None, true),
+            Some(FontCommand::Increase)
+        );
+        assert_eq!(
+            font_command("minus", None, true),
+            Some(FontCommand::Decrease)
+        );
         assert_eq!(font_command("_", None, true), Some(FontCommand::Decrease));
         assert_eq!(
             font_command("underscore", None, true),
@@ -281,7 +287,10 @@ mod tests {
             font_command("unknown", Some("-"), true),
             Some(FontCommand::Decrease)
         );
-        assert_eq!(font_command("unknown", Some("+"), true), Some(FontCommand::Increase));
+        assert_eq!(
+            font_command("unknown", Some("+"), true),
+            Some(FontCommand::Increase)
+        );
         // Without Ctrl, these characters belong to the shell.
         assert_eq!(font_command("-", None, false), None);
         assert_eq!(font_command("a", Some("a"), true), None);
@@ -322,12 +331,18 @@ mod tests {
 
     #[test]
     fn mouse_actions_and_buttons_map_to_ghostty() {
-        assert_eq!(MouseAction::Press.ghostty(), sys::GHOSTTY_MOUSE_ACTION_PRESS);
+        assert_eq!(
+            MouseAction::Press.ghostty(),
+            sys::GHOSTTY_MOUSE_ACTION_PRESS
+        );
         assert_eq!(
             MouseAction::Motion.ghostty(),
             sys::GHOSTTY_MOUSE_ACTION_MOTION
         );
-        assert_eq!(MouseButton::Left.ghostty(), Some(sys::GHOSTTY_MOUSE_BUTTON_LEFT));
+        assert_eq!(
+            MouseButton::Left.ghostty(),
+            Some(sys::GHOSTTY_MOUSE_BUTTON_LEFT)
+        );
         assert_eq!(MouseButton::None.ghostty(), None);
     }
 }

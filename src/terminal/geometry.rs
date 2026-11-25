@@ -154,7 +154,11 @@ pub fn display_columns(text: &str) -> u16 {
         | 0x1F300..=0x1FAFF
         | 0x20000..=0x3FFFD
     );
-    if wide { 2 } else { 1 }
+    if wide {
+        2
+    } else {
+        1
+    }
 }
 
 /// Batch one row into text runs. Empty cells become spaces inside a run so
@@ -214,7 +218,11 @@ pub fn batch_row(cells: &[Cell]) -> Vec<TextRun> {
 /// Coalesce non-default background colors into spans. Default cells produce
 /// no quad because the whole content area is filled once by the element.
 #[must_use]
-pub fn background_runs(cells: &[Cell], default: ColorSpec, palette: &[(u8, u8, u8); 256]) -> Vec<BgRun> {
+pub fn background_runs(
+    cells: &[Cell],
+    default: ColorSpec,
+    palette: &[(u8, u8, u8); 256],
+) -> Vec<BgRun> {
     let resolve = |spec: ColorSpec| -> (u8, u8, u8) {
         match spec {
             ColorSpec::Palette(i) => palette.get(usize::from(i)).copied().unwrap_or((0, 0, 0)),
@@ -292,7 +300,12 @@ impl RowCache {
 
     /// Return the row indices that must be rebuilt for this frame.
     #[must_use]
-    pub fn rows_to_rebuild(&mut self, generation: u64, dirty: i32, dirty_rows: &[u16]) -> Vec<usize> {
+    pub fn rows_to_rebuild(
+        &mut self,
+        generation: u64,
+        dirty: i32,
+        dirty_rows: &[u16],
+    ) -> Vec<usize> {
         // A new output generation with no dirty flags has no visible change,
         // so it must not force a rebuild. Generation is recorded for
         // diagnostics and for the element's whole-frame cache check.
@@ -376,7 +389,10 @@ mod tests {
             cell("c", false, None),
         ];
         let runs = batch_row(&cells);
-        assert_eq!(runs.iter().map(|r| r.text.as_str()).collect::<Vec<_>>(), ["a", "B", "c"]);
+        assert_eq!(
+            runs.iter().map(|r| r.text.as_str()).collect::<Vec<_>>(),
+            ["a", "B", "c"]
+        );
         assert_eq!(runs[1].style.bold, true);
     }
 
@@ -388,7 +404,11 @@ mod tests {
 
     #[test]
     fn wide_grapheme_absorbs_its_tail() {
-        let cells = vec![cell("界", false, None), cell("", false, None), cell("x", false, None)];
+        let cells = vec![
+            cell("界", false, None),
+            cell("", false, None),
+            cell("x", false, None),
+        ];
         assert_eq!(display_columns("界"), 2);
         let runs = batch_row(&cells);
         // Same-style neighbours share one run; the tail is a space in the
@@ -401,7 +421,11 @@ mod tests {
 
     #[test]
     fn wide_tail_does_not_start_a_new_run() {
-        let cells = vec![cell("界", false, None), cell("", false, None), cell("x", true, None)];
+        let cells = vec![
+            cell("界", false, None),
+            cell("", false, None),
+            cell("x", true, None),
+        ];
         let runs = batch_row(&cells);
         assert_eq!(runs.len(), 2);
         assert_eq!(runs[0].text, "界 ");
@@ -443,7 +467,13 @@ mod tests {
 
     #[test]
     fn selection_span_is_inclusive() {
-        assert_eq!(selection_span(Some(RowSelection { start_x: 3, end_x: 6 })), Some((3, 4)));
+        assert_eq!(
+            selection_span(Some(RowSelection {
+                start_x: 3,
+                end_x: 6
+            })),
+            Some((3, 4))
+        );
         assert_eq!(selection_span(None), None);
     }
 }
