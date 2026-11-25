@@ -191,7 +191,11 @@ pub fn run() {
         cx.bind_keys([
             gpui::KeyBinding::new("ctrl-=", IncreaseFont, None),
             gpui::KeyBinding::new("ctrl-shift-=", IncreaseFont, None),
+            // A shifted `=`/`-` is reported as `+`/`_` with Shift cleared on
+            // Windows, so bind the produced characters as well.
+            gpui::KeyBinding::new("ctrl-+", IncreaseFont, None),
             gpui::KeyBinding::new("ctrl--", DecreaseFont, None),
+            gpui::KeyBinding::new("ctrl-_", DecreaseFont, None),
             // Alternate spellings emitted by non-US and shifted layouts.
             gpui::KeyBinding::new("ctrl-minus", DecreaseFont, None),
             gpui::KeyBinding::new("ctrl-underscore", DecreaseFont, None),
