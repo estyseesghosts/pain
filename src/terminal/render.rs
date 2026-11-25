@@ -10,10 +10,10 @@ use std::sync::Arc;
 
 use gpui::{
     div, fill, hsla, point, prelude::*, px, relative, rgba, size, App, Bounds, ClipboardItem,
-    Context, Element, ElementId, FocusHandle, Focusable, GlobalElementId, Hsla, InputHandler,
-    InspectorElementId, InteractiveElement, KeyContext, KeyDownEvent, LayoutId, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, Render, Rgba,
-    ScrollDelta, ScrollEvent, ShapedLine, SharedString, StrikethroughStyle, Style, TextAlign,
+    Context, DispatchPhase, Element, ElementId, FocusHandle, Focusable, GlobalElementId, Hsla,
+    InputHandler, InspectorElementId, InteractiveElement, KeyContext, KeyDownEvent, LayoutId,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, Render,
+    Rgba, ScrollDelta, ScrollEvent, ShapedLine, SharedString, StrikethroughStyle, Style, TextAlign,
     TextRun, UTF16Selection, UnderlineStyle, Window,
 };
 use silvestris::ActiveTheme;
@@ -452,10 +452,6 @@ impl Render for TerminalView {
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_down(MouseButton::Right, cx.listener(Self::on_mouse_down))
             .on_mouse_down(MouseButton::Middle, cx.listener(Self::on_mouse_down))
-            .on_mouse_move(cx.listener(Self::on_mouse_move))
-            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
-            .on_mouse_up(MouseButton::Right, cx.listener(Self::on_mouse_up))
-            .on_mouse_up(MouseButton::Middle, cx.listener(Self::on_mouse_up))
             .child(TerminalElement { view: cx.entity() })
     }
 }
@@ -754,6 +750,25 @@ impl Element for TerminalElement {
                 hsla(0.0, 0.0, 0.6, 0.45),
             ));
         }
+        // GPUI delivers element mouse events only while the pointer is over
+        // the element. Register move/up on the window instead so a drag keeps
+        // reporting after it leaves the surface, until the button is released.
+        let mouse_view = self.view.clone();
+        window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
+            let focused = mouse_view.read(cx).focus.is_focused(window);
+            if phase != DispatchPhase::Bubble || !focused {
+                return;
+            }
+            let _ = mouse_view.update(cx, |view, cx| view.on_mouse_move(event, window, cx));
+        });
+        let mouse_view = self.view.clone();
+        window.on_mouse_event(move |event: &MouseUpEvent, phase, window, cx| {
+            let focused = mouse_view.read(cx).focus.is_focused(window);
+            if phase != DispatchPhase::Bubble || !focused {
+                return;
+            }
+            let _ = mouse_view.update(cx, |view, cx| view.on_mouse_up(event, window, cx));
+        });
         let view = self.view.read(cx);
         window.handle_input(
             &view.focus,
