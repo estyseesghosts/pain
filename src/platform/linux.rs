@@ -278,7 +278,7 @@ fn start_threads(
         .spawn(move || {
             while let Some(bytes) = writer_session.wait_writer() {
                 if let Err(error) = writer_master.write_all(&bytes) {
-                    eprintln!("pain: PTY write failed: {error}");
+                    crate::log::error("pty-write", &format!("PTY write failed: {error}"));
                     break;
                 }
             }

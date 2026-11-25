@@ -12,8 +12,9 @@ use gpui::{
     div, fill, hsla, point, prelude::*, px, relative, rgba, size, App, Bounds, ClipboardItem, Context,
     Element, ElementId, FocusHandle, Focusable, GlobalElementId, Hsla, InputHandler,
     InspectorElementId, InteractiveElement, KeyContext, KeyDownEvent, LayoutId, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, Render, Rgba, ShapedLine, SharedString,
-    StrikethroughStyle, Style, TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window,
+    MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, Render, Rgba, ScrollDelta, ScrollEvent,
+    ShapedLine, SharedString, StrikethroughStyle, Style, TextAlign, TextRun, UTF16Selection,
+    UnderlineStyle, Window,
 };
 use silvestris::ActiveTheme;
 
@@ -25,6 +26,10 @@ use crate::terminal::geometry::{
 use crate::terminal::input::{
     font_command, key_for_name, FontCommand, MouseAction, MouseButton as PtyButton,
     Modifiers as InputModifiers,
+};
+use crate::terminal::selection::{
+    accumulate_wheel, line_bounds, scrollbar_geometry, scrollbar_row_at, wheel_button,
+    SelectionGesture, ScrollbarGeometry,
 };
 use crate::terminal::session::{CountersHandle, TerminalSession};
 
@@ -69,6 +74,11 @@ pub struct TerminalView {
     cache: RefCell<FrameCache>,
     geometry: RefCell<InputGeometry>,
     selection_anchor: RefCell<Option<(u16, u16)>>,
+    /// Fractional wheel rows carried between trackpad events.
+    scroll_remainder: f64,
+    /// Ghostty-derived scrollbar thumb, recomputed once in prepaint.
+    scrollbar: RefCell<Option<ScrollbarGeometry>>,
+    scrollbar_drag: bool,
 }
 
 impl TerminalView {
@@ -86,6 +96,9 @@ impl TerminalView {
             cache: RefCell::new(FrameCache::default()),
             geometry: RefCell::new(InputGeometry::default()),
             selection_anchor: RefCell::new(None),
+            scroll_remainder: 0.0,
+            scrollbar: RefCell::new(None),
+            scrollbar_drag: false,
         }
     }
 
@@ -174,6 +187,75 @@ impl TerminalView {
         cx.stop_propagation();
     }
 
+    /// Wheel/trackpad scrolling. When a TUI reports mouse tracking and no
+    /// escape modifier is held, wheel events are encoded for the child.
+    /// Otherwise they move Ghostty's viewport through its own scroll API.
+    fn on_scroll(&mut self, event: &ScrollEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        let up_pixels = match event.delta {
+            ScrollDelta::Pixels(delta) => f64::from(delta.y),
+            ScrollDelta::Lines(delta) => {
+                f64::from(delta.y) * f64::from(self.geometry.borrow().line_height)
+            }
+        };
+        if up_pixels == 0.0 {
+            return;
+        }
+        let line_height = self.geometry.borrow().line_height;
+        let (rows, remainder) = accumulate_wheel(self.scroll_remainder, up_pixels, line_height);
+        self.scroll_remainder = remainder;
+        if rows == 0 {
+            return;
+        }
+        let tracking = self.session.mouse_tracking_enabled().unwrap_or(false);
+        if tracking && !event.modifiers.platform {
+            // One terminal mouse wheel report per whole row.
+            let button = wheel_button(rows < 0);
+            let (px, py, w, h, mods) = {
+                let (x, _y, w, h, px, py, mods) = self.mouse_event(event.position, event.modifiers);
+                let _ = x;
+                (px, py, w, h, mods)
+            };
+            for _ in 0..rows.unsigned_abs() {
+                let _ = self.session.encode_mouse(
+                    MouseAction::Press.ghostty(),
+                    Some(button),
+                    mods.ghostty_bits(),
+                    px,
+                    py,
+                    u32::from(w),
+                    u32::from(h),
+                    self.geometry.borrow().cell_width.max(1.0) as u32,
+                    self.geometry.borrow().line_height.max(1.0) as u32,
+                );
+            }
+        } else {
+            // `accumulate_wheel` already returns Ghostty's delta convention:
+            // negative rows move up into history.
+            let _ = self.session.scroll(rows);
+        }
+        cx.stop_propagation();
+    }
+
+    /// Apply a click gesture to the visible row. Word/line bounds are derived
+    /// from Ghostty's rendered cells, so selection stays Ghostty-owned.
+    fn select_gesture(&self, x: u16, y: u16, click_count: usize) {
+        let Ok(snapshot) = self.session.render_snapshot() else {
+            return;
+        };
+        let Some(cells) = snapshot.lines.get(usize::from(y)) else {
+            return;
+        };
+        let (start, end) = match SelectionGesture::from_click_count(click_count) {
+            SelectionGesture::Character => (usize::from(x), usize::from(x)),
+            SelectionGesture::Word => {
+                let (start, end) = crate::terminal::selection::word_bounds(cells, usize::from(x));
+                (start, end)
+            }
+            SelectionGesture::Line => line_bounds(cells),
+        };
+        let _ = self.session.select_between(start as u16, y, end as u16, y);
+    }
+
     fn mouse_event(&self, position: Point<Pixels>, modifiers: gpui::Modifiers) -> (u16, u16, u16, u16, f32, f32, InputModifiers) {
         let geometry = *self.geometry.borrow();
         let (x, y) = self.cell_at(position);
@@ -202,6 +284,26 @@ impl TerminalView {
     ) {
         window.focus(&self.focus, cx);
         let (x, y, w, h, px, py, mods) = self.mouse_event(event.position, event.modifiers);
+        if event.button == MouseButton::Left {
+            if let Some(bar) = *self.scrollbar.borrow() {
+                let local_x = f32::from(event.position.x) - bar.track_x;
+                if (0.0..=bar.track_width).contains(&local_x) {
+                    self.scrollbar_drag = true;
+                    let bar_state = self.session.scrollbar();
+                    if let Ok(bar_state) = bar_state {
+                        let row = scrollbar_row_at(
+                            &bar,
+                            f32::from(event.position.y),
+                            bar_state.total,
+                            bar_state.len,
+                        );
+                        let _ = self.session.scroll_to_row(row);
+                    }
+                    cx.stop_propagation();
+                    return;
+                }
+            }
+        }
         let Some(button) = pty_button(event.button) else {
             return;
         };
@@ -220,7 +322,7 @@ impl TerminalView {
             );
         } else {
             *self.selection_anchor.borrow_mut() = Some((x, y));
-            let _ = self.session.select_between(x, y, x, y);
+            self.select_gesture(x, y, event.click_count);
         }
         cx.stop_propagation();
     }
@@ -231,6 +333,18 @@ impl TerminalView {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) {
+        if self.scrollbar_drag {
+            if let (Some(bar), Ok(state)) = (*self.scrollbar.borrow(), self.session.scrollbar()) {
+                let row = scrollbar_row_at(
+                    &bar,
+                    f32::from(event.position.y),
+                    state.total,
+                    state.len,
+                );
+                let _ = self.session.scroll_to_row(row);
+            }
+            return;
+        }
         let (x, y, w, h, px, py, mods) = self.mouse_event(event.position, event.modifiers);
         let tracking = self.session.mouse_tracking_enabled().unwrap_or(false);
         if tracking && event.pressed_button.is_some() && !mods.super_key {
@@ -255,6 +369,11 @@ impl TerminalView {
     }
 
     fn on_mouse_up(&mut self, event: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.scrollbar_drag {
+            self.scrollbar_drag = false;
+            cx.stop_propagation();
+            return;
+        }
         let (_x, _y, w, h, px, py, mods) = self.mouse_event(event.position, event.modifiers);
         let Some(button) = pty_button(event.button) else {
             return;
@@ -294,6 +413,7 @@ impl Render for TerminalView {
             .track_focus(&self.focus)
             .key_context(KeyContext::new_with_defaults(cx.platform_info().os))
             .on_key_down(cx.listener(Self::on_key_down))
+            .on_scroll(cx.listener(Self::on_scroll))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_down(MouseButton::Right, cx.listener(Self::on_mouse_down))
             .on_mouse_down(MouseButton::Middle, cx.listener(Self::on_mouse_down))
@@ -324,6 +444,7 @@ struct FrameState {
     cursor: Option<PaintQuad>,
     line_height: Pixels,
     background: Hsla,
+    scrollbar: Option<ScrollbarGeometry>,
 }
 
 impl Element for TerminalElement {
@@ -399,6 +520,24 @@ impl Element for TerminalElement {
         let (cols, rows) =
             metrics.grid_for(f32::from(bounds.size.width), f32::from(bounds.size.height));
 
+        // The scrollbar thumb is a view over Ghostty's row counts, never a GPUI
+        // ScrollHandle or a second history model.
+        let bar = session
+            .scrollbar()
+            .ok()
+            .and_then(|state| {
+                scrollbar_geometry(
+                    state.total,
+                    state.offset,
+                    state.len,
+                    f32::from(bounds.origin.x),
+                    f32::from(bounds.origin.y),
+                    f32::from(bounds.size.width),
+                    f32::from(bounds.size.height),
+                )
+            });
+        *view.scrollbar.borrow_mut() = bar;
+
         let origin_key = (f32::from(bounds.origin.x), f32::from(bounds.origin.y));
         let metric_key = (cell_width, line_height);
         let wake = session.take_wakeup();
@@ -422,6 +561,7 @@ impl Element for TerminalElement {
                     cursor: cache.cursor.clone(),
                     line_height: cache.line_height,
                     background: cache.background,
+                    scrollbar: bar,
                 };
             }
         }
@@ -532,6 +672,7 @@ impl Element for TerminalElement {
             cursor,
             line_height: px(line_height),
             background: default_bg,
+            scrollbar: bar,
         }
     }
 
@@ -565,6 +706,23 @@ impl Element for TerminalElement {
         }
         if let Some(cursor) = &prepaint.cursor {
             window.paint_quad(cursor.clone());
+        }
+        if let Some(bar) = &prepaint.scrollbar {
+            // Track and thumb stay a thin view over Ghostty's viewport state.
+            window.paint_quad(fill(
+                Bounds::new(
+                    point(px(bar.track_x), px(bar.track_y)),
+                    size(px(bar.track_width), px(bar.track_height)),
+                ),
+                hsla(0.0, 0.0, 1.0, 0.08),
+            ));
+            window.paint_quad(fill(
+                Bounds::new(
+                    point(px(bar.track_x), px(bar.thumb_y)),
+                    size(px(bar.track_width), px(bar.thumb_height)),
+                ),
+                hsla(0.0, 0.0, 0.6, 0.45),
+            ));
         }
         let view = self.view.read(cx);
         window.handle_input(

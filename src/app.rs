@@ -6,17 +6,17 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use gpui::{App, AppContext, Bounds, ClipboardItem, Entity, IntoElement, Render, Window};
+use gpui::{App, AppContext, Bounds, ClipboardItem, Entity, IntoElement, Render, SharedString, Window};
 use silvestris::chrome::{open_window, window_options, WindowFrame};
 use silvestris::{ActiveTheme, ThemePreference};
 
-use crate::platform::{
-    default_shell, shell_from_args, spawn_pty, PtyConfig, PlatformPty,
-};
+use crate::config::{parse_args, usage, version_line};
+use crate::log;
+use crate::platform::{default_shell, spawn_pty, PtyConfig, PlatformPty};
 use crate::terminal::fixtures::Fixture;
 use crate::terminal::geometry::FONT_SIZE_STEP;
 use crate::terminal::render::TerminalView;
-use crate::terminal::session::TerminalSession;
+use crate::terminal::session::{SessionConfig, TerminalSession};
 
 // Deliberately whitelisted app commands. Every other key reaches the terminal.
 gpui::actions!(
@@ -34,13 +34,41 @@ gpui::actions!(
 /// Start the one-window app with a live shell by default.
 pub fn run() {
     let argv: Vec<String> = std::env::args().collect();
-    let command = shell_from_args(&argv).unwrap_or_else(default_shell);
+    let config = match parse_args(&argv) {
+        Ok(config) => config,
+        Err(error) => {
+            log::error("cli", &error);
+            println!("pain: {error}\n{}", usage());
+            return;
+        }
+    };
+    if config.help {
+        log::info("cli", usage());
+        println!("{}", usage());
+        return;
+    }
+    if config.version {
+        let version = version_line();
+        log::info("cli", &version);
+        println!("{version}");
+        return;
+    }
+    let command = config.shell.clone().unwrap_or_else(default_shell);
     let fixture = std::env::var_os("PAIN_FIXTURE").is_some();
     let stress = std::env::var_os("PAIN_STRESS").is_some();
+    log::info(
+        "startup",
+        &format!(
+            "{}; scrollback {} lines / {} bytes",
+            version_line(),
+            config.scrollback_lines,
+            config.scrollback_bytes
+        ),
+    );
 
     gpui_platform::application().run(move |cx: &mut App| {
         if let Err(error) = silvestris::init(ThemePreference::default(), cx) {
-            eprintln!("silvestris init failed: {error:#}");
+            log::error("startup", &format!("silvestris init failed: {error:#}"));
             cx.quit();
             return;
         }
@@ -49,31 +77,43 @@ pub fn run() {
         // token, and `try_send` drops redundant tokens instead of queueing a
         // per-chunk storm. The foreground task below does one `cx.notify`.
         let (wake_tx, wake_rx) = async_channel::bounded::<()>(1);
+        let session_config = SessionConfig {
+            cols: 80,
+            rows: 24,
+            scrollback_lines: config.scrollback_lines,
+            scrollback_bytes: config.scrollback_bytes,
+        };
         let session = Arc::new(
-            TerminalSession::new(80, 24, Box::new(move || {
-                let _ = wake_tx.try_send(());
-            }))
+            TerminalSession::new_with_config(
+                session_config,
+                Box::new(move || {
+                    let _ = wake_tx.try_send(());
+                }),
+            )
             .expect("terminal session created"),
         );
-        // Terminal replies (device reports, mode queries) must never block the
-        // terminal lock; this pushes them into the ordered writer queue.
+        // Terminal replies and OSC title changes are effect callbacks. They
+        // never block on OS I/O or re-enter the terminal lock's writer path.
+        let (title_tx, title_rx) = async_channel::bounded::<String>(1);
         session
-            .install_pty_writer()
-            .expect("install WRITE_PTY bridge");
+            .install_callbacks(Box::new(move |title| {
+                let _ = title_tx.try_send(title);
+            }))
+            .expect("install terminal effect callbacks");
 
         let stop = Arc::new(AtomicBool::new(false));
         let pty_holder: Arc<Mutex<Option<Box<dyn PlatformPty>>>> = Arc::new(Mutex::new(None));
 
         if !fixture && !stress {
-            let config = PtyConfig {
+            let pty_config = PtyConfig {
                 cols: 80,
                 rows: 24,
                 command,
             };
-            let pty = match spawn_pty(&config, Arc::clone(&session)) {
+            let pty = match spawn_pty(&pty_config, Arc::clone(&session)) {
                 Ok(pty) => pty,
                 Err(error) => {
-                    eprintln!("pain: could not start shell: {error}");
+                    log::error("shell", &format!("could not start shell: {error}"));
                     cx.quit();
                     return;
                 }
@@ -84,7 +124,7 @@ pub fn run() {
             session.set_pty_resize(Arc::new(move |cols, rows| {
                 if let Some(pty) = resize_holder.lock().expect("pty holder poisoned").as_ref() {
                     if let Err(error) = pty.resize(cols, rows) {
-                        eprintln!("pain: PTY resize failed: {error}");
+                        log::error("resize", &format!("PTY resize failed: {error}"));
                     }
                 }
             }));
@@ -108,9 +148,17 @@ pub fn run() {
             cx.new(|_| AppView {
                 terminal,
                 pty: holder_for_view,
+                title: SharedString::from("pain"),
             })
         })
         .expect("open terminal window");
+
+        if let Some(size) = config.font_size {
+            let _ = view.update(cx, |app, _, cx| {
+                app.terminal
+                    .update(cx, |terminal, cx| terminal.set_font_size(size, cx));
+            });
+        }
 
         cx.bind_keys([
             gpui::KeyBinding::new("ctrl-=", IncreaseFont, None),
@@ -131,6 +179,28 @@ pub fn run() {
         cx.spawn(async move |cx: &mut gpui::AsyncApp| {
             while wake_rx.recv().await.is_ok() {
                 let _ = window_handle.update(cx, |_, _, cx| cx.notify());
+            }
+        })
+        .detach();
+
+        // OSC 0/2 title effects arrive on the PTY reader thread. A capacity-one
+        // channel coalesces them and the UI task applies the latest title to
+        // both the platform window and Silvestris's drawn title band.
+        let title_window = view.clone();
+        let title_session = Arc::clone(&session);
+        cx.spawn(async move |cx: &mut gpui::AsyncApp| {
+            while let Ok(new_title) = title_rx.recv().await {
+                title_session.record_title_change();
+                let display = if new_title.is_empty() {
+                    "pain".to_owned()
+                } else {
+                    new_title
+                };
+                let _ = title_window.update(cx, |app, window, cx| {
+                    app.title = SharedString::from(display.clone());
+                    window.set_window_title(&display);
+                    cx.notify();
+                });
             }
         })
         .detach();
@@ -190,7 +260,7 @@ fn install_actions(cx: &mut App, window: &gpui::WindowHandle<AppView>) {
                     cx.write_to_clipboard(ClipboardItem::new_string(text));
                 }
                 Ok(_) => {}
-                Err(error) => eprintln!("pain: copy failed: {error}"),
+                Err(error) => log::error("copy", &format!("copy failed: {error}")),
             }
         });
     });
@@ -201,7 +271,7 @@ fn install_actions(cx: &mut App, window: &gpui::WindowHandle<AppView>) {
         };
         let _ = w.update(cx, |app, _, cx| {
             if let Err(error) = app.terminal.read(cx).session().paste(&text) {
-                eprintln!("pain: paste failed: {error}");
+                log::error("paste", &format!("paste failed: {error}"));
             }
         });
     });
@@ -209,7 +279,7 @@ fn install_actions(cx: &mut App, window: &gpui::WindowHandle<AppView>) {
     cx.on_action(move |_: &SelectAllTerminal, cx| {
         let _ = w.update(cx, |app, _, cx| {
             if let Err(error) = app.terminal.read(cx).session().select_all() {
-                eprintln!("pain: select all failed: {error}");
+                log::error("selection", &format!("select all failed: {error}"));
             }
         });
     });
@@ -220,11 +290,12 @@ struct AppView {
     terminal: Entity<TerminalView>,
     #[allow(dead_code)]
     pty: Arc<Mutex<Option<Box<dyn PlatformPty>>>>,
+    title: SharedString,
 }
 
 impl Render for AppView {
     fn render(&mut self, _window: &mut Window, _cx: &mut gpui::Context<Self>) -> impl IntoElement {
-        WindowFrame::new("pain").child(self.terminal.clone())
+        WindowFrame::new(self.title.clone()).child(self.terminal.clone())
     }
 }
 

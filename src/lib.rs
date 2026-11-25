@@ -7,5 +7,7 @@
 
 #[cfg(feature = "shell")]
 pub mod app;
+pub mod config;
+pub mod log;
 pub mod platform;
 pub mod terminal;
