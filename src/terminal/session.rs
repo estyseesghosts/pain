@@ -450,11 +450,9 @@ impl TerminalSession {
         let terminal = self.terminal.lock().expect("terminal mutex poisoned");
         let mut encoder = self.encoder.lock().expect("encoder mutex poisoned");
         encoder.sync_from_terminal(&terminal)?;
-        let mut buf = [0u8; 256];
-        let written = encoder.encode(event, &mut buf)?;
+        let bytes = encoder.encode_owned(event)?;
         drop(encoder);
         drop(terminal);
-        let bytes = buf[..written].to_vec();
         self.enqueue_writer(bytes.clone());
         Ok(bytes)
     }

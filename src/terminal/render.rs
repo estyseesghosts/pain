@@ -24,7 +24,7 @@ use crate::terminal::geometry::{
 };
 use crate::terminal::ghostty::{Cursor, KeyEvent};
 use crate::terminal::input::{
-    font_command, key_for_name, FontCommand, Modifiers as InputModifiers, MouseAction,
+    font_command, key_for_keystroke, FontCommand, Modifiers as InputModifiers, MouseAction,
     MouseButton as PtyButton,
 };
 use crate::terminal::selection::{
@@ -164,31 +164,30 @@ impl TerminalView {
             cx.stop_propagation();
             return;
         }
-        let named = name.chars().count() > 1;
-        // Only printable characters can be delegated to the IME path. Named
-        // keys such as Enter, Backspace and arrows must always be encoded by
-        // Ghostty, even when GPUI prefers character input for the keystroke.
-        if !named && event.prefer_character_input && event.keystroke.key_char.is_some() {
-            return;
-        }
         let m = event.keystroke.modifiers;
         let mods = InputModifiers::new(m.shift, m.control, m.alt, m.platform);
-        let text = if named {
-            None
-        } else {
-            Some(
-                event
-                    .keystroke
-                    .key_char
-                    .clone()
-                    .unwrap_or_else(|| name.to_owned()),
-            )
+        // The pure policy decides whether this key belongs to Ghostty's
+        // encoder or to the platform's native text handler, and always keeps
+        // the committed text for printable keys such as space.
+        let Some(encoded) = key_for_keystroke(
+            name,
+            event.keystroke.key_char.as_deref(),
+            mods,
+            event.prefer_character_input,
+            event.is_held,
+        ) else {
+            return;
         };
         if let Ok(mut key_event) = KeyEvent::new() {
-            let _ = key_event.press(key_for_name(name), mods.ghostty_bits());
-            if let Some(text) = &text {
+            if encoded.repeat {
+                let _ = key_event.repeat(encoded.key, encoded.mods.ghostty_bits());
+            } else {
+                let _ = key_event.press(encoded.key, encoded.mods.ghostty_bits());
+            }
+            if let Some(text) = &encoded.text {
                 let _ = key_event.set_utf8(text);
             }
+            let _ = key_event.set_unshifted_codepoint(encoded.unshifted_codepoint);
             let _ = self.session.encode_key(&key_event);
         }
         cx.stop_propagation();

@@ -8,6 +8,33 @@ use pain::terminal::ghostty::{
 };
 use pain::terminal::session::{NoopWakeup, TerminalSession};
 
+/// Space is a printable key whose GPUI name is multi-character (`"space"`).
+/// Ghostty's encoder emits nothing for it unless UTF-8 text is supplied. This
+/// documents why the view delegates plain printable keys to the platform text
+/// path instead of encoding them: a bare `GHOSTTY_KEY_SPACE` writes zero bytes.
+#[test]
+fn printable_named_keys_require_utf8_text() {
+    let session = TerminalSession::new(80, 24, Box::new(NoopWakeup)).expect("session");
+
+    let mut bare = KeyEvent::new().expect("key event");
+    bare.press(sys::GHOSTTY_KEY_SPACE, 0).expect("press space");
+    let without_text = session.encode_key(&bare).expect("encode bare space");
+    assert_eq!(
+        without_text, b"",
+        "Ghostty emits no bytes for space without text"
+    );
+
+    let mut with_text = KeyEvent::new().expect("key event");
+    with_text
+        .press(sys::GHOSTTY_KEY_SPACE, 0)
+        .expect("press space");
+    with_text.set_utf8(" ").expect("utf8");
+    let bytes = session
+        .encode_key(&with_text)
+        .expect("encode space with text");
+    assert_eq!(bytes, b" ", "space with UTF-8 must reach the PTY");
+}
+
 /// Named keys (which never carry IME text) must still reach the PTY as the
 /// control bytes a shell expects. This is the encoder half of the
 /// Enter/Backspace input path used by `TerminalView::on_key_down`.
@@ -40,6 +67,46 @@ fn named_control_keys_encode_to_pty_bytes() {
         .expect("press ctrl-c");
     let bytes = session.encode_key(&ctrl_c).expect("encode ctrl-c");
     assert_eq!(bytes, b"\x03");
+}
+
+/// End-to-end check of the ownership split: plain text goes straight to the
+/// writer queue, while modified keys are encoded by Ghostty into terminal
+/// sequences. This is the same path `TerminalView::on_key_down` drives.
+#[test]
+fn keyboard_policy_reaches_the_pty_correctly() {
+    use pain::terminal::input::{key_for_keystroke, Modifiers};
+
+    let session = TerminalSession::new(80, 24, Box::new(NoopWakeup)).expect("session");
+
+    // The space bar is plain text: the platform text handler owns it.
+    assert!(
+        key_for_keystroke("space", Some(" "), Modifiers::default(), false, false).is_none(),
+        "space must not be encoded twice"
+    );
+    session.write_input(" ");
+    assert_eq!(session.drain_writer(8), vec![b" ".to_vec()]);
+
+    // Ctrl+C is a control key: Ghostty encodes it to the C0 byte.
+    let encoded = key_for_keystroke(
+        "c",
+        None,
+        Modifiers::new(false, true, false, false),
+        false,
+        false,
+    )
+    .expect("ctrl-c is encoded");
+    let mut key = KeyEvent::new().expect("key event");
+    key.press(encoded.key, encoded.mods.ghostty_bits())
+        .expect("press");
+    if let Some(text) = &encoded.text {
+        key.set_utf8(text).expect("utf8");
+    }
+    key.set_unshifted_codepoint(encoded.unshifted_codepoint)
+        .expect("unshifted codepoint");
+
+    let bytes = session.encode_key(&key).expect("encode ctrl-c");
+    assert_eq!(bytes, b"\x03");
+    assert_eq!(session.drain_writer(8), vec![vec![0x03]]);
 }
 
 fn line_text(snapshot: &RenderSnapshot, y: usize) -> String {

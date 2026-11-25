@@ -160,6 +160,85 @@ fn single_char(name: &str) -> Option<char> {
     }
 }
 
+/// Unicode codepoint of the physical key with no modifiers. Ghostty uses this
+/// to tell shifted/control characters apart (CSI-u, `modifyOtherKeys`, caps
+/// lock). GPUI's `Keystroke::key` already names the physical key in lowercase,
+/// so this is a pure lookup rather than a second keyboard-layout model.
+#[must_use]
+pub fn unshifted_codepoint(name: &str) -> u32 {
+    match name {
+        // The only printable key whose GPUI name is not a single character.
+        "space" => u32::from(' '),
+        _ => {
+            let mut chars = name.chars();
+            match (chars.next(), chars.next()) {
+                (Some(ch), None) => u32::from(ch.to_ascii_lowercase()),
+                _ => 0,
+            }
+        }
+    }
+}
+
+/// Everything Ghostty's key encoder needs for one keystroke, derived from a
+/// platform-neutral keystroke. `None` means the platform `InputHandler` owns
+/// the text (AltGr/dead keys) and the view must not encode the physical key.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EncodedKey {
+    pub key: i32,
+    pub mods: Modifiers,
+    /// Committed UTF-8 text, attached even for named printable keys.
+    pub text: Option<String>,
+    pub unshifted_codepoint: u32,
+    pub repeat: bool,
+}
+
+/// Decide whether a keystroke belongs to Ghostty's encoder or to the platform
+/// text-input path. `None` means the view must let the event propagate so the
+/// native handler delivers the committed text.
+///
+/// The ownership split matches Zed's pinned terminal:
+///
+/// - AltGr/dead keys (`prefer_character_input`) are composed text on Windows;
+///   GPUI delivers the result through `InputHandler::replace_text_in_range`.
+/// - Plain printable keys (shift allowed, but no Ctrl/Alt/Super) are delivered
+///   as text by every platform: WM_CHAR on Windows, and X11/Wayland's
+///   key_char forwarding when propagation continues on Linux. Encoding them
+///   here as well would double every character on Windows, and the space bar
+///   (whose GPUI name is `"space"`) would be dropped entirely on Linux.
+/// - Everything else (control keys, arrows, Ctrl/Alt combinations) has no
+///   native text equivalent and must be encoded by Ghostty.
+#[must_use]
+pub fn key_for_keystroke(
+    name: &str,
+    key_char: Option<&str>,
+    mods: Modifiers,
+    prefer_character_input: bool,
+    is_held: bool,
+) -> Option<EncodedKey> {
+    if key_char.is_some() {
+        if prefer_character_input {
+            return None;
+        }
+        // Only shift may accompany text that the platform will deliver.
+        if !mods.control && !mods.alt && !mods.super_key {
+            return None;
+        }
+    }
+    // Single-character names are a fallback for platforms that do not supply
+    // key_char. Named keys with no key_char (Enter, arrows, ...) carry no text
+    // and must not invent it from their name.
+    let text = key_char
+        .map(str::to_owned)
+        .or_else(|| (name.chars().count() == 1).then(|| name.to_owned()));
+    Some(EncodedKey {
+        key: key_for_name(name),
+        mods,
+        text,
+        unshifted_codepoint: unshifted_codepoint(name),
+        repeat: is_held,
+    })
+}
+
 fn key_for_ascii(ch: char) -> Option<i32> {
     let key = match ch.to_ascii_lowercase() {
         '`' => sys::GHOSTTY_KEY_BACKQUOTE,
@@ -326,6 +405,82 @@ mod tests {
                 mods: Modifiers::new(false, true, false, false),
                 text: Some("c".into()),
             }
+        );
+    }
+
+    #[test]
+    fn plain_printable_keys_delegate_to_the_text_handler() {
+        // GPUI names the space bar "space" on both platforms. Encoding it
+        // produced no bytes (Ghostty needs UTF-8 for printable keys) and WM_CHAR
+        // also delivered the text, so spaces were at best doubled and on Linux
+        // lost entirely. Both paths must agree to delegate.
+        for (name, text) in [("space", " "), ("a", "a"), ("2", "2"), (".", ".")] {
+            assert!(
+                key_for_keystroke(name, Some(text), Modifiers::default(), false, false).is_none(),
+                "{name} must be delivered as text"
+            );
+            // Shift-only printable keys are also plain text on every platform.
+            assert!(
+                key_for_keystroke(
+                    name,
+                    Some(text),
+                    Modifiers::new(true, false, false, false),
+                    false,
+                    false,
+                )
+                .is_none(),
+                "shift+{name} must be delivered as text"
+            );
+        }
+    }
+
+    #[test]
+    fn altgr_and_dead_keys_delegate_to_the_text_handler() {
+        // Windows sets prefer_character_input when the composed character
+        // differs from the unmodified key (AltGr) or a dead key is active.
+        assert!(key_for_keystroke(
+            "2",
+            Some("²"),
+            Modifiers::new(false, true, true, false),
+            true,
+            false,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn named_control_keys_have_no_text_but_keep_their_key_code() {
+        for name in ["enter", "backspace", "tab", "escape", "up"] {
+            let encoded =
+                key_for_keystroke(name, None, Modifiers::default(), false, false).expect("encoded");
+            assert_eq!(encoded.text, None, "{name} must not invent text");
+            assert_ne!(
+                encoded.key,
+                sys::GHOSTTY_KEY_UNIDENTIFIED,
+                "{name} needs a Ghostty key code"
+            );
+            assert_eq!(encoded.unshifted_codepoint, 0, "{name} is not printable");
+        }
+    }
+
+    #[test]
+    fn modified_keys_are_encoded_with_correct_unshifted_codepoint() {
+        // Ctrl+Shift+A commits no printable character, so Ghostty encodes it.
+        let encoded = key_for_keystroke(
+            "a",
+            None,
+            Modifiers::new(true, true, false, false),
+            false,
+            true,
+        )
+        .expect("encoded");
+        assert!(encoded.repeat);
+        // The unshifted physical key is 'a', not the committed character.
+        assert_eq!(encoded.unshifted_codepoint, u32::from('a'));
+        assert_eq!(encoded.text.as_deref(), Some("a"));
+        assert_eq!(
+            encoded.mods.ghostty_bits(),
+            sys::GHOSTTY_MODS_SHIFT | sys::GHOSTTY_MODS_CTRL
         );
     }
 

@@ -1188,12 +1188,12 @@ impl KeyEncoder {
         })
     }
 
-    /// Encode a key event into `buf`; returns the number of bytes written.
-    pub fn encode(&mut self, event: &KeyEvent, buf: &mut [u8]) -> Result<usize, GhosttyError> {
+    fn encode_into(&mut self, event: &KeyEvent, buf: &mut [u8]) -> (sys::GhosttyResult, usize) {
         let mut written = 0usize;
         // SAFETY: both handles are valid; `buf` stays alive and is writable
-        // for the call, and `written` is a valid out-parameter.
-        check(unsafe {
+        // for the call, and `written` is a valid out-parameter. On
+        // `out_of_space`, Ghostty still reports the required length here.
+        let result = unsafe {
             sys::ghostty_key_encoder_encode(
                 self.as_raw(),
                 event.as_raw(),
@@ -1201,8 +1201,36 @@ impl KeyEncoder {
                 buf.len(),
                 &mut written,
             )
-        })?;
+        };
+        (result, written)
+    }
+
+    /// Encode a key event into `buf`; returns the number of bytes written.
+    pub fn encode(&mut self, event: &KeyEvent, buf: &mut [u8]) -> Result<usize, GhosttyError> {
+        let (result, written) = self.encode_into(event, buf);
+        check(result)?;
         Ok(written)
+    }
+
+    /// Encode into an owned buffer, growing it once if the fixed-size buffer
+    /// is too small. A dropped key is worse than one extra allocation, and
+    /// composed text with kitty's `report_associated` can exceed any fixed
+    /// size.
+    pub fn encode_owned(&mut self, event: &KeyEvent) -> Result<Vec<u8>, GhosttyError> {
+        let mut buf = [0u8; 256];
+        let (result, written) = self.encode_into(event, &mut buf);
+        if result == sys::GHOSTTY_SUCCESS {
+            return Ok(buf[..written].to_vec());
+        }
+        if result != sys::GHOSTTY_OUT_OF_SPACE {
+            return Err(GhosttyError(result));
+        }
+        // `written` is now the required length reported by Ghostty.
+        let mut dynamic = vec![0u8; written];
+        let (result, actual) = self.encode_into(event, &mut dynamic);
+        check(result)?;
+        dynamic.truncate(actual);
+        Ok(dynamic)
     }
 }
 
@@ -1244,13 +1272,34 @@ impl KeyEvent {
     }
 
     pub fn press(&mut self, key: i32, mods: u16) -> Result<(), GhosttyError> {
+        self.set_action_key_mods(sys::GHOSTTY_KEY_ACTION_PRESS, key, mods)
+    }
+
+    /// A held key is a repeat, not a fresh press. Kitty's `report_events` mode
+    /// distinguishes them, so preserve the platform's `is_held` flag.
+    pub fn repeat(&mut self, key: i32, mods: u16) -> Result<(), GhosttyError> {
+        self.set_action_key_mods(sys::GHOSTTY_KEY_ACTION_REPEAT, key, mods)
+    }
+
+    fn set_action_key_mods(
+        &mut self,
+        action: i32,
+        key: i32,
+        mods: u16,
+    ) -> Result<(), GhosttyError> {
         // SAFETY: the handle is valid and these values are the documented
-        // enum/bitmask representations of a key press.
-        check(unsafe {
-            sys::ghostty_key_event_set_action(self.as_raw(), sys::GHOSTTY_KEY_ACTION_PRESS)
-        })?;
+        // enum/bitmask representations of a key action.
+        check(unsafe { sys::ghostty_key_event_set_action(self.as_raw(), action) })?;
         check(unsafe { sys::ghostty_key_event_set_key(self.as_raw(), key) })?;
         check(unsafe { sys::ghostty_key_event_set_mods(self.as_raw(), mods) })
+    }
+
+    /// The physical key's unshifted Unicode codepoint. Independent from the
+    /// committed UTF-8 text: a shifted `A` commits "A" but its unshifted
+    /// codepoint is 'a'. Ghostty needs this for CSI-u and modifyOtherKeys.
+    pub fn set_unshifted_codepoint(&mut self, codepoint: u32) -> Result<(), GhosttyError> {
+        // SAFETY: the handle is valid and the codepoint is a Unicode scalar.
+        check(unsafe { sys::ghostty_key_event_set_unshifted_codepoint(self.as_raw(), codepoint) })
     }
 
     pub fn set_utf8(&mut self, text: &str) -> Result<(), GhosttyError> {

@@ -273,6 +273,32 @@ There are two input classes:
 
 Avoid double emission. A printable key may generate both a key event and committed text depending on GPUI/platform behavior. Define which path owns ordinary printable characters and test Windows/Linux separately.
 
+### Implementation policy
+
+The ownership split lives in the pure `key_for_keystroke` helper in
+`src/terminal/input.rs`, so it is covered by headless tests on both platforms.
+It matches Zed's pinned `terminal_view::key_down`: the view only calls
+`cx.stop_propagation()` when it actually encodes a key, otherwise the platform
+text path owns the event.
+
+- The native `InputHandler` path owns **plain printable keys** (shift allowed).
+  Windows delivers them via WM_CHAR, and X11/Wayland forward `key_char` when
+  propagation continues. Encoding them as well double-sends every character on
+  Windows. The space bar is the visible symptom: GPUI names it `"space"`, and
+  Ghostty emits **no bytes** for a printable key without UTF-8 text, so a naive
+  encoder dropped it on Linux.
+- The native path also owns AltGr and dead keys (`prefer_character_input`).
+- The encoder path owns control keys, arrows, Enter/Tab/Backspace and every
+  Ctrl/Alt combination: these have no platform text equivalent. Every encoded
+  keystroke with a `key_char` attaches it as UTF-8, so printable keys that do
+  reach the encoder (e.g. Ctrl+letter) carry their text.
+- `unshifted_codepoint` comes from the physical `Keystroke::key`, not from the
+  committed character: a shifted `A` commits `"A"` but reports unshifted `'a'`.
+  Otherwise CSI-u and `modifyOtherKeys` encode the wrong modifier state.
+- Held keys use `GHOSTTY_KEY_ACTION_REPEAT` so kitty `report_events` can tell a
+  repeat from a fresh press.
+- Encoding grows its buffer once on `out_of_space` so a key is never dropped.
+
 ## 11. Focus and command routing
 
 The terminal must own focus whenever the user clicks its canvas or the window opens with terminal focus. `TerminalView` should implement/use GPUI `FocusHandle`; GPUI describes it as the mechanism for tracking/manipulating keyboard focus. See [GPUI `app.rs`](https://github.com/zed-industries/zed/blob/6b720973027999bae402df23d469026f4cced988/crates/gpui/src/app.rs).
