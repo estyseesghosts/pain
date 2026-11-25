@@ -1,0 +1,18 @@
+# Cargo build output
+/target/
+
+# Zig build and dependency caches inside the vendored snapshot
+/vendor/ghostty-vt/.zig-cache/
+/vendor/ghostty-vt/zig-cache/
+/vendor/ghostty-vt/zig-out/
+/vendor/ghostty-vt/zig-pkg/
+
+# Release binaries are build artifacts; the source and build commands are the
+# reproducible deliverable.
+/pain-release.exe
+*.exe
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+*.swp

@@ -1,0 +1,5 @@
+# Keep in sync with silvestris-cont/rust-toolchain.toml and config/pins.toml.
+[toolchain]
+channel = "1.98.1"
+profile = "minimal"
+components = ["rustfmt", "clippy"]

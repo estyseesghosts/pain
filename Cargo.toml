@@ -1,0 +1,75 @@
+[package]
+name = "pain"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.98"
+description = "A minimal Windows/Linux terminal built on libghostty-vt and Silvestris"
+publish = false
+
+[workspace]
+resolver = "2"
+members = ["crates/ghostty-vt-sys"]
+
+[dependencies]
+ghostty-vt-sys = { path = "crates/ghostty-vt-sys" }
+
+# M3 ConPTY transport. Narrow Win32 features only; no WinUI, no private DLL.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.61.3", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
+    "Win32_System_IO",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+    "Win32_System_WindowsProgramming",
+] }
+
+# M4 POSIX PTY transport. Only libc primitives; no GTK/X11/Wayland code.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
+# Silvestris is consumed from the freshest devel/sil-cocoa-fixture checkout.
+# HEAD when wired: 30173a5860ad263feacb3d417a73c3a354a21e78. The path follows
+# newer commits in that checkout; keep it clean and update docs/SOURCE-MAP.md
+# with its HEAD when moving this path. M0 headless builds do not compile it:
+# GPUI is only needed once the M1 window renderer exists.
+[dependencies.silvestris]
+path = "../../silvestris-cont/crates/silvestris"
+optional = true
+
+# Must match silvestris-cont's config/pins.toml exactly. Never upgrade this
+# independently: two GPUI revisions produce incompatible types.
+[dependencies.gpui]
+git = "https://github.com/zed-industries/zed"
+rev = "6b720973027999bae402df23d469026f4cced988"
+default-features = false
+optional = true
+
+[dependencies.gpui_platform]
+git = "https://github.com/zed-industries/zed"
+rev = "6b720973027999bae402df23d469026f4cced988"
+default-features = false
+optional = true
+
+[target.'cfg(target_os = "linux")'.dependencies.gpui_platform]
+git = "https://github.com/zed-industries/zed"
+rev = "6b720973027999bae402df23d469026f4cced988"
+default-features = false
+features = ["wayland", "x11"]
+optional = true
+
+# Capacity-one wakeup bridge from the synthetic producer to GPUI's foreground
+# executor. Already in Cargo.lock through GPUI; no second executor is added.
+[dependencies.async-channel]
+version = "2"
+optional = true
+
+[features]
+default = []
+# Enable only with the M1 window renderer; pulls in Silvestris and its GPUI.
+shell = ["dep:silvestris", "dep:gpui", "dep:gpui_platform", "dep:async-channel"]
+
+[profile.dev]
+debug = "line-tables-only"

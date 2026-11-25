@@ -1,0 +1,21 @@
+# Example: `ghostty-vt` Terminal Effects
+
+Register terminal effect callbacks (`write_pty`, `bell`, `title_changed`,
+and `clipboard_write`) with the `ghostty-vt` C library and handle what a
+program asks of the terminal.
+
+The clipboard effect receives one atomic write with decoded, binary-safe
+MIME representations rather than protocol-specific OSC 52 data.
+
+This uses a `build.zig` and `Zig` to build the C program so that we
+can reuse a lot of our build logic and depend directly on our source
+tree, but Ghostty emits a standard C library that can be used with any
+C tooling.
+
+## Usage
+
+Run the program:
+
+```shell-session
+zig build run
+```

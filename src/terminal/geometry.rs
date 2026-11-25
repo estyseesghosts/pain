@@ -1,0 +1,449 @@
+//! Pure cell geometry and row batching used by `TerminalElement`.
+//!
+//! This module contains no GPUI or Ghostty calls. It turns the grid snapshot
+//! produced by the FFI layer into text runs and quad spans, which keeps the
+//! expensive decisions testable without opening a window. Wide-character
+//! *display width* is a rendering policy here; the grapheme string itself is
+//! always Ghostty's, so this is not a second terminal parser.
+
+use crate::terminal::ghostty::{Cell, ColorSpec, RowSelection};
+
+/// Font-size policy for the Ctrl+= / Ctrl+- commands. Kept here so the clamp
+/// is testable without a GPUI window.
+pub const MIN_FONT_SIZE: f32 = 8.0;
+pub const MAX_FONT_SIZE: f32 = 40.0;
+pub const FONT_SIZE_STEP: f32 = 1.0;
+
+#[must_use]
+pub fn adjust_font_size(current: f32, delta: f32) -> f32 {
+    (current + delta).clamp(MIN_FONT_SIZE, MAX_FONT_SIZE)
+}
+
+/// Cell width and line height measured from the resolved GPUI mono font.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CellMetrics {
+    pub cell_width: f32,
+    pub line_height: f32,
+}
+
+impl CellMetrics {
+    #[must_use]
+    pub fn new(cell_width: f32, line_height: f32) -> Self {
+        assert!(cell_width.is_finite() && cell_width > 0.0);
+        assert!(line_height.is_finite() && line_height > 0.0);
+        Self {
+            cell_width,
+            line_height,
+        }
+    }
+
+    /// Derive a terminal grid from the element's content bounds.
+    #[must_use]
+    pub fn grid_for(&self, width: f32, height: f32) -> (u16, u16) {
+        let cols = (width / self.cell_width).floor() as usize;
+        let rows = (height / self.line_height).floor() as usize;
+        (
+            u16::try_from(cols.max(1)).unwrap_or(u16::MAX),
+            u16::try_from(rows.max(1)).unwrap_or(u16::MAX),
+        )
+    }
+
+    /// Top-left corner of a grid cell, relative to `origin`.
+    #[must_use]
+    pub fn cell_origin(&self, origin: (f32, f32), col: u16, row: u16) -> (f32, f32) {
+        (
+            origin.0 + f32::from(col) * self.cell_width,
+            origin.1 + f32::from(row) * self.line_height,
+        )
+    }
+
+    /// Pixel rectangle of a span of `cells` grid columns on one row.
+    #[must_use]
+    pub fn span_bounds(
+        &self,
+        origin: (f32, f32),
+        col: u16,
+        row: u16,
+        cells: u16,
+    ) -> (f32, f32, f32, f32) {
+        let (x, y) = self.cell_origin(origin, col, row);
+        (x, y, f32::from(cells) * self.cell_width, self.line_height)
+    }
+}
+
+/// Everything that forces two adjacent cells into different text runs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StyleKey {
+    pub bold: bool,
+    pub italic: bool,
+    pub faint: bool,
+    pub blink: bool,
+    pub inverse: bool,
+    pub strikethrough: bool,
+    pub underline: u16,
+    pub foreground: Option<(u8, u8, u8)>,
+    pub background: Option<(u8, u8, u8)>,
+    pub selected: bool,
+}
+
+impl StyleKey {
+    #[must_use]
+    pub fn from_cell(cell: &Cell) -> Self {
+        let flags = cell.style.flags;
+        Self {
+            bold: cell.style.is_bold(),
+            italic: flags & sys_flag::ITALIC != 0,
+            faint: flags & sys_flag::FAINT != 0,
+            blink: flags & sys_flag::BLINK != 0,
+            inverse: flags & sys_flag::INVERSE != 0,
+            strikethrough: flags & sys_flag::STRIKETHROUGH != 0,
+            underline: cell.style.underline(),
+            foreground: cell.foreground,
+            background: cell.background,
+            selected: cell.selected,
+        }
+    }
+}
+
+/// Bit values mirrored from `GHOSTTY_STYLE_FLAG_*`; kept here so batching tests
+/// do not depend on the FFI crate's constants.
+mod sys_flag {
+    pub const ITALIC: u16 = 1 << 1;
+    pub const FAINT: u16 = 1 << 2;
+    pub const BLINK: u16 = 1 << 3;
+    pub const INVERSE: u16 = 1 << 4;
+    pub const STRIKETHROUGH: u16 = 1 << 6;
+}
+
+/// A run of adjacent cells that can be shaped with one `shape_line` call.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TextRun {
+    pub start_col: u16,
+    pub cells: u16,
+    pub text: String,
+    pub style: StyleKey,
+}
+
+/// A contiguous run of non-default background cells.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BgRun {
+    pub start_col: u16,
+    pub cells: u16,
+    pub color: (u8, u8, u8),
+}
+
+/// Display columns for a Ghostty grapheme cluster. A wide grapheme occupies
+/// its own cell plus the following wide-tail cell; blank cells occupy one
+/// column but are never shaped on their own.
+#[must_use]
+pub fn display_columns(text: &str) -> u16 {
+    let Some(first) = text.chars().next() else {
+        return 0;
+    };
+    let cp = u32::from(first);
+    let wide = matches!(cp,
+        0x1100..=0x115F
+        | 0x2329..=0x232A
+        | 0x2E80..=0xA4CF
+        | 0xAC00..=0xD7A3
+        | 0xF900..=0xFAFF
+        | 0xFE10..=0xFE19
+        | 0xFE30..=0xFE6F
+        | 0xFF00..=0xFF60
+        | 0xFFE0..=0xFFE6
+        | 0x1F300..=0x1FAFF
+        | 0x20000..=0x3FFFD
+    );
+    if wide { 2 } else { 1 }
+}
+
+/// Batch one row into text runs. Empty cells become spaces inside a run so
+/// GPUI's advance keeps later glyphs aligned, but a row of only empty cells
+/// produces no runs at all and is never shaped.
+#[must_use]
+pub fn batch_row(cells: &[Cell]) -> Vec<TextRun> {
+    let mut runs: Vec<TextRun> = Vec::new();
+    let mut col = 0usize;
+    while col < cells.len() {
+        let cell = &cells[col];
+        // A wide tail carries no grapheme of its own and is always absorbed
+        // by the preceding wide cell in the inner loop below.
+        let style = StyleKey::from_cell(cell);
+        let mut text = if cell.text.is_empty() {
+            String::from(" ")
+        } else {
+            cell.text.clone()
+        };
+        let mut span = 1u16;
+        let mut next = col + 1;
+        while next < cells.len() {
+            let candidate = &cells[next];
+            if candidate.text.is_empty() && display_columns(&cells[next - 1].text) == 2 {
+                // The tail is a real grid column; keep a space in the shaped
+                // string so later glyphs stay aligned even if the fallback
+                // font advances the wide grapheme by only one cell.
+                text.push(' ');
+                span += 1;
+                next += 1;
+                continue;
+            }
+            if StyleKey::from_cell(candidate) != style {
+                break;
+            }
+            text.push_str(if candidate.text.is_empty() {
+                " "
+            } else {
+                &candidate.text
+            });
+            span += 1;
+            next += 1;
+        }
+        if text.bytes().any(|b| b != b' ') {
+            runs.push(TextRun {
+                start_col: u16::try_from(col).unwrap_or(u16::MAX),
+                cells: span,
+                text,
+                style,
+            });
+        }
+        col = next;
+    }
+    runs
+}
+
+/// Coalesce non-default background colors into spans. Default cells produce
+/// no quad because the whole content area is filled once by the element.
+#[must_use]
+pub fn background_runs(cells: &[Cell], default: ColorSpec, palette: &[(u8, u8, u8); 256]) -> Vec<BgRun> {
+    let resolve = |spec: ColorSpec| -> (u8, u8, u8) {
+        match spec {
+            ColorSpec::Palette(i) => palette.get(usize::from(i)).copied().unwrap_or((0, 0, 0)),
+            ColorSpec::Rgb(r, g, b) => (r, g, b),
+        }
+    };
+    let default_rgb = resolve(default);
+    let effective = |cell: &Cell| -> (u8, u8, u8) {
+        cell.background
+            .or_else(|| cell.style.background.map(resolve))
+            .unwrap_or(default_rgb)
+    };
+    let mut runs = Vec::new();
+    let mut col = 0usize;
+    while col < cells.len() {
+        let color = effective(&cells[col]);
+        if color == default_rgb {
+            col += 1;
+            continue;
+        }
+        let start = col;
+        col += 1;
+        while col < cells.len() && effective(&cells[col]) == color {
+            col += 1;
+        }
+        runs.push(BgRun {
+            start_col: u16::try_from(start).unwrap_or(u16::MAX),
+            cells: u16::try_from(col - start).unwrap_or(u16::MAX),
+            color,
+        });
+    }
+    runs
+}
+
+/// Selection quad for a row, if any.
+#[must_use]
+pub fn selection_span(selection: Option<RowSelection>) -> Option<(u16, u16)> {
+    selection.map(|s| (s.start_x, s.end_x.saturating_sub(s.start_x) + 1))
+}
+
+/// Effective foreground color for a run: Ghostty resolves palette indices,
+/// so the resolved RGB on the cell is authoritative. `None` means use the
+/// terminal's default foreground from the frame's `Colors`.
+#[must_use]
+pub fn run_foreground(run: &TextRun) -> Option<(u8, u8, u8)> {
+    run.style.foreground
+}
+
+/// Returns true when a frame's dirty state means all visible rows must be
+/// rebuilt; partial and clean frames can reuse cached rows.
+#[must_use]
+pub fn is_full_rebuild(dirty: i32, dirty_full: i32) -> bool {
+    dirty == dirty_full
+}
+
+/// Row-cache decision, kept independent of GPUI so the M1 acceptance rule is
+/// testable without a window. Dirty rows from Ghostty are authoritative;
+/// dirty PARTIAL rebuilds only those rows, CLEAN rebuilds none.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RowCache {
+    rows: usize,
+    generation: u64,
+    valid: bool,
+}
+
+impl RowCache {
+    #[must_use]
+    pub fn new(rows: usize) -> Self {
+        Self {
+            rows,
+            generation: 0,
+            valid: false,
+        }
+    }
+
+    /// Return the row indices that must be rebuilt for this frame.
+    #[must_use]
+    pub fn rows_to_rebuild(&mut self, generation: u64, dirty: i32, dirty_rows: &[u16]) -> Vec<usize> {
+        // A new output generation with no dirty flags has no visible change,
+        // so it must not force a rebuild. Generation is recorded for
+        // diagnostics and for the element's whole-frame cache check.
+        let _ = generation;
+        if !self.valid || is_full_rebuild(dirty, sys::GHOSTTY_RENDER_STATE_DIRTY_FULL) {
+            self.valid = true;
+            self.generation = generation;
+            return (0..self.rows).collect();
+        }
+        if dirty == sys::GHOSTTY_RENDER_STATE_DIRTY_FALSE {
+            return Vec::new();
+        }
+        let mut out: Vec<usize> = dirty_rows
+            .iter()
+            .filter_map(|y| usize::try_from(*y).ok())
+            .filter(|y| *y < self.rows)
+            .collect();
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+}
+
+mod sys {
+    pub const GHOSTTY_RENDER_STATE_DIRTY_FALSE: i32 = 0;
+    pub const GHOSTTY_RENDER_STATE_DIRTY_FULL: i32 = 2;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::terminal::ghostty::Style;
+
+    fn cell(text: &str, bold: bool, bg: Option<ColorSpec>) -> Cell {
+        Cell {
+            text: text.into(),
+            style: Style {
+                flags: if bold { 1 } else { 0 },
+                foreground: None,
+                background: bg,
+                underline_color: None,
+            },
+            foreground: None,
+            background: None,
+            selected: false,
+            has_styling: bold,
+        }
+    }
+
+    #[test]
+    fn font_size_steps_are_bounded() {
+        assert_eq!(adjust_font_size(12.0, FONT_SIZE_STEP), 13.0);
+        assert_eq!(adjust_font_size(12.0, -FONT_SIZE_STEP), 11.0);
+        assert_eq!(adjust_font_size(MIN_FONT_SIZE, -10.0), MIN_FONT_SIZE);
+        assert_eq!(adjust_font_size(MAX_FONT_SIZE, 10.0), MAX_FONT_SIZE);
+    }
+
+    #[test]
+    fn grid_and_cell_geometry_derive_from_metrics() {
+        let m = CellMetrics::new(9.5, 19.0);
+        assert_eq!(m.grid_for(190.0, 380.0), (20, 20));
+        assert_eq!(m.grid_for(9.0, 18.0), (1, 1));
+        assert_eq!(m.cell_origin((10.0, 20.0), 2, 3), (29.0, 77.0));
+        assert_eq!(m.span_bounds((0.0, 0.0), 1, 2, 3), (9.5, 38.0, 28.5, 19.0));
+    }
+
+    #[test]
+    fn adjacent_same_style_cells_share_one_run() {
+        let cells = vec![cell("H", false, None), cell("i", false, None)];
+        let runs = batch_row(&cells);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].text, "Hi");
+        assert_eq!((runs[0].start_col, runs[0].cells), (0, 2));
+    }
+
+    #[test]
+    fn style_change_splits_runs() {
+        let cells = vec![
+            cell("a", false, None),
+            cell("B", true, None),
+            cell("c", false, None),
+        ];
+        let runs = batch_row(&cells);
+        assert_eq!(runs.iter().map(|r| r.text.as_str()).collect::<Vec<_>>(), ["a", "B", "c"]);
+        assert_eq!(runs[1].style.bold, true);
+    }
+
+    #[test]
+    fn empty_row_is_never_shaped() {
+        let cells = vec![cell("", false, None); 80];
+        assert!(batch_row(&cells).is_empty());
+    }
+
+    #[test]
+    fn wide_grapheme_absorbs_its_tail() {
+        let cells = vec![cell("界", false, None), cell("", false, None), cell("x", false, None)];
+        assert_eq!(display_columns("界"), 2);
+        let runs = batch_row(&cells);
+        // Same-style neighbours share one run; the tail is a space in the
+        // shaped string so `x` stays in its own grid column.
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].text, "界 x");
+        assert_eq!(runs[0].cells, 3);
+        assert_eq!(runs[0].start_col, 0);
+    }
+
+    #[test]
+    fn wide_tail_does_not_start_a_new_run() {
+        let cells = vec![cell("界", false, None), cell("", false, None), cell("x", true, None)];
+        let runs = batch_row(&cells);
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[0].text, "界 ");
+        assert_eq!(runs[0].cells, 2);
+        assert_eq!(runs[1].start_col, 2);
+        assert_eq!(runs[1].text, "x");
+    }
+
+    #[test]
+    fn backgrounds_coalesce_and_skip_defaults() {
+        let mut palette = [(0, 0, 0); 256];
+        palette[1] = (9, 8, 7);
+        palette[4] = (1, 2, 3);
+        let cells = vec![
+            cell("a", false, Some(ColorSpec::Palette(1))),
+            cell("b", false, Some(ColorSpec::Palette(1))),
+            cell("c", false, None),
+        ];
+        let runs = background_runs(&cells, ColorSpec::Palette(4), &palette);
+        assert_eq!(runs.len(), 1);
+        assert_eq!((runs[0].start_col, runs[0].cells), (0, 2));
+        assert_eq!(runs[0].color, (9, 8, 7));
+    }
+
+    #[test]
+    fn row_cache_reuses_clean_frames_and_rebuilds_only_dirty_rows() {
+        let mut cache = RowCache::new(24);
+        // First frame has no valid cache: rebuild everything.
+        assert_eq!(cache.rows_to_rebuild(1, 2, &[]).len(), 24);
+        // Same generation, clean frame: no row is rebuilt.
+        assert!(cache.rows_to_rebuild(1, 0, &[]).is_empty());
+        // Partial frame: only Ghostty's dirty rows are rebuilt.
+        assert_eq!(cache.rows_to_rebuild(2, 1, &[3, 9, 3]), vec![3, 9]);
+        // A new output generation with no dirty rows still reuses the cache.
+        assert!(cache.rows_to_rebuild(3, 0, &[]).is_empty());
+        // Full dirty forces a complete rebuild.
+        assert_eq!(cache.rows_to_rebuild(4, 2, &[1]).len(), 24);
+    }
+
+    #[test]
+    fn selection_span_is_inclusive() {
+        assert_eq!(selection_span(Some(RowSelection { start_x: 3, end_x: 6 })), Some((3, 4)));
+        assert_eq!(selection_span(None), None);
+    }
+}

@@ -1,0 +1,10 @@
+libghostty-vt source snapshot for pain
+tag:      vt-1.0.2
+commit:   573c4a21e02311ae87844af26b6a7a179f82858e
+pin:      vt-1.0.2 573c4a21e02311ae87844af26b6a7a179f82858e
+upstream: https://github.com/ghostty-org/ghostty
+extracted with: git archive vt-1.0.2
+
+This is a pinned source snapshot, not a checkout of main. Do not replace it
+with a newer commit without updating crates/ghostty-vt-sys/build.rs,
+docs/SOURCE-MAP.md and the ABI declarations in crates/ghostty-vt-sys/src/lib.rs.
