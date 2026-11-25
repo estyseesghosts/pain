@@ -236,7 +236,7 @@ impl Render for PreferencesView {
             .map(|profile| profile.label.as_str())
             .unwrap_or("system shell");
         let labels: Vec<SharedString> =
-            std::iter::once(SharedString::from(format!("Automatic ({automatic})")))
+            std::iter::once(SharedString::from(format!("Automatic — {automatic}")))
                 .chain(
                     profiles
                         .iter()
