@@ -1,6 +1,6 @@
 # Silvestris Terminal Demo — Engineering Packet
 
-This packet defines a deliberately small terminal application built as a **Silvestris consumer** on **Windows and Linux**. The program is intended to prove that a real terminal can live cleanly inside the current Silvestris/GPUI stack without importing the application complexity of Ghostty, Wintty, Zed, Windows Terminal, or a modern multi-pane terminal. The first useful version has one window, one terminal session, one shell, scrollback, keyboard and text input, selection/copy/paste, resize, focus, basic mouse support, and correct terminal colors. It does not have tabs, splits, profiles, a command palette, shell integration, session restoration, remote-control APIs, image protocols, shader systems, or a settings application.
+This packet defines a deliberately small terminal application built as a **Silvestris consumer** on **Windows and Linux**. The program is intended to prove that a real terminal can live cleanly inside the current Silvestris/GPUI stack without importing the application complexity of Ghostty, Wintty, Zed, Windows Terminal, or a modern multi-pane terminal. The first useful version has one window, one terminal session, one shell, scrollback, keyboard and text input, selection/copy/paste, resize, focus, basic mouse support, and correct terminal colors. It has one small Preferences window for the Silvestris theme and terminal palette. It does not have tabs, splits, profiles, a command palette, shell integration, session restoration, remote-control APIs, image protocols or shader systems.
 
 The architectural decision is simple: **Ghostty owns terminal semantics; the application owns PTY transport; GPUI owns rendering and platform input; Silvestris owns the window shell and application chrome.** Current `libghostty-vt` is a particularly good fit because its terminal API explicitly states that a `GhosttyTerminal` keeps the screen, scrollback, cursor, styles, and modes while **not drawing and not talking to a PTY**; both are left to the embedder. Its render API exposes dirty/full/partial state and dirty-row iteration, so the GPUI renderer can redraw only what changed instead of copying or rebuilding the entire terminal every frame. See [Ghostty `terminal.h`](https://github.com/ghostty-org/ghostty/blob/64a6fedfd26d1fa687733f9f411db5eb8e205ebe/include/ghostty/vt/terminal.h) and [Ghostty `render.h`](https://github.com/ghostty-org/ghostty/blob/64a6fedfd26d1fa687733f9f411db5eb8e205ebe/include/ghostty/vt/render.h).
 
@@ -110,6 +110,13 @@ M0–M7 are implemented and smoke-tested on Windows and Linux/WSLg.
   handlers. Clipboard copy uses Ghostty's formatter/selection; paste uses the
   terminal-aware paste API (bracketed paste). `Ctrl+Shift+C/V/A` are the
   whitelisted app commands; all other keys go to the PTY.
+
+- Appearance: `Ctrl+,` opens the one-window Preferences form (Chaus's
+  `WindowFrame` + `Form` pattern). It switches between all four Silvestris
+  Aqua/Geist light/dark themes and between Ghostty's default palette, a palette
+  that follows the theme, and three named ANSI palettes. `src/terminal/palette.rs`
+  holds only base-16 colours; Ghostty generates the other 240 entries. Choices
+  persist in `%LOCALAPPDATA%\pain\preferences.json` (or the XDG data dir).
 
 - M5: `ghostty_terminal_scroll_viewport` drives wheel/trackpad history
   scrolling and a thin scrollbar view; mouse-reporting TUIs receive wheel

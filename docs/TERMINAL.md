@@ -468,6 +468,31 @@ Do not block the GPUI foreground thread while joining potentially stuck I/O thre
 - Linux: user shell, vim, htop/btop, large output.
 - Both: resize while output streams; copy/paste after long scrollback; terminal app enters/exits alternate screen repeatedly.
 
+## 21. Appearance and preferences
+
+`Ctrl+,` opens a single fixed-size Preferences window built from Silvestris's
+`WindowFrame`, `Form`/`FormRow` and `SegmentedControl`, following Chaus's
+one-window settings pattern. There are no tabs or profile panes.
+
+- **Theme** selects one of four Silvestris theme ids (`AquaLight`,
+  `AquaDark`, `GeistLight`, `GeistDark`), so both light/dark mode and the Geist
+  family are explicit choices. `silvestris::set_theme_preference` repaints every
+  window without rebuilding view state.
+- **Terminal palette** selects Ghostty's built-in default (the pre-preferences
+  look), a palette that follows the UI light/dark appearance, or one of three
+  named ANSI palettes. `src/terminal/palette.rs` owns only the ten colour roles
+  and the base-16 entries; Ghostty's `ghostty_color_palette_generate` fills
+  indices 16..255. `TerminalSession::set_colors` installs them through
+  `ghostty_terminal_set` and schedules one wakeup so cached rows are rebuilt.
+- The active appearance also answers `CSI ? 996 n` through a Ghostty
+  `GHOSTTY_TERMINAL_OPT_COLOR_SCHEME` callback, so colour-scheme-aware programs
+  see the same light/dark choice as the user.
+- The versioned document lives in the per-user data directory beside the log
+  (`preferences.json`). A malformed file falls back to defaults and is left
+  untouched. The "Default" choice resets to explicit Ghostty defaults
+  rather than clearing the options, because clearing them leaves stale colors
+  in Ghostty's render state.
+
 ## Deliverables
 
 - One shared `TerminalSession` architecture on Windows/Linux.

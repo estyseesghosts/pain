@@ -8,13 +8,9 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// `PAIN_LOG` overrides the destination; otherwise use the platform's normal
-/// per-user data directory.
+/// Per-user data directory shared by the log and the preferences document.
 #[must_use]
-pub fn log_path() -> PathBuf {
-    if let Some(path) = std::env::var_os("PAIN_LOG") {
-        return PathBuf::from(path);
-    }
+pub fn data_dir() -> PathBuf {
     #[cfg(target_os = "windows")]
     let base = std::env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
@@ -27,7 +23,17 @@ pub fn log_path() -> PathBuf {
                 .map(|home| PathBuf::from(home).join(".local/share"))
                 .unwrap_or_else(std::env::temp_dir)
         });
-    base.join("pain").join("pain.log")
+    base.join("pain")
+}
+
+/// `PAIN_LOG` overrides the destination; otherwise use the platform's normal
+/// per-user data directory.
+#[must_use]
+pub fn log_path() -> PathBuf {
+    if let Some(path) = std::env::var_os("PAIN_LOG") {
+        return PathBuf::from(path);
+    }
+    data_dir().join("pain.log")
 }
 
 /// Append one line. Best effort: logging must never abort terminal startup.

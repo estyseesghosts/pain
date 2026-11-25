@@ -256,6 +256,11 @@ pub fn is_app_shortcut(name: &str, mods: Modifiers) -> bool {
     exact("c", true, true) // Ctrl+Shift+C: copy
         || exact("v", true, true) // Ctrl+Shift+V: paste
         || exact("a", true, true) // Ctrl+Shift+A: select all
+        || ((name == "," || name == "comma")
+            && mods.control
+            && !mods.shift
+            && !mods.alt
+            && !mods.super_key) // Ctrl+,: preferences
         || (name == "insert" && mods.shift && !mods.control && !mods.alt && !mods.super_key)
 }
 
@@ -559,6 +564,10 @@ mod tests {
         assert!(is_app_shortcut(
             "insert",
             Modifiers::new(true, false, false, false)
+        ));
+        assert!(is_app_shortcut(
+            ",",
+            Modifiers::new(false, true, false, false)
         ));
         // Plain Ctrl+C and unmodified keys still belong to the PTY.
         assert!(!is_app_shortcut(

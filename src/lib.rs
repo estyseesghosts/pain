@@ -10,4 +10,6 @@ pub mod app;
 pub mod config;
 pub mod log;
 pub mod platform;
+#[cfg(feature = "shell")]
+pub mod preferences;
 pub mod terminal;

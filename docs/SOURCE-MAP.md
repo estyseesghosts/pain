@@ -183,6 +183,17 @@ still comes from the active Silvestris theme. Window resize handling derives
 grid size from real cell metrics, calls `ghostty_terminal_resize` only when
 rows/columns change, and reuses cached rows for pixel-only size changes.
 
+## Appearance and preferences — 2026-11-25
+
+No upstream pin moved. Terminal colours use additional declarations from the
+same pinned `vt-1.0.2` headers: `GHOSTTY_TERMINAL_OPT_COLOR_*`,
+`ghostty_color_palette_default` and `ghostty_color_palette_generate` from
+`ghostty/vt/color.h`, plus the `GHOSTTY_TERMINAL_OPT_COLOR_SCHEME` callback in
+`ghostty/vt/terminal.h`. The preferences form copies Chaus's one-window
+`WindowFrame` + `Form` pattern from `chaus-app/src/preferences.rs` at the local
+checkout; no Chaus code is vendored. Silvestris theme ids are the public
+`ThemeId::{AQUA,GEIST}_{LIGHT,DARK}` constants from the pinned checkout.
+
 ## Implemented milestones M5/M6/M7 — 2026-11-25
 
 No upstream pin moved. The new scrollbar/viewport calls come from the same

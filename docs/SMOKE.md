@@ -28,10 +28,16 @@ Run the manual half on each platform before calling a build shippable.
    drag that leaves the surface keeps reporting. Holding Shift (or Super)
    keeps selection local instead. Right-click with reporting off is left to the
    platform context menu.
-9. Set a title with `printf '\033]0;smoke title\007'` and confirm the window
-   title changes. Clear it and confirm the `pain` fallback returns.
-10. Close the window. The child shell exits, no process is left behind, and the
-    configured log file contains no new ERROR lines.
+ 9. `Ctrl+,` opens Preferences. Choose each of Aqua Light/Dark and Geist
+    Light/Dark: the window chrome and terminal both follow, and text stays
+    readable. Choose `Theme`, `Catppuccin`, `Gruvbox`, `Solarized` and `Default`
+    in turn; the ANSI colours change live and the shell keeps running. Reopen
+    Preferences with `Ctrl+,`; the last choices persist.
+10. Set a title with `printf '\033]0;smoke title\007'` and confirm the window
+    title changes. Clear it and confirm the `pain` fallback returns.
+11. Close the terminal window with Preferences still open: the shell exits but
+    Preferences stays usable. Close Preferences last. No process is left behind
+    and the log contains no new ERROR lines.
 
 ## Windows only
 

@@ -6,6 +6,7 @@ pub mod ghostty;
 pub mod fixtures;
 pub mod geometry;
 pub mod input;
+pub mod palette;
 pub mod selection;
 pub mod session;
 pub mod writer;

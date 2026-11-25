@@ -10,6 +10,7 @@ use std::ffi::{c_void, CStr};
 use std::fmt;
 use std::marker::PhantomData;
 use std::ptr;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 
 use ghostty_vt_sys as sys;
@@ -171,6 +172,9 @@ pub struct GhosttyTerminal {
     raw: Option<sys::GhosttyTerminal>,
     cols: u16,
     rows: u16,
+    /// Shared with the effect callbacks so `CSI ? 996 n` answers match the
+    /// active light/dark palette.
+    color_scheme: Arc<AtomicU8>,
 }
 
 impl GhosttyTerminal {
@@ -185,6 +189,7 @@ impl GhosttyTerminal {
             raw: Some(raw),
             cols,
             rows,
+            color_scheme: Arc::new(AtomicU8::new(0)),
         })
     }
 
@@ -224,6 +229,111 @@ impl GhosttyTerminal {
         })?;
         self.cols = cols;
         self.rows = rows;
+        Ok(())
+    }
+
+    /// Apply a terminal palette. Ghostty generates the 240 non-base colours
+    /// from the base-16 entries, then stores the result as its default palette;
+    /// OSC overrides from child programs still take precedence at runtime.
+    pub fn set_colors(
+        &mut self,
+        colors: Option<&crate::terminal::palette::Palette>,
+    ) -> Result<(), GhosttyError> {
+        let Some(colors) = colors else {
+            // Setting explicit defaults matters: clearing the options leaves
+            // the render state holding the previous palette's background.
+            let mut palette = [sys::GhosttyColorRgb::default(); 256];
+            // SAFETY: `palette` has the 256 entries the function writes.
+            unsafe { sys::ghostty_color_palette_default(palette.as_mut_ptr()) };
+            let black = sys::GhosttyColorRgb::default();
+            let white = sys::GhosttyColorRgb {
+                r: 0xff,
+                g: 0xff,
+                b: 0xff,
+            };
+            // SAFETY: the option value types match the header and Ghostty
+            // copies them before returning.
+            unsafe {
+                for (option, value) in [
+                    (
+                        sys::GHOSTTY_TERMINAL_OPT_COLOR_FOREGROUND,
+                        &white as *const sys::GhosttyColorRgb as *const c_void,
+                    ),
+                    (
+                        sys::GHOSTTY_TERMINAL_OPT_COLOR_BACKGROUND,
+                        &black as *const sys::GhosttyColorRgb as *const c_void,
+                    ),
+                    (
+                        sys::GHOSTTY_TERMINAL_OPT_COLOR_CURSOR,
+                        &white as *const sys::GhosttyColorRgb as *const c_void,
+                    ),
+                    (
+                        sys::GHOSTTY_TERMINAL_OPT_COLOR_PALETTE,
+                        palette.as_ptr() as *const c_void,
+                    ),
+                ] {
+                    check(sys::ghostty_terminal_set(self.as_raw(), option, value))?;
+                }
+            }
+            self.color_scheme
+                .store(sys::GHOSTTY_COLOR_SCHEME_DARK as u8, Ordering::Release);
+            return Ok(());
+        };
+        let rgb = |c: crate::terminal::palette::Rgb| sys::GhosttyColorRgb {
+            r: c.r,
+            g: c.g,
+            b: c.b,
+        };
+        let mut base = [sys::GhosttyColorRgb::default(); 256];
+        for (slot, color) in base.iter_mut().zip(colors.base.iter()) {
+            *slot = rgb(*color);
+        }
+        let mut palette = [sys::GhosttyColorRgb::default(); 256];
+        let bg = rgb(colors.background);
+        let fg = rgb(colors.foreground);
+        let cursor = rgb(colors.cursor);
+        // SAFETY: `base` and `palette` are 256-element arrays, `skip` is NULL as
+        // documented, and every pointer is alive for the duration of the call.
+        unsafe {
+            sys::ghostty_color_palette_generate(
+                base.as_ptr(),
+                ptr::null(),
+                &bg,
+                &fg,
+                false,
+                palette.as_mut_ptr(),
+            );
+        }
+        // SAFETY: each option's value type is the one documented in
+        // `terminal.h` (`GhosttyColorRgb*` and `GhosttyColorRgb[256]*`). Ghostty
+        // copies the values, so these locals may go out of scope immediately.
+        let set = |option: i32, value: *const c_void| unsafe {
+            check(sys::ghostty_terminal_set(self.as_raw(), option, value))
+        };
+        set(
+            sys::GHOSTTY_TERMINAL_OPT_COLOR_FOREGROUND,
+            &fg as *const sys::GhosttyColorRgb as *const c_void,
+        )?;
+        set(
+            sys::GHOSTTY_TERMINAL_OPT_COLOR_BACKGROUND,
+            &bg as *const sys::GhosttyColorRgb as *const c_void,
+        )?;
+        set(
+            sys::GHOSTTY_TERMINAL_OPT_COLOR_CURSOR,
+            &cursor as *const sys::GhosttyColorRgb as *const c_void,
+        )?;
+        set(
+            sys::GHOSTTY_TERMINAL_OPT_COLOR_PALETTE,
+            palette.as_ptr() as *const c_void,
+        )?;
+        self.color_scheme.store(
+            if colors.dark {
+                sys::GHOSTTY_COLOR_SCHEME_DARK
+            } else {
+                sys::GHOSTTY_COLOR_SCHEME_LIGHT
+            } as u8,
+            Ordering::Release,
+        );
         Ok(())
     }
 
@@ -550,7 +660,11 @@ impl GhosttyTerminal {
         writer: Arc<WriterQueue>,
         on_title: Box<dyn Fn(String) + Send + Sync>,
     ) -> Result<CallbackRegistration, GhosttyError> {
-        let userdata = Arc::into_raw(Arc::new(CallbackData { writer, on_title })) as *mut c_void;
+        let userdata = Arc::into_raw(Arc::new(CallbackData {
+            writer,
+            on_title,
+            color_scheme: Arc::clone(&self.color_scheme),
+        })) as *mut c_void;
         // SAFETY: `userdata` is a strong Arc reference kept alive by the token
         // and by the terminal option until both are torn down.
         let result = unsafe {
@@ -571,6 +685,10 @@ impl GhosttyTerminal {
             (
                 sys::GHOSTTY_TERMINAL_OPT_TITLE_CHANGED,
                 title_changed_callback as *const c_void,
+            ),
+            (
+                sys::GHOSTTY_TERMINAL_OPT_COLOR_SCHEME,
+                color_scheme_callback as *const c_void,
             ),
         ] {
             let result = unsafe { sys::ghostty_terminal_set(self.as_raw(), option, callback) };
@@ -606,6 +724,32 @@ impl Drop for FormatterGuard {
 struct CallbackData {
     writer: Arc<WriterQueue>,
     on_title: Box<dyn Fn(String) + Send + Sync>,
+    color_scheme: Arc<AtomicU8>,
+}
+
+/// `GhosttyTerminalColorSchemeFn`: answer `CSI ? 996 n` with the palette's
+/// appearance. The shared atomic is written only under the terminal lock.
+unsafe extern "C" fn color_scheme_callback(
+    _terminal: sys::GhosttyTerminal,
+    userdata: *mut c_void,
+    out_scheme: *mut i32,
+) -> bool {
+    if userdata.is_null() || out_scheme.is_null() {
+        return false;
+    }
+    // SAFETY: same ownership invariant as `write_pty_callback`.
+    let callbacks = unsafe { &*(userdata.cast::<CallbackData>()) };
+    let scheme = callbacks.color_scheme.load(Ordering::Acquire);
+    // SAFETY: `out_scheme` is the typed out-parameter Ghostty supplies, and
+    // `GhosttyColorScheme` is a C enum backed by int.
+    unsafe {
+        *out_scheme = if scheme == sys::GHOSTTY_COLOR_SCHEME_DARK as u8 {
+            sys::GHOSTTY_COLOR_SCHEME_DARK
+        } else {
+            sys::GHOSTTY_COLOR_SCHEME_LIGHT
+        };
+    }
+    true
 }
 
 /// `GhosttyTerminalWritePtyFn`: copy the response into the writer queue and

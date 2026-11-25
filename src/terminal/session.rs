@@ -475,6 +475,22 @@ impl TerminalSession {
         Ok(bytes)
     }
 
+    /// Apply a new terminal palette from the preferences window. Ghostty marks
+    /// the render state dirty; the wakeup makes the next frame rebuild cached
+    /// rows even when no PTY output arrived.
+    pub fn set_colors(
+        &self,
+        colors: Option<&crate::terminal::palette::Palette>,
+    ) -> Result<(), GhosttyError> {
+        {
+            let mut terminal = self.terminal.lock().expect("terminal mutex poisoned");
+            terminal.set_colors(colors)?;
+        }
+        self.generation.fetch_add(1, Ordering::AcqRel);
+        self.schedule_wakeup();
+        Ok(())
+    }
+
     /// Writer queue interface. UI input and Ghostty's `WRITE_PTY` callback
     /// both enqueue here; the platform writer thread drains it in order.
     pub fn enqueue_writer(&self, bytes: Vec<u8>) -> usize {

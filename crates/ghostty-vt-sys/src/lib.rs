@@ -43,6 +43,15 @@ pub const GHOSTTY_TERMINAL_OPT_BELL: i32 = 3;
 pub const GHOSTTY_TERMINAL_OPT_TITLE_CHANGED: i32 = 6;
 pub const GHOSTTY_TERMINAL_OPT_SIZE: i32 = 7;
 pub const GHOSTTY_TERMINAL_OPT_TITLE: i32 = 10;
+// Color scheme query callback (`CSI ? 996 n`) and default terminal colors.
+pub const GHOSTTY_TERMINAL_OPT_COLOR_SCHEME: i32 = 8;
+pub const GHOSTTY_TERMINAL_OPT_COLOR_FOREGROUND: i32 = 12;
+pub const GHOSTTY_TERMINAL_OPT_COLOR_BACKGROUND: i32 = 13;
+pub const GHOSTTY_TERMINAL_OPT_COLOR_CURSOR: i32 = 14;
+pub const GHOSTTY_TERMINAL_OPT_COLOR_PALETTE: i32 = 15;
+// `GhosttyColorScheme` is a C enum backed by int.
+pub const GHOSTTY_COLOR_SCHEME_LIGHT: i32 = 0;
+pub const GHOSTTY_COLOR_SCHEME_DARK: i32 = 1;
 pub const GHOSTTY_TERMINAL_OPT_PWD_CHANGED: i32 = 26;
 pub const GHOSTTY_TERMINAL_OPT_SELECTION: i32 = 22;
 pub const GHOSTTY_TERMINAL_OPT_DEFAULT_CURSOR_STYLE: i32 = 23;
@@ -619,6 +628,18 @@ unsafe extern "C" {
     pub fn ghostty_sized_init(ptr: *mut c_void, size: usize);
     pub fn ghostty_version() -> *const c_char;
     pub fn ghostty_style_default(style: *mut GhosttyStyle);
+
+    // `ghostty/vt/color.h`. The palette generator is part of the stable VT
+    // library; it keeps the base-16 colors and fills indices 16..256.
+    pub fn ghostty_color_palette_default(out: *mut GhosttyColorRgb);
+    pub fn ghostty_color_palette_generate(
+        base: *const GhosttyColorRgb,
+        skip: *const c_void,
+        bg: *const GhosttyColorRgb,
+        fg: *const GhosttyColorRgb,
+        harmonious: bool,
+        out: *mut GhosttyColorRgb,
+    );
 
     // `ghostty/vt/terminal.h`.
     pub fn ghostty_terminal_new(

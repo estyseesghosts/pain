@@ -3397,6 +3397,7 @@ dependencies = [
  "gpui",
  "gpui_platform",
  "libc",
+ "serde",
  "silvestris",
  "windows 0.61.3",
 ]

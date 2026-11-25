@@ -17,6 +17,7 @@ use silvestris::{ActiveTheme, ThemePreference};
 use crate::config::{parse_args, usage, version_line};
 use crate::log;
 use crate::platform::{default_shell, spawn_pty, PlatformPty, PtyConfig};
+use crate::preferences::{self, SessionGlobal};
 use crate::terminal::fixtures::Fixture;
 use crate::terminal::geometry::FONT_SIZE_STEP;
 use crate::terminal::render::TerminalView;
@@ -31,7 +32,8 @@ gpui::actions!(
         ResetFont,
         CopySelection,
         PasteClipboard,
-        SelectAllTerminal
+        SelectAllTerminal,
+        OpenPreferences
     ]
 );
 
@@ -41,9 +43,10 @@ const RESET_FONT: &str = "pain.reset-font";
 const COPY_SELECTION: &str = "pain.copy-selection";
 const PASTE_CLIPBOARD: &str = "pain.paste-clipboard";
 const SELECT_ALL: &str = "pain.select-all";
+const OPEN_PREFERENCES: &str = "pain.open-preferences";
 
 /// The only commands allowed out of a focused terminal canvas.
-fn whitelisted_commands() -> [CommandId; 6] {
+fn whitelisted_commands() -> [CommandId; 7] {
     [
         CommandId::new(INCREASE_FONT),
         CommandId::new(DECREASE_FONT),
@@ -51,6 +54,7 @@ fn whitelisted_commands() -> [CommandId; 6] {
         CommandId::new(COPY_SELECTION),
         CommandId::new(PASTE_CLIPBOARD),
         CommandId::new(SELECT_ALL),
+        CommandId::new(OPEN_PREFERENCES),
     ]
 }
 
@@ -100,6 +104,9 @@ pub fn run() {
             cx.quit();
             return;
         }
+        // Load the persisted appearance before any window opens. A malformed
+        // document falls back to the previous look instead of blocking startup.
+        preferences::install(cx);
 
         // Capacity one: the session coalesces many VT writes into a single
         // token, and `try_send` drops redundant tokens instead of queueing a
@@ -120,6 +127,8 @@ pub fn run() {
             )
             .expect("terminal session created"),
         );
+        cx.set_global(SessionGlobal(Arc::clone(&session)));
+        preferences::apply(cx);
         // Terminal replies and OSC title changes are effect callbacks. They
         // never block on OS I/O or re-enter the terminal lock's writer path.
         let (title_tx, title_rx) = async_channel::bounded::<String>(1);
@@ -220,6 +229,7 @@ pub fn run() {
             // terminal control byte: shells use it for quoted-insert.
             gpui::KeyBinding::new("shift-insert", PasteClipboard, None),
             gpui::KeyBinding::new("ctrl-shift-a", SelectAllTerminal, None),
+            gpui::KeyBinding::new("ctrl-,", OpenPreferences, None),
         ]);
         install_actions(cx, &view);
 
@@ -255,17 +265,22 @@ pub fn run() {
 
         let stop_on_close = Arc::clone(&stop);
         let holder_on_close = Arc::clone(&pty_holder);
-        cx.on_window_closed(move |cx, _| {
-            stop_on_close.store(true, Ordering::Release);
-            // Close the writer queue so its thread can finish, then hand the
-            // PTY to a background thread: shutdown joins workers and reaps the
-            // child, which must never happen on the GPUI foreground thread.
-            let holder = Arc::clone(&holder_on_close);
-            std::thread::spawn(move || {
-                if let Some(pty) = holder.lock().expect("pty holder poisoned").take() {
-                    pty.shutdown();
-                }
-            });
+        let terminal_window_id = view.window_id();
+        cx.on_window_closed(move |cx, window| {
+            // The preferences window is independent: closing it must not kill
+            // the shell, and closing the terminal must leave prefs usable.
+            if window == terminal_window_id {
+                stop_on_close.store(true, Ordering::Release);
+                // Close the writer queue so its thread can finish, then hand
+                // the PTY to a background thread: shutdown joins workers and
+                // reaps the child, which must never happen on the GPUI thread.
+                let holder = Arc::clone(&holder_on_close);
+                std::thread::spawn(move || {
+                    if let Some(pty) = holder.lock().expect("pty holder poisoned").take() {
+                        pty.shutdown();
+                    }
+                });
+            }
             if cx.windows().is_empty() {
                 cx.quit();
             }
@@ -358,6 +373,16 @@ fn install_actions(cx: &mut App, window: &gpui::WindowHandle<AppView>) {
             }
         });
     });
+    let w = window.clone();
+    cx.on_action(move |_: &OpenPreferences, cx| {
+        let _ = w.update(cx, |app, window, cx| {
+            if !command_reaches_app(&app.chain, &CommandId::new(OPEN_PREFERENCES), window, cx) {
+                return;
+            }
+            cx.stop_propagation();
+            preferences::open_preferences(cx);
+        });
+    });
 }
 
 /// Root view: Silvestris draws the frame; the terminal is the domain child.
@@ -384,7 +409,7 @@ mod tests {
     #[test]
     fn responder_allowlist_is_exactly_the_app_commands() {
         let allowed = whitelisted_commands();
-        assert_eq!(allowed.len(), 6);
+        assert_eq!(allowed.len(), 7);
         for expected in [
             INCREASE_FONT,
             DECREASE_FONT,
@@ -392,6 +417,7 @@ mod tests {
             COPY_SELECTION,
             PASTE_CLIPBOARD,
             SELECT_ALL,
+            OPEN_PREFERENCES,
         ] {
             assert!(allowed.iter().any(|id| id.as_str() == expected));
         }

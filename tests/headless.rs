@@ -109,6 +109,35 @@ fn keyboard_policy_reaches_the_pty_correctly() {
     assert_eq!(session.drain_writer(8), vec![vec![0x03]]);
 }
 
+/// Palette choices must reach Ghostty's render state, not just the settings
+/// document. This covers both a named palette and the light/dark Theme palette.
+#[test]
+fn selected_palette_reaches_ghostty_render_state() {
+    use pain::terminal::palette::{resolve, PaletteChoice};
+
+    let session = TerminalSession::new(80, 24, Box::new(NoopWakeup)).expect("session");
+    let mocha = resolve(PaletteChoice::CatppuccinMocha, true).expect("mocha palette");
+    session.set_colors(Some(&mocha)).expect("apply mocha");
+    let colors = session.render_snapshot().expect("snapshot").colors;
+    assert_eq!(colors.background, (0x1e, 0x1e, 0x2e));
+    assert_eq!(colors.palette[1], (0xf3, 0x8b, 0xa8));
+
+    let light = resolve(PaletteChoice::Theme, false).expect("light theme palette");
+    session
+        .set_colors(Some(&light))
+        .expect("apply light palette");
+    let colors = session.render_snapshot().expect("snapshot").colors;
+    assert_eq!(colors.background, (0xff, 0xff, 0xff));
+    assert_eq!(colors.foreground, (0x1a, 0x1a, 0x1a));
+
+    // Reset restores Ghostty's built-in palette without leaking the previous
+    // default colours into the render state.
+    session.set_colors(None).expect("reset palette");
+    let reset = session.render_snapshot().expect("snapshot").colors;
+    assert_eq!(reset.background, (0, 0, 0));
+    assert_eq!(reset.foreground, (0xff, 0xff, 0xff));
+}
+
 /// Mouse reporting must be decided by Ghostty's current modes, not by a Rust
 /// mode table in the view. The view now sends every motion (with `None` when no
 /// button is held); the encoder drops it in modes 1000/1002 and reports it in
