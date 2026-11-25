@@ -310,9 +310,12 @@ impl Render for PreferencesView {
             apply(cx);
         });
 
+        #[cfg(target_os = "windows")]
         let profile_hint = "Used when a new pain process starts. Automatic follows \
                             PowerShell 7, then Windows PowerShell, then the command \
                             interpreter.";
+        #[cfg(not(target_os = "windows"))]
+        let profile_hint = "Used when a new pain process starts. Automatic uses the login shell.";
         let hint = "Theme sets the window look. The palette chooses ANSI colours; \
                     Default keeps Ghostty's palette and Theme follows light/dark.";
 
