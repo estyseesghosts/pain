@@ -6,6 +6,7 @@ pub mod ghostty;
 pub mod fixtures;
 pub mod geometry;
 pub mod input;
+pub mod selection;
 pub mod session;
 pub mod writer;
 
@@ -14,8 +15,8 @@ pub mod render;
 
 pub use ghostty::{
     paste_encode, paste_is_safe, Cell, Colors, Cursor, GhosttyError, GhosttyRenderState,
-    GhosttyTerminal, KeyEncoder, KeyEvent, MouseEncoder, MouseEvent, RenderSnapshot, RowSelection,
-    Style, WritePtyRegistration,
+    CallbackRegistration, GhosttyTerminal, KeyEncoder, KeyEvent, MouseEncoder, MouseEvent,
+    RenderSnapshot, RowSelection, Style,
 };
 pub use session::{CountersSnapshot, TerminalSession, WakeupSink};
 pub use writer::{WriterQueue, WriterStats};

@@ -11,8 +11,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crate::terminal::ghostty::{
-    ghostty_vt_sys as sys, GhosttyError, GhosttyRenderState, GhosttyTerminal, KeyEncoder, KeyEvent,
-    MouseEncoder, MouseEvent, RenderSnapshot, WritePtyRegistration,
+    ghostty_vt_sys as sys, CallbackRegistration, GhosttyError, GhosttyRenderState, GhosttyTerminal,
+    KeyEncoder, KeyEvent, MouseEncoder, MouseEvent, RenderSnapshot,
 };
 use crate::terminal::writer::WriterQueue;
 
@@ -71,6 +71,7 @@ pub struct CountersSnapshot {
     pub writer_bytes_queued: u64,
     // Process
     pub process_exited: bool,
+    pub title_changes: u64,
     // Resize
     pub bounds_changes_observed: u64,
     pub grid_size_changes: u64,
@@ -110,6 +111,7 @@ struct Counters {
     grid_size_changes: AtomicU64,
     ghostty_resize_calls: AtomicU64,
     duplicate_resize_suppressed: AtomicU64,
+    title_changes: AtomicU64,
 }
 
 impl Counters {
@@ -169,6 +171,7 @@ impl Counters {
             writer_queue_depth_max: 0,
             writer_bytes_queued: 0,
             process_exited: false,
+            title_changes: get!(title_changes),
             bounds_changes_observed: get!(bounds_changes_observed),
             grid_size_changes: get!(grid_size_changes),
             ghostty_resize_calls: get!(ghostty_resize_calls),
@@ -177,14 +180,35 @@ impl Counters {
     }
 }
 
+/// Deliberate scrollback caps and starting grid. Ghostty's default byte cap is
+/// 10 KiB, which discards usable history almost immediately.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SessionConfig {
+    pub cols: u16,
+    pub rows: u16,
+    pub scrollback_lines: usize,
+    pub scrollback_bytes: usize,
+}
+
+impl Default for SessionConfig {
+    fn default() -> Self {
+        Self {
+            cols: 80,
+            rows: 24,
+            scrollback_lines: 10_000,
+            scrollback_bytes: 16 * 1024 * 1024,
+        }
+    }
+}
+
 /// The single owner of one terminal session. `Send + Sync` is safe because
 /// every Ghostty handle stays behind a private mutex and the raw pointers are
 /// never exposed to callers.
 pub struct TerminalSession {
-    // `terminal` is declared first so it is freed before `write_pty`: the
+    // `terminal` is declared first so it is freed before `callbacks`: the
     // registration token must outlive every callback the terminal can invoke.
     terminal: Mutex<GhosttyTerminal>,
-    write_pty: Mutex<Option<WritePtyRegistration>>,
+    callbacks: Mutex<Option<CallbackRegistration>>,
     state: Mutex<GhosttyRenderState>,
     encoder: Mutex<KeyEncoder>,
     mouse_encoder: Mutex<MouseEncoder>,
@@ -204,9 +228,25 @@ pub struct TerminalSession {
 
 impl TerminalSession {
     pub fn new(cols: u16, rows: u16, wakeup: Box<dyn WakeupSink>) -> Result<Self, GhosttyError> {
+        Self::new_with_config(
+            SessionConfig {
+                cols,
+                rows,
+                ..SessionConfig::default()
+            },
+            wakeup,
+        )
+    }
+
+    pub fn new_with_config(
+        config: SessionConfig,
+        wakeup: Box<dyn WakeupSink>,
+    ) -> Result<Self, GhosttyError> {
+        let mut terminal = GhosttyTerminal::new(config.cols, config.rows)?;
+        terminal.set_scrollback_limits(config.scrollback_lines, config.scrollback_bytes);
         Ok(Self {
-            terminal: Mutex::new(GhosttyTerminal::new(cols, rows)?),
-            write_pty: Mutex::new(None),
+            terminal: Mutex::new(terminal),
+            callbacks: Mutex::new(None),
             state: Mutex::new(GhosttyRenderState::new()?),
             encoder: Mutex::new(KeyEncoder::new()?),
             mouse_encoder: Mutex::new(MouseEncoder::new()?),
@@ -217,8 +257,8 @@ impl TerminalSession {
             exited: AtomicBool::new(false),
             wakeup,
             writer: Arc::new(WriterQueue::new()),
-            cols: Mutex::new(cols),
-            rows: Mutex::new(rows),
+            cols: Mutex::new(config.cols),
+            rows: Mutex::new(config.rows),
             pty_resize: Mutex::new(None),
             counters: Arc::new(Counters::default()),
         })
@@ -466,14 +506,88 @@ impl TerminalSession {
         Arc::clone(&self.writer)
     }
 
-    /// Register the terminal's `WRITE_PTY` effect into the writer queue.
-    pub fn install_pty_writer(&self) -> Result<(), GhosttyError> {
+    /// Register Ghostty's effect callbacks. `on_title` is invoked on the thread
+    /// that wrote VT bytes; the app supplies a sink that only posts to the UI.
+    pub fn install_callbacks(
+        &self,
+        on_title: Box<dyn Fn(String) + Send + Sync>,
+    ) -> Result<(), GhosttyError> {
         let registration = {
             let mut terminal = self.terminal.lock().expect("terminal mutex poisoned");
-            terminal.install_pty_writer(Arc::clone(&self.writer))?
+            terminal.install_callbacks(Arc::clone(&self.writer), on_title)?
         };
-        *self.write_pty.lock().expect("write_pty mutex poisoned") = Some(registration);
+        *self.callbacks.lock().expect("callbacks mutex poisoned") = Some(registration);
         Ok(())
+    }
+
+    /// Register only the `WRITE_PTY` bridge, with a no-op title sink. Used by
+    /// PTY integration tests that do not own a window.
+    pub fn install_pty_writer(&self) -> Result<(), GhosttyError> {
+        self.install_callbacks(Box::new(|_| {}))
+    }
+
+    /// Scroll the Ghostty-owned viewport by `delta_rows` (negative = up into
+    /// history). Returns whether the viewport actually moved.
+    pub fn scroll(&self, delta_rows: isize) -> Result<bool, GhosttyError> {
+        if delta_rows == 0 {
+            return Ok(false);
+        }
+        let before = self.scrollbar()?;
+        {
+            let mut terminal = self.terminal.lock().expect("terminal mutex poisoned");
+            terminal.scroll_viewport(sys::GhosttyTerminalScrollViewport::delta(delta_rows));
+        }
+        let after = self.scrollbar()?;
+        let moved = before.offset != after.offset;
+        if moved {
+            self.schedule_wakeup();
+        }
+        Ok(moved)
+    }
+
+    pub fn scroll_to_top(&self) -> Result<(), GhosttyError> {
+        self.scroll_to(sys::GhosttyTerminalScrollViewport::top())
+    }
+
+    pub fn scroll_to_bottom(&self) -> Result<(), GhosttyError> {
+        self.scroll_to(sys::GhosttyTerminalScrollViewport::bottom())
+    }
+
+    /// Place the first visible row at an absolute scrollbar offset. This is the
+    /// round-trip used by the optional scrollbar thumb drag.
+    pub fn scroll_to_row(&self, row: usize) -> Result<(), GhosttyError> {
+        self.scroll_to(sys::GhosttyTerminalScrollViewport::row(row))
+    }
+
+    fn scroll_to(&self, behavior: sys::GhosttyTerminalScrollViewport) -> Result<(), GhosttyError> {
+        let before = self.scrollbar()?.offset;
+        {
+            let mut terminal = self.terminal.lock().expect("terminal mutex poisoned");
+            terminal.scroll_viewport(behavior);
+        }
+        if self.scrollbar()?.offset != before {
+            self.schedule_wakeup();
+        }
+        Ok(())
+    }
+
+    /// Current scrollbar geometry, read from Ghostty on demand (no second
+    /// scroll model and no GPUI `ScrollHandle` as source of truth).
+    pub fn scrollbar(&self) -> Result<sys::GhosttyTerminalScrollbar, GhosttyError> {
+        let terminal = self.terminal.lock().expect("terminal mutex poisoned");
+        terminal.scrollbar()
+    }
+
+    /// Current terminal title from OSC 0/2, or an empty string when unset.
+    #[must_use]
+    pub fn title(&self) -> String {
+        let terminal = self.terminal.lock().expect("terminal mutex poisoned");
+        terminal.title()
+    }
+
+    /// Called by the title effect sink; counts transitions for M7 counters.
+    pub fn record_title_change(&self) {
+        Counters::add(&self.counters.title_changes, 1);
     }
 
     /// Write committed text straight to the PTY (IME/character input path).
@@ -711,6 +825,51 @@ mod tests {
         assert_eq!(counters.vt_write_calls, 300);
         assert_eq!(counters.wakeups_scheduled, 1);
         assert!(counters.terminal_lock_hold_max_micros < 1_000_000);
+    }
+
+    #[test]
+    fn scrollback_is_bounded_and_viewport_scrolls_from_ghostty() {
+        let session = TerminalSession::new(20, 4, Box::new(NoopWakeup)).expect("session");
+        let mut payload = String::new();
+        for i in 0..200 {
+            payload.push_str(&format!("line {i}\r\n"));
+        }
+        session.write_vt(payload.as_bytes());
+        let before = session.scrollbar().expect("scrollbar");
+        assert!(before.total > before.len, "history should exist");
+
+        assert!(session.scroll(-5).expect("scroll up"));
+        let up = session.scrollbar().expect("scrollbar after up");
+        assert!(up.offset < before.offset, "viewport must move into history");
+
+        session.scroll_to_top().expect("top");
+        assert_eq!(session.scrollbar().expect("top scrollbar").offset, 0);
+        session.scroll_to_bottom().expect("bottom");
+        let bottom = session.scrollbar().expect("bottom scrollbar");
+        assert_eq!(bottom.offset, bottom.total.saturating_sub(bottom.len));
+        assert!(!session.scroll(0).expect("zero delta is a no-op"));
+    }
+
+    #[test]
+    fn title_effect_is_observed_without_second_parser() {
+        use std::sync::Mutex as StdMutex;
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let sink_seen = Arc::clone(&seen);
+        let session = TerminalSession::new(80, 24, Box::new(NoopWakeup)).expect("session");
+        session
+            .install_callbacks(Box::new(move |title| {
+                sink_seen.lock().expect("title sink poisoned").push(title);
+                // The sink normally only posts to the UI; recording a counter
+                // here exercises the same path the app uses.
+            }))
+            .expect("callbacks");
+        session.write_vt(b"\x1b]0;pain test title\x07");
+        let titles = seen.lock().expect("title sink poisoned");
+        assert_eq!(titles.len(), 1, "one OSC title change");
+        assert_eq!(titles[0], "pain test title");
+        drop(titles);
+        session.record_title_change();
+        assert_eq!(session.snapshot_counters().title_changes, 1);
     }
 
     #[test]

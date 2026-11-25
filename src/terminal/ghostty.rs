@@ -475,16 +475,82 @@ impl GhosttyTerminal {
         Ok(text)
     }
 
-    /// Register a `WRITE_PTY` effect callback that copies terminal replies into
-    /// `queue` without blocking while the terminal lock is held. The returned
-    /// token must be dropped only after this terminal has been freed.
-    pub fn install_pty_writer(
+    /// Bound retained history deliberately. Ghostty's default byte cap is only
+    /// 10 KiB, which makes even a short command lose its scrollback. A zero
+    /// value disables the corresponding limit; `usize::MAX` means unlimited.
+    pub fn set_scrollback_limits(&mut self, max_lines: usize, max_bytes: usize) {
+        // SAFETY: both options take `size_t*`; Ghostty copies the values during
+        // `set`, so these stack locals need not outlive the calls.
+        unsafe {
+            sys::ghostty_terminal_set(
+                self.as_raw(),
+                sys::GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_LINES,
+                &max_lines as *const usize as *const c_void,
+            );
+            sys::ghostty_terminal_set(
+                self.as_raw(),
+                sys::GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES,
+                &max_bytes as *const usize as *const c_void,
+            );
+        }
+    }
+
+    /// Scroll the viewport. Ghostty owns the viewport; this only asks it to
+    /// move, and render state picks up the new position on the next update.
+    pub fn scroll_viewport(&mut self, behavior: sys::GhosttyTerminalScrollViewport) {
+        // SAFETY: the behavior is a plain 24-byte by-value POD and the handle
+        // is uniquely owned and valid for this call.
+        unsafe { sys::ghostty_terminal_scroll_viewport(self.as_raw(), behavior) };
+    }
+
+    /// Scrollbar geometry in the same row space as `scroll_viewport(ROW)`.
+    pub fn scrollbar(&self) -> Result<sys::GhosttyTerminalScrollbar, GhosttyError> {
+        let mut raw = sys::GhosttyTerminalScrollbar::default();
+        // SAFETY: the key's output type is `GhosttyTerminalScrollbar*` and the
+        // handle is valid; Ghostty overwrites all three row counts.
+        check(unsafe {
+            sys::ghostty_terminal_get(
+                self.as_raw(),
+                sys::GHOSTTY_TERMINAL_DATA_SCROLLBAR,
+                &mut raw as *mut sys::GhosttyTerminalScrollbar as *mut c_void,
+            )
+        })?;
+        Ok(raw)
+    }
+
+    /// Borrowed title set by OSC 0/2, copied before the next terminal call.
+    pub fn title(&self) -> String {
+        let mut raw = sys::GhosttyString {
+            ptr: ptr::null(),
+            len: 0,
+        };
+        // SAFETY: the key's documented output type is `GhosttyString*`; the
+        // returned bytes stay borrowed until the next mutating terminal call.
+        let result = unsafe {
+            sys::ghostty_terminal_get(
+                self.as_raw(),
+                sys::GHOSTTY_TERMINAL_DATA_TITLE,
+                &mut raw as *mut sys::GhosttyString as *mut c_void,
+            )
+        };
+        if result != sys::GHOSTTY_SUCCESS || raw.ptr.is_null() || raw.len == 0 {
+            return String::new();
+        }
+        // SAFETY: Ghostty reports `len` readable bytes at `ptr` for this call.
+        let bytes = unsafe { std::slice::from_raw_parts(raw.ptr.cast::<u8>(), raw.len) };
+        String::from_utf8_lossy(bytes).into_owned()
+    }
+
+    /// Install the shared effect callbacks. The returned token must be dropped
+    /// only after this terminal has been freed.
+    pub fn install_callbacks(
         &mut self,
-        queue: Arc<WriterQueue>,
-    ) -> Result<WritePtyRegistration, GhosttyError> {
-        let userdata = Arc::into_raw(queue) as *mut c_void;
-        // SAFETY: `userdata` is a strong Arc reference kept alive by the
-        // returned registration token and by the terminal option.
+        writer: Arc<WriterQueue>,
+        on_title: Box<dyn Fn(String) + Send + Sync>,
+    ) -> Result<CallbackRegistration, GhosttyError> {
+        let userdata = Arc::into_raw(Arc::new(CallbackData { writer, on_title })) as *mut c_void;
+        // SAFETY: `userdata` is a strong Arc reference kept alive by the token
+        // and by the terminal option until both are torn down.
         let result = unsafe {
             sys::ghostty_terminal_set(
                 self.as_raw(),
@@ -493,32 +559,33 @@ impl GhosttyTerminal {
             )
         };
         if let Err(error) = check(result) {
-            // SAFETY: reclaim the Arc reference because installation failed.
-            unsafe { drop(Arc::from_raw(userdata.cast::<WriterQueue>())) };
+            // SAFETY: reclaim the reference because installation failed.
+            unsafe { drop(Arc::from_raw(userdata.cast::<CallbackData>())) };
             return Err(error);
         }
-        // SAFETY: the function pointer matches `GhosttyTerminalWritePtyFn`;
-        // Ghostty copies it, so the cast pointer need not outlive this call.
-        let result = unsafe {
-            sys::ghostty_terminal_set(
-                self.as_raw(),
-                sys::GHOSTTY_TERMINAL_OPT_WRITE_PTY,
-                write_pty_callback as *const c_void,
-            )
-        };
-        if let Err(error) = check(result) {
-            // SAFETY: clear the userdata option so Ghostty holds no stale ptr.
-            unsafe {
-                sys::ghostty_terminal_set(
-                    self.as_raw(),
-                    sys::GHOSTTY_TERMINAL_OPT_USERDATA,
-                    ptr::null(),
-                )
+        // SAFETY: each function pointer matches the callback signature Ghostty
+        // documents for its option; Ghostty copies the pointers.
+        for (option, callback) in [
+            (sys::GHOSTTY_TERMINAL_OPT_WRITE_PTY, write_pty_callback as *const c_void),
+            (sys::GHOSTTY_TERMINAL_OPT_TITLE_CHANGED, title_changed_callback as *const c_void),
+        ] {
+            let result = unsafe {
+                sys::ghostty_terminal_set(self.as_raw(), option, callback)
             };
-            unsafe { drop(Arc::from_raw(userdata.cast::<WriterQueue>())) };
-            return Err(error);
+            if let Err(error) = check(result) {
+                // SAFETY: clear userdata so Ghostty holds no stale pointer.
+                unsafe {
+                    sys::ghostty_terminal_set(
+                        self.as_raw(),
+                        sys::GHOSTTY_TERMINAL_OPT_USERDATA,
+                        ptr::null(),
+                    )
+                };
+                unsafe { drop(Arc::from_raw(userdata.cast::<CallbackData>())) };
+                return Err(error);
+            }
         }
-        Ok(WritePtyRegistration { userdata })
+        Ok(CallbackRegistration { userdata })
     }
 }
 
@@ -532,6 +599,13 @@ impl Drop for FormatterGuard {
     }
 }
 
+/// Data shared with Ghostty's effect callbacks through `OPT_USERDATA`.
+/// Callbacks must stay non-blocking and must not re-enter terminal writes.
+struct CallbackData {
+    writer: Arc<WriterQueue>,
+    on_title: Box<dyn Fn(String) + Send + Sync>,
+}
+
 /// `GhosttyTerminalWritePtyFn`: copy the response into the writer queue and
 /// return. No terminal calls, no OS I/O, no blocking — avoids lock inversion.
 unsafe extern "C" fn write_pty_callback(
@@ -543,27 +617,60 @@ unsafe extern "C" fn write_pty_callback(
     if userdata.is_null() || data.is_null() {
         return;
     }
-    // SAFETY: userdata points at an `Arc<WriterQueue>` kept alive by the
+    // SAFETY: userdata points at an `Arc<CallbackData>` kept alive by the
     // registration token for as long as the terminal can invoke this callback.
-    let queue = unsafe { &*(userdata.cast::<WriterQueue>()) };
+    let callbacks = unsafe { &*(userdata.cast::<CallbackData>()) };
     // SAFETY: Ghostty guarantees `data` is readable for `len` bytes this call.
     let bytes = unsafe { std::slice::from_raw_parts(data, len) }.to_vec();
-    queue.push(bytes);
+    callbacks.writer.push(bytes);
+}
+
+/// `GhosttyTerminalTitleChangedFn`: copy the borrowed title and hand it to the
+/// sink. The sink only posts to the UI; it must not call back into Ghostty.
+unsafe extern "C" fn title_changed_callback(
+    terminal: sys::GhosttyTerminal,
+    userdata: *mut c_void,
+) {
+    if userdata.is_null() || terminal.is_null() {
+        return;
+    }
+    // SAFETY: same ownership invariant as `write_pty_callback`.
+    let callbacks = unsafe { &*(userdata.cast::<CallbackData>()) };
+    let mut raw = sys::GhosttyString {
+        ptr: ptr::null(),
+        len: 0,
+    };
+    // SAFETY: the header explicitly directs callbacks to read the new title
+    // with `GHOSTTY_TERMINAL_DATA_TITLE`; `raw` is a typed out-parameter.
+    let result = unsafe {
+        sys::ghostty_terminal_get(
+            terminal,
+            sys::GHOSTTY_TERMINAL_DATA_TITLE,
+            &mut raw as *mut sys::GhosttyString as *mut c_void,
+        )
+    };
+    if result != sys::GHOSTTY_SUCCESS || raw.ptr.is_null() {
+        return;
+    }
+    // SAFETY: the borrowed string is valid for this callback; copy it before
+    // any other terminal call can invalidate the pointer.
+    let bytes = unsafe { std::slice::from_raw_parts(raw.ptr.cast::<u8>(), raw.len) };
+    (callbacks.on_title)(String::from_utf8_lossy(bytes).into_owned());
 }
 
 /// Holds the strong Arc reference leaked to Ghostty as callback userdata.
-pub struct WritePtyRegistration {
+pub struct CallbackRegistration {
     userdata: *mut c_void,
 }
 
 // SAFETY: the userdata Arc is owned solely by this token after Ghostty is freed.
-unsafe impl Send for WritePtyRegistration {}
+unsafe impl Send for CallbackRegistration {}
 
-impl Drop for WritePtyRegistration {
+impl Drop for CallbackRegistration {
     fn drop(&mut self) {
         // SAFETY: `userdata` was produced by `Arc::into_raw` in
-        // `install_pty_writer` and is reclaimed exactly once here.
-        unsafe { drop(Arc::from_raw(self.userdata.cast::<WriterQueue>())) };
+        // `install_callbacks` and is reclaimed exactly once here.
+        unsafe { drop(Arc::from_raw(self.userdata.cast::<CallbackData>())) };
     }
 }
 

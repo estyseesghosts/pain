@@ -647,6 +647,11 @@ unsafe extern "C" {
         out: *mut c_void,
     ) -> GhosttyResult;
     pub fn ghostty_terminal_vt_write(terminal: GhosttyTerminal, data: *const u8, len: usize);
+    /// Scroll the viewport. `behavior` is passed by value (24 bytes).
+    pub fn ghostty_terminal_scroll_viewport(
+        terminal: GhosttyTerminal,
+        behavior: GhosttyTerminalScrollViewport,
+    ) -> GhosttyResult;
     pub fn ghostty_terminal_grid_ref(
         terminal: GhosttyTerminal,
         point: GhosttyPoint,
@@ -855,5 +860,7 @@ mod tests {
         assert_eq!(size_of::<GhosttyWriter>(), 16);
         assert_eq!(size_of::<GhosttyMousePosition>(), 8);
         assert_eq!(size_of::<GhosttyMouseEncoderSize>(), 40);
+        assert_eq!(size_of::<GhosttyTerminalScrollViewport>(), 24);
+        assert_eq!(size_of::<GhosttyTerminalScrollbar>(), 24);
     }
 }
