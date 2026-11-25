@@ -358,7 +358,7 @@ impl TerminalView {
         &mut self,
         event: &MouseMoveEvent,
         _window: &mut Window,
-        cx: &mut Context<Self>,
+        _cx: &mut Context<Self>,
     ) {
         if self.scrollbar_drag {
             if let (Some(bar), Ok(state)) = (*self.scrollbar.borrow(), self.session.scrollbar()) {
@@ -366,7 +366,6 @@ impl TerminalView {
                     scrollbar_row_at(&bar, f32::from(event.position.y), state.total, state.len);
                 let _ = self.session.scroll_to_row(row);
             }
-            cx.stop_propagation();
             return;
         }
         let (x, y, w, h, px, py, mods) = self.mouse_event(event.position, event.modifiers);
@@ -392,17 +391,14 @@ impl TerminalView {
                 self.geometry.borrow().cell_width.max(1.0) as u32,
                 self.geometry.borrow().line_height.max(1.0) as u32,
             );
-            cx.stop_propagation();
         } else if let Some((start_x, start_y)) = *self.selection_anchor.borrow() {
             let _ = self.session.select_between(start_x, start_y, x, y);
-            cx.stop_propagation();
         }
     }
 
-    fn on_mouse_up(&mut self, event: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
+    fn on_mouse_up(&mut self, event: &MouseUpEvent, _window: &mut Window, _cx: &mut Context<Self>) {
         if self.scrollbar_drag {
             self.scrollbar_drag = false;
-            cx.stop_propagation();
             return;
         }
         let (_x, _y, w, h, px, py, mods) = self.mouse_event(event.position, event.modifiers);
@@ -425,10 +421,8 @@ impl TerminalView {
                 self.geometry.borrow().cell_width.max(1.0) as u32,
                 self.geometry.borrow().line_height.max(1.0) as u32,
             );
-            cx.stop_propagation();
         } else if button == PtyButton::Left {
             *self.selection_anchor.borrow_mut() = None;
-            cx.stop_propagation();
         }
     }
 }
@@ -452,6 +446,7 @@ impl Render for TerminalView {
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_down(MouseButton::Right, cx.listener(Self::on_mouse_down))
             .on_mouse_down(MouseButton::Middle, cx.listener(Self::on_mouse_down))
+            .on_mouse_move(cx.listener(Self::on_mouse_move))
             .child(TerminalElement { view: cx.entity() })
     }
 }
@@ -751,20 +746,40 @@ impl Element for TerminalElement {
             ));
         }
         // GPUI delivers element mouse events only while the pointer is over
-        // the element. Register move/up on the window instead so a drag keeps
-        // reporting after it leaves the surface, until the button is released.
+        // the element. A window-level listener continues a drag that leaves
+        // the surface, but only while a button started on the terminal is held.
+        // It must never consume events over the window chrome: those belong to
+        // the Silvestris traffic lights and titlebar.
         let mouse_view = self.view.clone();
         window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
-            let focused = mouse_view.read(cx).focus.is_focused(window);
-            if phase != DispatchPhase::Bubble || !focused {
+            if phase != DispatchPhase::Bubble {
+                return;
+            }
+            let view = mouse_view.read(cx);
+            if !view.focus.is_focused(window) || view.held_mouse.get() == 0 {
+                return;
+            }
+            let g = *view.geometry.borrow();
+            let terminal_bounds = Bounds::new(
+                point(px(g.origin.0), px(g.origin.1)),
+                size(
+                    px(g.screen_width as f32 * g.cell_width),
+                    px(g.screen_height as f32 * g.line_height),
+                ),
+            );
+            // The element-level listener handles moves inside the surface.
+            if terminal_bounds.contains(&event.position) {
                 return;
             }
             let _ = mouse_view.update(cx, |view, cx| view.on_mouse_move(event, window, cx));
         });
         let mouse_view = self.view.clone();
         window.on_mouse_event(move |event: &MouseUpEvent, phase, window, cx| {
-            let focused = mouse_view.read(cx).focus.is_focused(window);
-            if phase != DispatchPhase::Bubble || !focused {
+            if phase != DispatchPhase::Bubble {
+                return;
+            }
+            let view = mouse_view.read(cx);
+            if !view.focus.is_focused(window) || view.held_mouse.get() == 0 {
                 return;
             }
             let _ = mouse_view.update(cx, |view, cx| view.on_mouse_up(event, window, cx));

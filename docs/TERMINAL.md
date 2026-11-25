@@ -298,11 +298,15 @@ text path owns the event.
 - Held keys use `GHOSTTY_KEY_ACTION_REPEAT` so kitty `report_events` can tell a
   repeat from a fresh press.
 - Encoding grows its buffer once on `out_of_space` so a key is never dropped.
-- App shortcuts (`Ctrl+Shift+C/V/A`, `Shift+Insert`, and the font keys) are
-  dispatched by GPUI **before** the view's `on_key_down` listener. The view
-  skips them via `is_app_shortcut`, so a clipboard copy never leaves a stray
-  escape sequence in the PTY. `Ctrl+V` deliberately remains a terminal control
-  byte, as shells use it for quoted-insert.
+- App shortcuts (`Ctrl+Shift+C/V/A`, `Ctrl+,`, `Shift+Insert`, and the font
+  keys) are resolved by a `KeystrokeEvent` interceptor before GPUI chooses
+  between bindings and native text input. On Windows, `ToUnicode` makes
+  `prefer_character_input` true for Ctrl combinations; with a focused terminal
+  `InputHandler`, that would otherwise skip every binding. `app_command` is the
+  pure mapping shared by the interceptor and the view's `is_app_shortcut`, so
+  a clipboard copy never leaves a stray escape sequence in the PTY. AltGr is
+  excluded, so IME composition still owns those keys. `Ctrl+V` deliberately
+  remains a terminal control byte, as shells use it for quoted-insert.
 
 ## 11. Focus and command routing
 
@@ -348,8 +352,11 @@ decide what the active mode reports:
   surface — the reported bug for TUI drag interactions.
 - Right/middle buttons do not start a local selection when reporting is off;
   they belong to the platform context menu. Only the left button selects.
-- Mouse moves call `stop_propagation()` once handled so they do not leak into
-  the Silvestris window frame.
+- The element-level move/up handlers do **not** stop propagation. Window-level
+  move/up listeners only run while a button started on the terminal is held,
+  and move only when the pointer is outside the terminal surface. This keeps
+  drags reporting after they leave the surface without stealing clicks from
+  the Silvestris titlebar or its traffic-light buttons.
 
 ## 14. Scrollback
 

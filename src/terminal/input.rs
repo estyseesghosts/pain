@@ -239,6 +239,58 @@ pub fn key_for_keystroke(
     })
 }
 
+/// An app command owned by the shell rather than the PTY.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AppCommand {
+    IncreaseFont,
+    DecreaseFont,
+    ResetFont,
+    CopySelection,
+    PasteClipboard,
+    SelectAll,
+    OpenPreferences,
+}
+
+/// Resolve a keystroke to an app command. This is shared by the GPUI keybinding
+/// interceptor (which must run before native text handling) and the terminal
+/// view's ownership check, so the two can never disagree about a key.
+///
+/// On Windows, GPUI marks Ctrl+letter/punctuation keystrokes as
+/// `prefer_character_input` because ToUnicode changes the character. When a
+/// focused `InputHandler` accepts that, GPUI skips key bindings entirely.
+/// Resolving commands from the raw keystroke in an interceptor keeps app
+/// shortcuts working without taking text input away from AltGr/dead keys.
+#[must_use]
+pub fn app_command(name: &str, key_char: Option<&str>, mods: Modifiers) -> Option<AppCommand> {
+    if name.eq_ignore_ascii_case("insert")
+        && mods.shift
+        && !mods.control
+        && !mods.alt
+        && !mods.super_key
+    {
+        return Some(AppCommand::PasteClipboard); // Shift+Insert
+    }
+    if !mods.control || mods.alt || mods.super_key {
+        return None; // AltGr is composed text, not a Ctrl shortcut.
+    }
+    if mods.shift {
+        return match name.to_ascii_lowercase().as_str() {
+            "c" => Some(AppCommand::CopySelection),
+            "v" => Some(AppCommand::PasteClipboard),
+            "a" => Some(AppCommand::SelectAll),
+            _ => None,
+        };
+    }
+    if name == "," || name.eq_ignore_ascii_case("comma") {
+        return Some(AppCommand::OpenPreferences);
+    }
+    match font_command(name, key_char, true)? {
+        FontCommand::Increase => Some(AppCommand::IncreaseFont),
+        FontCommand::Decrease => Some(AppCommand::DecreaseFont),
+        FontCommand::Reset => Some(AppCommand::ResetFont),
+    }
+}
+
 /// Keys bound to application commands rather than the PTY. GPUI dispatches
 /// these bindings before the terminal's `on_key_down` listener; the view must
 /// not also encode them, or a Ctrl+Shift+C in a TUI becomes a stray escape
@@ -246,22 +298,7 @@ pub fn key_for_keystroke(
 /// bindings for the terminal: Ctrl+Shift+C/V and Shift+Insert.
 #[must_use]
 pub fn is_app_shortcut(name: &str, mods: Modifiers) -> bool {
-    let exact = |expected: &str, ctrl: bool, shift: bool| {
-        name == expected
-            && mods.control == ctrl
-            && mods.shift == shift
-            && !mods.alt
-            && !mods.super_key
-    };
-    exact("c", true, true) // Ctrl+Shift+C: copy
-        || exact("v", true, true) // Ctrl+Shift+V: paste
-        || exact("a", true, true) // Ctrl+Shift+A: select all
-        || ((name == "," || name == "comma")
-            && mods.control
-            && !mods.shift
-            && !mods.alt
-            && !mods.super_key) // Ctrl+,: preferences
-        || (name == "insert" && mods.shift && !mods.control && !mods.alt && !mods.super_key)
+    app_command(name, None, mods).is_some()
 }
 
 /// True when the user is asking for local selection instead of terminal mouse
@@ -576,6 +613,48 @@ mod tests {
         ));
         assert!(!is_app_shortcut("c", Modifiers::default()));
         assert!(!is_app_shortcut("insert", Modifiers::default()));
+    }
+
+    #[test]
+    fn app_commands_resolve_for_every_binding_spelling() {
+        let ctrl = Modifiers::new(false, true, false, false);
+        let ctrl_shift = Modifiers::new(true, true, false, false);
+        assert_eq!(
+            app_command("c", Some("C"), ctrl_shift),
+            Some(AppCommand::CopySelection)
+        );
+        assert_eq!(
+            app_command("v", None, ctrl_shift),
+            Some(AppCommand::PasteClipboard)
+        );
+        assert_eq!(
+            app_command("a", None, ctrl_shift),
+            Some(AppCommand::SelectAll)
+        );
+        assert_eq!(
+            app_command("insert", None, Modifiers::new(true, false, false, false)),
+            Some(AppCommand::PasteClipboard)
+        );
+        assert_eq!(
+            app_command(",", None, ctrl),
+            Some(AppCommand::OpenPreferences)
+        );
+        assert_eq!(
+            app_command("comma", None, ctrl),
+            Some(AppCommand::OpenPreferences)
+        );
+        assert_eq!(app_command("=", None, ctrl), Some(AppCommand::IncreaseFont));
+        assert_eq!(
+            app_command("minus", None, ctrl),
+            Some(AppCommand::DecreaseFont)
+        );
+        assert_eq!(app_command("0", None, ctrl), Some(AppCommand::ResetFont));
+        // AltGr still belongs to the text handler, and plain Ctrl+C is a byte.
+        assert_eq!(
+            app_command("c", None, Modifiers::new(false, true, true, false)),
+            None
+        );
+        assert_eq!(app_command("c", None, ctrl), None);
     }
 
     #[test]

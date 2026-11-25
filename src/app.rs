@@ -20,6 +20,7 @@ use crate::platform::{default_shell, spawn_pty, PlatformPty, PtyConfig};
 use crate::preferences::{self, SessionGlobal};
 use crate::terminal::fixtures::Fixture;
 use crate::terminal::geometry::FONT_SIZE_STEP;
+use crate::terminal::input::{self, AppCommand};
 use crate::terminal::render::TerminalView;
 use crate::terminal::session::{SessionConfig, TerminalSession};
 
@@ -232,6 +233,7 @@ pub fn run() {
             gpui::KeyBinding::new("ctrl-,", OpenPreferences, None),
         ]);
         install_actions(cx, &view);
+        install_shortcut_interceptor(cx);
 
         let window_handle = view.clone();
         cx.spawn(async move |cx: &mut gpui::AsyncApp| {
@@ -383,6 +385,43 @@ fn install_actions(cx: &mut App, window: &gpui::WindowHandle<AppView>) {
             preferences::open_preferences(cx);
         });
     });
+}
+
+/// Resolve app shortcuts before GPUI decides between key bindings and native
+/// text input. Windows flags Ctrl+comma/letters as `prefer_character_input`
+/// because ToUnicode changes the character; with a focused terminal
+/// `InputHandler`, that would otherwise suppress *every* Ctrl binding
+/// (including the font keys and clipboard). AltGr is excluded by
+/// `app_command`, so IME composition keeps working.
+fn install_shortcut_interceptor(cx: &mut App) {
+    cx.intercept_keystrokes(|event, window, cx| {
+        if window.root::<AppView>().is_none() {
+            return;
+        }
+        let m = event.keystroke.modifiers;
+        let mods = input::Modifiers::new(m.shift, m.control, m.alt, m.platform);
+        let Some(command) = input::app_command(
+            event.keystroke.key.as_str(),
+            event.keystroke.key_char.as_deref(),
+            mods,
+        ) else {
+            return;
+        };
+        let action: Box<dyn gpui::Action> = match command {
+            AppCommand::IncreaseFont => Box::new(IncreaseFont),
+            AppCommand::DecreaseFont => Box::new(DecreaseFont),
+            AppCommand::ResetFont => Box::new(ResetFont),
+            AppCommand::CopySelection => Box::new(CopySelection),
+            AppCommand::PasteClipboard => Box::new(PasteClipboard),
+            AppCommand::SelectAll => Box::new(SelectAllTerminal),
+            AppCommand::OpenPreferences => Box::new(OpenPreferences),
+        };
+        // Claim the key so neither the binding (on platforms where it would
+        // fire) nor the terminal's key listener sees it twice.
+        cx.stop_propagation();
+        cx.dispatch_action(action.as_ref());
+    })
+    .detach();
 }
 
 /// Root view: Silvestris draws the frame; the terminal is the domain child.
