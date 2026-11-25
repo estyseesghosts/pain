@@ -70,7 +70,7 @@ Do not adopt Wintty's WinUI 3 shell. Wintty is a reference for Windows PTY and e
 
 ## Implementation status
 
-M0–M4 are implemented; M5–M7 remain out of scope for this build.
+M0–M7 are implemented and smoke-tested on Windows and Linux/WSLg.
 
 - M0: `libghostty-vt` is pinned to released tag `vt-1.0.2`, built from the
   vendored snapshot by `crates/ghostty-vt-sys/build.rs`, and wrapped by an
@@ -111,6 +111,21 @@ M0–M4 are implemented; M5–M7 remain out of scope for this build.
   terminal-aware paste API (bracketed paste). `Ctrl+Shift+C/V/A` are the
   whitelisted app commands; all other keys go to the PTY.
 
+- M5: `ghostty_terminal_scroll_viewport` drives wheel/trackpad history
+  scrolling and a thin scrollbar view; mouse-reporting TUIs receive wheel
+  reports instead. Double/triple click selects Ghostty-owned word/line ranges.
+  OSC 0/2 title effects update both window titles with a `pain` fallback.
+- M6: `tests/m6.rs` is the repeatable stress suite; its measured counters are
+  recorded in [docs/PERFORMANCE.md](docs/PERFORMANCE.md). Scrollback caps are
+  set deliberately (10,000 lines / 16 MiB by default), cursor-only frames do
+  no shaping and resize storms coalesce to distinct grid sizes.
+- M7: `--shell`, `--font-size`, `--scrollback-lines`, `--scrollback-bytes`,
+  `--version` and `--help` are the whole CLI. GUI builds report errors to
+  `%LOCALAPPDATA%\pain\pain.log` (or `$XDG_DATA_HOME/pain/pain.log`) instead of
+  an invisible stderr. See [docs/PACKAGING.md](docs/PACKAGING.md) for release
+  steps, [docs/SUPPORTED.md](docs/SUPPORTED.md) for the unsupported-feature
+  list and [docs/SMOKE.md](docs/SMOKE.md) for the release checklist.
+
 Silvestris is consumed from the freshest `~/workdir/silvestris-cont` checkout
 behind the optional `shell` feature, with GPUI kept at that checkout's exact
 revision. By default the app launches a real shell; `PAIN_FIXTURE=1` re-enables
@@ -131,6 +146,9 @@ verification.
 - [docs/OSX-BACKEND.md](docs/OSX-BACKEND.md) — deferred macOS design; not an active target.
 - [docs/PERFORMANCE.md](docs/PERFORMANCE.md) — hot paths, budgets, counters and stress tests.
 - [docs/SOURCE-MAP.md](docs/SOURCE-MAP.md) — exact upstream pins and source-file index.
+- [docs/PACKAGING.md](docs/PACKAGING.md) — Windows and Linux release build/install.
+- [docs/SUPPORTED.md](docs/SUPPORTED.md) — supported and deliberately unsupported features.
+- [docs/SMOKE.md](docs/SMOKE.md) — release smoke checklist and script usage.
 
 ## Package-wide deliverables
 

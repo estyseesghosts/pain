@@ -382,3 +382,25 @@ The platform abstraction must leave room for a POSIX/macOS PTY and macOS-specifi
 - Ghostty: [`terminal.h`](https://github.com/ghostty-org/ghostty/blob/64a6fedfd26d1fa687733f9f411db5eb8e205ebe/include/ghostty/vt/terminal.h), [`render.h`](https://github.com/ghostty-org/ghostty/blob/64a6fedfd26d1fa687733f9f411db5eb8e205ebe/include/ghostty/vt/render.h), [POSIX PTY](https://github.com/ghostty-org/ghostty/blob/64a6fedfd26d1fa687733f9f411db5eb8e205ebe/src/pty.zig)
 - Silvestris: [`docs/consumers.md`](https://github.com/estyseesghosts/silvestris/blob/0d5cc609171992d003994c8d8fd44b014b4d0b94/docs/consumers.md), [`chrome.rs`](https://github.com/estyseesghosts/silvestris/blob/0d5cc609171992d003994c8d8fd44b014b4d0b94/crates/silvestris/src/chrome.rs), [`responder.rs`](https://github.com/estyseesghosts/silvestris/blob/0d5cc609171992d003994c8d8fd44b014b4d0b94/crates/silvestris/src/responder.rs)
 - GPUI: [`element.rs`](https://github.com/zed-industries/zed/blob/6b720973027999bae402df23d469026f4cced988/crates/gpui/src/element.rs), [`text_system.rs`](https://github.com/zed-industries/zed/blob/6b720973027999bae402df23d469026f4cced988/crates/gpui/src/text_system.rs), [`platform.rs`](https://github.com/zed-industries/zed/blob/6b720973027999bae402df23d469026f4cced988/crates/gpui/src/platform.rs)
+
+## Delivery status (M5–M7)
+
+All three remaining milestones are delivered; the gates above are met by the
+following evidence. Re-run the commands when changing hot paths.
+
+- M5: viewport scrolling uses `ghostty_terminal_scroll_viewport` with a
+  Ghostty-backed scrollbar view; wheel reports go to mouse-reporting TUIs,
+  otherwise to local history. Word/line selection gestures and copy/paste are
+  covered by `tests/headless.rs` and `src/terminal/selection.rs`; title effects
+  are exercised in `src/terminal/session.rs`.
+- M6: `tests/m6.rs` prints the counters recorded in
+  [docs/PERFORMANCE.md](docs/PERFORMANCE.md). Flood, cursor-only and resize
+  stress cases assert wakeup coalescing, zero clean-row shaping and duplicate
+  resize suppression. Scrollback caps are set in `SessionConfig`.
+- M7: release steps, CLI, log location and version attribution are in
+  [docs/PACKAGING.md](docs/PACKAGING.md); unsupported features are listed in
+  [docs/SUPPORTED.md](docs/SUPPORTED.md); the cross-platform checklist and
+  scripts are in [docs/SMOKE.md](docs/SMOKE.md).
+
+Run `scripts/smoke.ps1` on Windows and `scripts/smoke.sh` on Linux/WSLg. No
+synthetic keystrokes or clicks are sent to the desktop by those scripts.

@@ -319,6 +319,49 @@ observed issue:
 
 Do not compare results across different workloads/hardware without noting it.
 
+## 16a. M6 measured stress suite (2026-11-25)
+
+`tests/m6.rs` is the repeatable headless stress suite. Run it with counters
+printed on both platforms:
+
+```sh
+# Windows (PowerShell), from pain/
+cargo test --release --test m6 --features shell -- --nocapture
+
+# Linux (bash), from a WSL ext4 working copy
+cargo test --release --test m6 --features shell -- --nocapture
+```
+
+Windows host, release profile, 80x24 session, synthetic fixture lines, four
+producer threads. Counters are `TerminalSession::snapshot_counters()`:
+
+| Workload | Writes | Bytes | Wakeups scheduled / coalesced | Render updates | Dirty full / partial / clean | Max lock hold |
+|---|---:|---:|---:|---:|---:|---:|
+| Output flood | 8,000 | 216,000 | 1 / 7,999 | 60 | 60 / 0 / 0 | 210 us |
+| Cursor-only frame | 2 | 15 | 1 / 1 | 2 | 1 / 0 / 1 | 97 us |
+| Resize storm | 0 | 0 | 1 / 8 | 0 | 0 / 0 / 0 | 0 us |
+
+What these numbers prove:
+
+- A flood of 8,000 writes schedules **one** UI wakeup; the other 7,999 are
+  coalesced. No unbounded foreground callback queue is created.
+- The cursor-only frame is `DIRTY_CLEAN` with zero dirty rows. Feeding the same
+  dirty state through `RowCache::rows_to_rebuild` returns an empty list, and the
+  counters show `rows_rebuilt == 0` and `shape_line_calls == 0`. Cursor blink
+  therefore reshapes nothing.
+- 1,000 resize requests with only nine distinct grid sizes produce nine Ghostty
+  resize calls and 991 suppressed duplicates; pixel-only motion never reaches
+  the PTY.
+- Terminal lock hold stays in the low hundreds of microseconds because it only
+  covers `ghostty_terminal_vt_write` or render-state `begin_update`, never
+  shaping or painting.
+
+Scrollback is bounded deliberately in `SessionConfig` (10,000 lines / 16 MiB by
+default, override with `--scrollback-lines` and `--scrollback-bytes`). Ghostty's
+own 10 KiB default byte cap is replaced so ordinary command output retains
+usable history. Idle scrollback compression is **not** enabled: the profiled
+workloads show no foreground stall that would justify its serialization cost.
+
 ## 17. Startup
 
 Cold start should do only:

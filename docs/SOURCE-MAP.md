@@ -183,6 +183,33 @@ still comes from the active Silvestris theme. Window resize handling derives
 grid size from real cell metrics, calls `ghostty_terminal_resize` only when
 rows/columns change, and reuses cached rows for pixel-only size changes.
 
+## Implemented milestones M5/M6/M7 — 2026-11-25
+
+No upstream pin moved. The new scrollbar/viewport calls come from the same
+pinned `vt-1.0.2` header: `ghostty_terminal_scroll_viewport`,
+`GhosttyTerminalScrollbar`, `GHOSTTY_TERMINAL_DATA_TITLE` and the scrollback
+options are declared in `crates/ghostty-vt-sys/src/lib.rs`, with sizes measured
+with `zig cc` against `vendor/ghostty-vt/include` and asserted by the ABI test.
+
+- M5: `src/terminal/selection.rs` keeps word/line and wheel policy pure;
+  `ghostty.rs`/`session.rs` use Ghostty's viewport and title APIs. No GPUI
+  `ScrollHandle` is authoritative for history.
+- M6: `tests/m6.rs` is the stress suite and `docs/PERFORMANCE.md` records the
+  Windows release-profile counter output. `SessionConfig` applies deliberate
+  scrollback caps; compression stays off.
+- M7: `src/config.rs`, `src/log.rs`, `docs/PACKAGING.md`,
+  `docs/SUPPORTED.md` and `docs/SMOKE.md` cover the release shell. The Windows
+  GUI subsystem hides stderr, so the log file is the diagnostic channel.
+
+Verification commands:
+
+```sh
+cargo test --workspace --all-targets --features shell
+cargo test --release --test m6 --features shell -- --nocapture
+scripts/smoke.ps1   # Windows
+scripts/smoke.sh    # Linux/WSLg
+```
+
 ## Research baseline — 2026-11-24
 
 | Project | Branch/context | Revision |
