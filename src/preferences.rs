@@ -11,17 +11,18 @@ use std::sync::Arc;
 
 use gpui::{
     div, px, size, App, AppContext as _, Bounds, Context, Entity, Global, IntoElement,
-    ParentElement as _, Render, Styled as _, Window, WindowHandle,
+    ParentElement as _, Render, SharedString, Styled as _, Window, WindowHandle,
 };
 use serde::{Deserialize, Serialize};
 use silvestris::chrome::{fixed_window_options, open_window, WindowFrame};
-use silvestris::controls::{Button, Segment, SegmentedControl};
+use silvestris::controls::{Button, PopUpButton, Segment, SegmentedControl};
 use silvestris::core::prefs::{Loaded, Versioned};
 use silvestris::preferences::{Form, FormRow};
 use silvestris::prefs::Preferences;
 use silvestris::{set_theme_preference, Appearance, ThemeId, ThemePreference};
 
 use crate::log::{data_dir, error};
+use crate::platform::profiles::{self, ShellProfile};
 use crate::terminal::palette::{self, PaletteChoice};
 use crate::terminal::session::TerminalSession;
 
@@ -99,6 +100,9 @@ pub struct UiPreferences {
     pub theme: ThemeChoice,
     #[serde(default)]
     pub palette: PaletteChoice,
+    /// Saved shell profile id. `None` means "use the platform default".
+    #[serde(default)]
+    pub profile: Option<String>,
 }
 
 fn schema() -> u32 {
@@ -111,6 +115,7 @@ impl Default for UiPreferences {
             schema_version: SCHEMA_VERSION,
             theme: ThemeChoice::default(),
             palette: PaletteChoice::default(),
+            profile: None,
         }
     }
 }
@@ -140,6 +145,12 @@ impl Global for PreferencesGlobal {}
 pub struct SessionGlobal(pub Arc<TerminalSession>);
 
 impl Global for SessionGlobal {}
+
+/// Profiles detected once at startup. Preferences only reads this list; a
+/// change of default affects the next launch or the next jump-list window.
+pub struct ShellProfilesGlobal(pub Vec<ShellProfile>);
+
+impl Global for ShellProfilesGlobal {}
 
 /// Open the document once and install it as a global. A malformed file keeps
 /// defaults and is left untouched so a newer version can still read it.
@@ -192,7 +203,7 @@ pub fn open_preferences(cx: &mut App) {
             return;
         }
     }
-    let bounds = Bounds::centered(None, size(px(560.), px(300.)), cx);
+    let bounds = Bounds::centered(None, size(px(600.), px(380.)), cx);
     let options = fixed_window_options("Preferences", bounds, cx);
     match open_window(options, cx, |window, cx| {
         cx.new(|cx| PreferencesView::new(window, cx))
@@ -216,6 +227,48 @@ impl PreferencesView {
 impl Render for PreferencesView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let value = cx.global::<PreferencesGlobal>().0.read(cx).value().clone();
+        let profiles = cx
+            .try_global::<ShellProfilesGlobal>()
+            .map(|global| global.0.clone())
+            .unwrap_or_default();
+        let automatic = profiles::default_profile_id(&profiles)
+            .and_then(|id| profiles::find_profile(&profiles, id))
+            .map(|profile| profile.label.as_str())
+            .unwrap_or("system shell");
+        let labels: Vec<SharedString> =
+            std::iter::once(SharedString::from(format!("Automatic ({automatic})")))
+                .chain(
+                    profiles
+                        .iter()
+                        .map(|profile| SharedString::from(profile.label.clone())),
+                )
+                .collect();
+        let mut profile_choices: Vec<Option<String>> = Vec::with_capacity(profiles.len() + 1);
+        profile_choices.push(None);
+        profile_choices.extend(profiles.iter().map(|profile| Some(profile.id.clone())));
+        let selected_profile = value
+            .profile
+            .as_ref()
+            .and_then(|id| profiles.iter().position(|profile| &profile.id == id))
+            .map(|index| index + 1)
+            .unwrap_or(0);
+        let profile_picker = PopUpButton::new("preferences-profile", "Shell profile", labels)
+            .selected(Some(selected_profile))
+            .on_choose(move |index, _, cx| {
+                let choice = profile_choices.get(*index).cloned().flatten();
+                let preferences = cx.global::<PreferencesGlobal>().0.clone();
+                preferences.update(cx, |document, cx| {
+                    if let Err(failure) =
+                        document.set("profile", |value| value.profile = choice.clone(), cx)
+                    {
+                        error(
+                            "preferences",
+                            &format!("could not save shell profile: {failure}"),
+                        );
+                    }
+                });
+                cx.refresh_windows();
+            });
 
         let theme = SegmentedControl::new(
             "preferences-theme",
@@ -257,6 +310,9 @@ impl Render for PreferencesView {
             apply(cx);
         });
 
+        let profile_hint = "Used when a new pain process starts. Automatic follows \
+                            PowerShell 7, then Windows PowerShell, then the command \
+                            interpreter.";
         let hint = "Theme sets the window look. The palette chooses ANSI colours; \
                     Default keeps Ghostty's palette and Theme follows light/dark.";
 
@@ -269,6 +325,7 @@ impl Render for PreferencesView {
                 .gap(px(14.0))
                 .child(
                     Form::new(130.0)
+                        .row(FormRow::new("Shell profile", profile_picker).note(profile_hint))
                         .row(FormRow::new("Theme", theme))
                         .row(FormRow::new("Terminal palette", palette).note(hint)),
                 )

@@ -1,6 +1,6 @@
-//! Small command-line surface for the release build: shell, font size and
-//! scrollback caps only. There is deliberately no settings UI and no config
-//! file discovery at startup (docs/PERFORMANCE.md, "Startup").
+//! Small command-line surface for the release build: shell/profile, font size
+//! and scrollback caps. Appearance and the saved default profile live in the
+//! preferences document; this module only parses one launch.
 
 use crate::platform::ShellCommand;
 use crate::terminal::ghostty::version as ghostty_version;
@@ -12,6 +12,9 @@ pub const DEFAULT_SCROLLBACK_BYTES: usize = 16 * 1024 * 1024;
 #[derive(Clone, Debug, PartialEq)]
 pub struct Config {
     pub shell: Option<ShellCommand>,
+    /// Profile id from a taskbar jump-list task. An explicit `--shell`
+    /// command takes precedence over this.
+    pub profile: Option<String>,
     pub font_size: Option<f32>,
     pub scrollback_lines: usize,
     pub scrollback_bytes: usize,
@@ -23,6 +26,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             shell: None,
+            profile: None,
             font_size: None,
             scrollback_lines: DEFAULT_SCROLLBACK_LINES,
             scrollback_bytes: DEFAULT_SCROLLBACK_BYTES,
@@ -69,6 +73,16 @@ pub fn parse_args(args: &[String]) -> Result<Config, String> {
                 });
                 index = end;
             }
+            "--profile" => {
+                let id = args
+                    .get(index + 1)
+                    .ok_or_else(|| "--profile needs an id".to_owned())?;
+                if id.is_empty() {
+                    return Err("--profile needs a non-empty id".to_owned());
+                }
+                config.profile = Some(id.clone());
+                index += 2;
+            }
             "--font-size" => {
                 config.font_size = Some(parse_value(args, &mut index, "--font-size", |text| {
                     text.parse::<f32>()
@@ -106,6 +120,7 @@ fn is_app_option(arg: &str) -> bool {
     matches!(
         arg,
         "--shell"
+            | "--profile"
             | "--"
             | "--font-size"
             | "--scrollback-lines"
@@ -134,12 +149,14 @@ fn parse_value<T>(
 /// Usage text printed for `--help` and for a parse error.
 #[must_use]
 pub fn usage() -> &'static str {
-    "usage: pain [--shell <program> [args...]] [-- <program> [args...]]\n\
-     \x20      [--font-size <pixels>] [--scrollback-lines <n>]\n\
-     \x20      [--scrollback-bytes <n>] [--version] [--help]\n\
+    "usage: pain [--profile <id>] [--shell <program> [args...]]\n\
+     \x20      [-- <program> [args...]] [--font-size <pixels>]\n\
+     \x20      [--scrollback-lines <n>] [--scrollback-bytes <n>]\n\
+     \x20      [--version] [--help]\n\
      \n\
-     Ctrl+= / Ctrl+- / Ctrl+0 change font size; Ctrl+Shift+C/V/A copy, paste\n\
-     and select all. Wheel scrolls history unless a TUI owns mouse reporting."
+     Ctrl+, opens Preferences. Ctrl+= / Ctrl+- / Ctrl+0 change font size;\n\
+     Ctrl+Shift+C/V/A copy, paste and select all. Wheel scrolls history unless\n\
+     a TUI owns mouse reporting."
 }
 
 /// Version/source attribution for the bundled terminal engine.
@@ -198,11 +215,25 @@ mod tests {
     }
 
     #[test]
+    fn profile_selects_a_detected_shell_without_forcing_one() {
+        let config = parse_args(&argv(&["--profile", "pwsh7"])).expect("valid config");
+        assert_eq!(config.profile.as_deref(), Some("pwsh7"));
+        assert_eq!(config.shell, None);
+
+        let explicit =
+            parse_args(&argv(&["--shell", "cmd.exe", "--profile", "pwsh7"])).expect("valid config");
+        assert_eq!(explicit.shell.expect("shell").program, "cmd.exe");
+        assert_eq!(explicit.profile.as_deref(), Some("pwsh7"));
+    }
+
+    #[test]
     fn bad_values_are_errors_not_silent_defaults() {
         assert!(parse_args(&argv(&["--font-size"])).is_err());
         assert!(parse_args(&argv(&["--font-size", "abc"])).is_err());
         assert!(parse_args(&argv(&["--font-size", "-1"])).is_err());
         assert!(parse_args(&argv(&["--scrollback-lines", "x"])).is_err());
+        assert!(parse_args(&argv(&["--profile"])).is_err());
+        assert!(parse_args(&argv(&["--profile", ""])).is_err());
         assert!(parse_args(&argv(&["--nope"])).is_err());
     }
 

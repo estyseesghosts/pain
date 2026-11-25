@@ -18,9 +18,13 @@ use gpui::{
 };
 use silvestris::ActiveTheme;
 
+use crate::app::{
+    CopySelection, DecreaseFont, IncreaseFont, OpenPreferences, PasteClipboard, ResetFont,
+    SelectAllTerminal,
+};
 use crate::terminal::geometry::{
     adjust_font_size, background_runs, batch_row, selection_span, BgRun, CellMetrics, RowCache,
-    TextRun as CellRun,
+    TextRun as CellRun, FONT_SIZE_STEP,
 };
 use crate::terminal::ghostty::{Cursor, KeyEvent};
 use crate::terminal::input::{
@@ -200,6 +204,67 @@ impl TerminalView {
             let _ = key_event.set_unshifted_codepoint(encoded.unshifted_codepoint);
             let _ = self.session.encode_key(&key_event);
         }
+        cx.stop_propagation();
+    }
+
+    // Action listeners live on this focused element, matching Chaus. A global
+    // `cx.on_action` handler would have to call `WindowHandle::update` while
+    // the window is already leased by GPUI's key dispatch, which fails and
+    // leaves the shortcut dead.
+    fn increase_font(&mut self, _: &IncreaseFont, _window: &mut Window, cx: &mut Context<Self>) {
+        self.adjust_font(FONT_SIZE_STEP, cx);
+        cx.stop_propagation();
+    }
+
+    fn decrease_font(&mut self, _: &DecreaseFont, _window: &mut Window, cx: &mut Context<Self>) {
+        self.adjust_font(-FONT_SIZE_STEP, cx);
+        cx.stop_propagation();
+    }
+
+    fn reset_font(&mut self, _: &ResetFont, _window: &mut Window, cx: &mut Context<Self>) {
+        self.set_font_size(cx.theme().type_.size_mono, cx);
+        cx.stop_propagation();
+    }
+
+    fn copy_selection(&mut self, _: &CopySelection, _window: &mut Window, cx: &mut Context<Self>) {
+        match self.session.copy_selection() {
+            Ok(text) if !text.is_empty() => {
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+            }
+            Ok(_) => {}
+            Err(error) => crate::log::error("copy", &format!("copy failed: {error}")),
+        }
+        cx.stop_propagation();
+    }
+
+    fn paste_clipboard(
+        &mut self,
+        _: &PasteClipboard,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+            if let Err(error) = self.session.paste(&text) {
+                crate::log::error("paste", &format!("paste failed: {error}"));
+            }
+        }
+        cx.stop_propagation();
+    }
+
+    fn select_all(&mut self, _: &SelectAllTerminal, _window: &mut Window, cx: &mut Context<Self>) {
+        if let Err(error) = self.session.select_all() {
+            crate::log::error("selection", &format!("select all failed: {error}"));
+        }
+        cx.stop_propagation();
+    }
+
+    fn open_preferences(
+        &mut self,
+        _: &OpenPreferences,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        crate::preferences::open_preferences(cx);
         cx.stop_propagation();
     }
 
@@ -442,6 +507,13 @@ impl Render for TerminalView {
             .track_focus(&self.focus)
             .key_context(KeyContext::new_with_defaults(cx.platform_info().os))
             .on_key_down(cx.listener(Self::on_key_down))
+            .on_action(cx.listener(Self::increase_font))
+            .on_action(cx.listener(Self::decrease_font))
+            .on_action(cx.listener(Self::reset_font))
+            .on_action(cx.listener(Self::copy_selection))
+            .on_action(cx.listener(Self::paste_clipboard))
+            .on_action(cx.listener(Self::select_all))
+            .on_action(cx.listener(Self::open_preferences))
             .on_scroll(cx.listener(Self::on_scroll))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_down(MouseButton::Right, cx.listener(Self::on_mouse_down))

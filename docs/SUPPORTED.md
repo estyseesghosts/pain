@@ -8,7 +8,11 @@ implement.
 
 - One window with one terminal session and one shell on Windows and Linux.
 - Windows: OS ConPTY. Linux: POSIX PTY with `$SHELL` or `/bin/sh`.
-- Shell override from the command line, no settings UI.
+- Shell profiles on Windows: PowerShell 7, Windows PowerShell, cmd, Git Bash,
+  devkitPro MSYS2 Bash and each registered WSL distribution. The default is
+  chosen in Preferences; the same list appears in the taskbar jump list.
+- Shell override from the command line (`--shell`) or a specific profile
+  (`--profile`).
 - Terminal output: ANSI colors, 256-color and true color, bold/italic/underline,
   alternate screen, cursor styles and resize/reflow via Ghostty VT.
 - Keyboard and text: Ghostty's mode-synced key encoder, GPUI committed-text and
@@ -20,15 +24,18 @@ implement.
 - Bounded scrollback configured at session creation; a scrollbar view driven by
   Ghostty's scrollbar state.
 - Window title follows OSC 0/2 with a `pain` fallback.
-- Font size shortcuts `Ctrl+=`, `Ctrl+-`, `Ctrl+0`.
+- Font size shortcuts `Ctrl+=`, `Ctrl+-`, `Ctrl+0`; `Ctrl+,` opens the
+  one-window Preferences form.
 - Startup/runtime errors appended to a log file.
 
 ## Deliberately unsupported
 
 - macOS binary, and any macOS code presented as supported.
-- Tabs, splits, panes, detachable sessions, profiles, workspaces, session
-  restore, command palette, global hotkeys or quick terminal.
-- Graphical preferences, theme marketplace, plugins or auto-update.
+- Tabs, splits, panes, detachable sessions, workspaces, session restore,
+  command palette, global hotkeys or quick terminal.
+- Ghostty-style window/session profiles. Pain's profile setting only chooses
+  the shell command; it does not save window layouts or per-profile fonts.
+- Multi-pane settings, a theme marketplace, plugins or auto-update.
 - Kitty graphics, Sixel, image protocols, shaders and ligature configuration.
 - Shell integration installation, semantic prompt navigation, notifications,
   hyperlinks and OSC clipboard program access.

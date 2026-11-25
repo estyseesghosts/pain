@@ -299,20 +299,26 @@ text path owns the event.
   repeat from a fresh press.
 - Encoding grows its buffer once on `out_of_space` so a key is never dropped.
 - App shortcuts (`Ctrl+Shift+C/V/A`, `Ctrl+,`, `Shift+Insert`, and the font
-  keys) are resolved by a `KeystrokeEvent` interceptor before GPUI chooses
-  between bindings and native text input. On Windows, `ToUnicode` makes
-  `prefer_character_input` true for Ctrl combinations; with a focused terminal
-  `InputHandler`, that would otherwise skip every binding. `app_command` is the
-  pure mapping shared by the interceptor and the view's `is_app_shortcut`, so
-  a clipboard copy never leaves a stray escape sequence in the PTY. AltGr is
-  excluded, so IME composition still owns those keys. `Ctrl+V` deliberately
-  remains a terminal control byte, as shells use it for quoted-insert.
+  keys) are GPUI `KeyBinding`s whose actions are handled by `.on_action`
+  listeners on the focused `TerminalView` element, the same pattern Chaus uses.
+  A global `App::on_action` handler is wrong here: keybinding dispatch runs
+  while GPUI already has the window leased, so a handler that calls
+  `WindowHandle::update` silently fails and the shortcut appears dead.
+  `app_command` is the pure mapping behind the view's `is_app_shortcut`
+  safeguard, so a clipboard copy never leaves a stray escape sequence in the
+  PTY. AltGr is excluded, so IME composition still owns those keys. `Ctrl+V`
+  deliberately remains a terminal control byte, as shells use it for
+  quoted-insert.
 
 ## 11. Focus and command routing
 
 The terminal must own focus whenever the user clicks its canvas or the window opens with terminal focus. `TerminalView` should implement/use GPUI `FocusHandle`; GPUI describes it as the mechanism for tracking/manipulating keyboard focus. See [GPUI `app.rs`](https://github.com/zed-industries/zed/blob/6b720973027999bae402df23d469026f4cced988/crates/gpui/src/app.rs).
 
-Silvestris's responder chain should treat the terminal as a domain canvas. Its `capture_keys` helper is explicitly intended for a focused canvas that consumes almost all commands while allowing selected shell shortcuts outward. See [Silvestris `responder.rs`](https://github.com/estyseesghosts/silvestris/blob/0d5cc609171992d003994c8d8fd44b014b4d0b94/crates/silvestris/src/responder.rs). Define an allowlist rather than a denylist. Candidate app-level commands are close/quit and copy/paste only when terminal policy explicitly delegates them; do not let generic text-editing key bindings consume terminal Ctrl sequences.
+The focused `TerminalView` element is the command gate. It registers the small
+allowlist of app actions directly and its `on_key_down` listener consumes every
+other key it encodes. Generic Silvestris text-editing bindings must not consume
+terminal Ctrl sequences. `src/terminal/input.rs` owns the pure allowlist mapping
+tested without a window.
 
 ## 12. Paste
 
@@ -478,9 +484,16 @@ Do not block the GPUI foreground thread while joining potentially stuck I/O thre
 ## 21. Appearance and preferences
 
 `Ctrl+,` opens a single fixed-size Preferences window built from Silvestris's
-`WindowFrame`, `Form`/`FormRow` and `SegmentedControl`, following Chaus's
-one-window settings pattern. There are no tabs or profile panes.
+`WindowFrame`, `Form`/`FormRow`, `SegmentedControl` and `PopUpButton`,
+following Chaus's one-window settings pattern. There are no tabs.
 
+- **Shell profile** selects the default for new pain processes: Automatic, or
+  one of the shells discovered at startup. `src/platform/profiles.rs` probes
+  PowerShell 7 (including the WindowsApps alias), Windows PowerShell, cmd, Git
+  Bash, devkitPro MSYS2 Bash, and every distribution registered under
+  `HKCU\Software\Microsoft\Windows\CurrentVersion\Lxss`. Automatic prefers
+  PowerShell 7, then Windows PowerShell, then cmd. On Windows the same list is
+  installed as taskbar jump-list tasks, each launching `pain --profile <id>`.
 - **Theme** selects one of four Silvestris theme ids (`AquaLight`,
   `AquaDark`, `GeistLight`, `GeistDark`), so both light/dark mode and the Geist
   family are explicit choices. `silvestris::set_theme_preference` repaints every

@@ -6,21 +6,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use gpui::{
-    App, AppContext, Bounds, ClipboardItem, Entity, IntoElement, Render, SharedString, Window,
-};
+use gpui::{App, AppContext, Bounds, Entity, IntoElement, Render, SharedString, Window};
 use silvestris::chrome::{open_window, window_options, WindowFrame};
-use silvestris::core::command::CommandId;
-use silvestris::responder::{ResponderChain, ResponderEntry, ResponderScope};
-use silvestris::{ActiveTheme, ThemePreference};
+use silvestris::ThemePreference;
 
-use crate::config::{parse_args, usage, version_line};
+use crate::config::{parse_args, usage, version_line, Config};
 use crate::log;
-use crate::platform::{default_shell, spawn_pty, PlatformPty, PtyConfig};
-use crate::preferences::{self, SessionGlobal};
+use crate::platform::profiles::{self, ShellProfile};
+use crate::platform::{default_shell, spawn_pty, PlatformPty, PtyConfig, ShellCommand};
+use crate::preferences::{self, SessionGlobal, ShellProfilesGlobal};
 use crate::terminal::fixtures::Fixture;
-use crate::terminal::geometry::FONT_SIZE_STEP;
-use crate::terminal::input::{self, AppCommand};
 use crate::terminal::render::TerminalView;
 use crate::terminal::session::{SessionConfig, TerminalSession};
 
@@ -37,32 +32,6 @@ gpui::actions!(
         OpenPreferences
     ]
 );
-
-const INCREASE_FONT: &str = "pain.increase-font";
-const DECREASE_FONT: &str = "pain.decrease-font";
-const RESET_FONT: &str = "pain.reset-font";
-const COPY_SELECTION: &str = "pain.copy-selection";
-const PASTE_CLIPBOARD: &str = "pain.paste-clipboard";
-const SELECT_ALL: &str = "pain.select-all";
-const OPEN_PREFERENCES: &str = "pain.open-preferences";
-
-/// The only commands allowed out of a focused terminal canvas.
-fn whitelisted_commands() -> [CommandId; 7] {
-    [
-        CommandId::new(INCREASE_FONT),
-        CommandId::new(DECREASE_FONT),
-        CommandId::new(RESET_FONT),
-        CommandId::new(COPY_SELECTION),
-        CommandId::new(PASTE_CLIPBOARD),
-        CommandId::new(SELECT_ALL),
-        CommandId::new(OPEN_PREFERENCES),
-    ]
-}
-
-/// True when the focused responder does not claim this app command.
-fn command_reaches_app(chain: &ResponderChain, id: &CommandId, window: &Window, cx: &App) -> bool {
-    chain.resolve(id, window, cx).is_none()
-}
 
 /// Start the one-window app with a live shell by default.
 pub fn run() {
@@ -86,7 +55,7 @@ pub fn run() {
         println!("{version}");
         return;
     }
-    let command = config.shell.clone().unwrap_or_else(default_shell);
+    let profiles = profiles::detect_profiles();
     let fixture = std::env::var_os("PAIN_FIXTURE").is_some();
     let stress = std::env::var_os("PAIN_STRESS").is_some();
     log::info(
@@ -105,9 +74,25 @@ pub fn run() {
             cx.quit();
             return;
         }
+        // GPUI's own jump-list implementation relies on the process's implicit
+        // AppUserModelID, so do not set an explicit one: an explicit id would
+        // detach the running button from an existing taskbar pin.
+        #[cfg(target_os = "windows")]
+        profiles::install_jump_list(&profiles);
+        cx.set_global(ShellProfilesGlobal(profiles.clone()));
+
         // Load the persisted appearance before any window opens. A malformed
         // document falls back to the previous look instead of blocking startup.
         preferences::install(cx);
+        let saved_profile = cx
+            .global::<preferences::PreferencesGlobal>()
+            .0
+            .read(cx)
+            .value()
+            .profile
+            .clone();
+        let command = choose_shell(&config, saved_profile.as_deref(), &profiles);
+        log::info("startup", &format!("shell: {}", command.program));
 
         // Capacity one: the session coalesces many VT writes into a single
         // token, and `try_send` drops redundant tokens instead of queueing a
@@ -188,21 +173,10 @@ pub fn run() {
         let holder_for_view = Arc::clone(&pty_holder);
         let view = open_window(options, cx, |window: &mut Window, cx| {
             let terminal = cx.new(|cx| TerminalView::new(Arc::clone(&session), window, cx));
-            // Silvestris responder policy: a focused terminal canvas captures
-            // every command except the six app-owned ones. GPUI still owns key
-            // dispatch; this chain decides which app commands may fire.
-            let focus = terminal.read(cx).focus();
-            let mut chain = ResponderChain::new();
-            chain.push(
-                ResponderEntry::custom(ResponderScope::Control, "terminal-canvas")
-                    .when_focused(&focus)
-                    .capture_keys(whitelisted_commands()),
-            );
             cx.new(|_| AppView {
                 terminal,
                 pty: holder_for_view,
                 title: SharedString::from("pain"),
-                chain,
             })
         })
         .expect("open terminal window");
@@ -232,10 +206,8 @@ pub fn run() {
             gpui::KeyBinding::new("ctrl-shift-a", SelectAllTerminal, None),
             gpui::KeyBinding::new("ctrl-,", OpenPreferences, None),
         ]);
-        install_actions(cx, &view);
-        install_shortcut_interceptor(cx);
 
-        let window_handle = view.clone();
+        let window_handle = view;
         cx.spawn(async move |cx: &mut gpui::AsyncApp| {
             while wake_rx.recv().await.is_ok() {
                 let _ = window_handle.update(cx, |_, _, cx| cx.notify());
@@ -246,7 +218,7 @@ pub fn run() {
         // OSC 0/2 title effects arrive on the PTY reader thread. A capacity-one
         // channel coalesces them and the UI task applies the latest title to
         // both the platform window and Silvestris's drawn title band.
-        let title_window = view.clone();
+        let title_window = view;
         let title_session = Arc::clone(&session);
         cx.spawn(async move |cx: &mut gpui::AsyncApp| {
             while let Ok(new_title) = title_rx.recv().await {
@@ -292,136 +264,32 @@ pub fn run() {
     });
 }
 
-/// Global commands are whitelisted so they never reach a PTY. Clipboard uses
-/// the GPUI/platform clipboard; paste still goes through Ghostty's API.
-fn install_actions(cx: &mut App, window: &gpui::WindowHandle<AppView>) {
-    let w = window.clone();
-    cx.on_action(move |_: &IncreaseFont, cx| {
-        let _ = w.update(cx, |app, window, cx| {
-            if !command_reaches_app(&app.chain, &CommandId::new(INCREASE_FONT), window, cx) {
-                return;
-            }
-            // GPUI dispatches bindings before the terminal's key listener.
-            // Claim the event here so the view does not apply the same step
-            // again (and does not encode the key into the PTY).
-            cx.stop_propagation();
-            app.terminal
-                .update(cx, |terminal, cx| terminal.adjust_font(FONT_SIZE_STEP, cx));
-        });
-    });
-    let w = window.clone();
-    cx.on_action(move |_: &DecreaseFont, cx| {
-        let _ = w.update(cx, |app, window, cx| {
-            if !command_reaches_app(&app.chain, &CommandId::new(DECREASE_FONT), window, cx) {
-                return;
-            }
-            cx.stop_propagation();
-            app.terminal
-                .update(cx, |terminal, cx| terminal.adjust_font(-FONT_SIZE_STEP, cx));
-        });
-    });
-    let w = window.clone();
-    cx.on_action(move |_: &ResetFont, cx| {
-        let default_size = cx.theme().type_.size_mono;
-        let _ = w.update(cx, |app, window, cx| {
-            if !command_reaches_app(&app.chain, &CommandId::new(RESET_FONT), window, cx) {
-                return;
-            }
-            cx.stop_propagation();
-            app.terminal
-                .update(cx, |terminal, cx| terminal.set_font_size(default_size, cx));
-        });
-    });
-    let w = window.clone();
-    cx.on_action(move |_: &CopySelection, cx| {
-        let _ = w.update(cx, |app, window, cx| {
-            if !command_reaches_app(&app.chain, &CommandId::new(COPY_SELECTION), window, cx) {
-                return;
-            }
-            cx.stop_propagation();
-            match app.terminal.read(cx).session().copy_selection() {
-                Ok(text) if !text.is_empty() => {
-                    cx.write_to_clipboard(ClipboardItem::new_string(text));
-                }
-                Ok(_) => {}
-                Err(error) => log::error("copy", &format!("copy failed: {error}")),
-            }
-        });
-    });
-    let w = window.clone();
-    cx.on_action(move |_: &PasteClipboard, cx| {
-        let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
-            return;
-        };
-        let _ = w.update(cx, |app, window, cx| {
-            if !command_reaches_app(&app.chain, &CommandId::new(PASTE_CLIPBOARD), window, cx) {
-                return;
-            }
-            cx.stop_propagation();
-            if let Err(error) = app.terminal.read(cx).session().paste(&text) {
-                log::error("paste", &format!("paste failed: {error}"));
-            }
-        });
-    });
-    let w = window.clone();
-    cx.on_action(move |_: &SelectAllTerminal, cx| {
-        let _ = w.update(cx, |app, window, cx| {
-            if !command_reaches_app(&app.chain, &CommandId::new(SELECT_ALL), window, cx) {
-                return;
-            }
-            cx.stop_propagation();
-            if let Err(error) = app.terminal.read(cx).session().select_all() {
-                log::error("selection", &format!("select all failed: {error}"));
-            }
-        });
-    });
-    let w = window.clone();
-    cx.on_action(move |_: &OpenPreferences, cx| {
-        let _ = w.update(cx, |app, window, cx| {
-            if !command_reaches_app(&app.chain, &CommandId::new(OPEN_PREFERENCES), window, cx) {
-                return;
-            }
-            cx.stop_propagation();
-            preferences::open_preferences(cx);
-        });
-    });
-}
-
-/// Resolve app shortcuts before GPUI decides between key bindings and native
-/// text input. Windows flags Ctrl+comma/letters as `prefer_character_input`
-/// because ToUnicode changes the character; with a focused terminal
-/// `InputHandler`, that would otherwise suppress *every* Ctrl binding
-/// (including the font keys and clipboard). AltGr is excluded by
-/// `app_command`, so IME composition keeps working.
-fn install_shortcut_interceptor(cx: &mut App) {
-    cx.intercept_keystrokes(|event, window, cx| {
-        if window.root::<AppView>().is_none() {
-            return;
+/// Resolve launch precedence: explicit command, explicit profile, saved
+/// profile, then the platform default (PowerShell 7 on Windows when present).
+fn choose_shell(
+    config: &Config,
+    saved_profile: Option<&str>,
+    profiles: &[ShellProfile],
+) -> ShellCommand {
+    if let Some(shell) = &config.shell {
+        return shell.clone();
+    }
+    if let Some(id) = config.profile.as_deref() {
+        match profiles::find_profile(profiles, id) {
+            Some(profile) => return profile.command.clone(),
+            None => log::error("cli", &format!("unknown shell profile: {id}")),
         }
-        let m = event.keystroke.modifiers;
-        let mods = input::Modifiers::new(m.shift, m.control, m.alt, m.platform);
-        let Some(command) = input::app_command(
-            event.keystroke.key.as_str(),
-            event.keystroke.key_char.as_deref(),
-            mods,
-        ) else {
-            return;
-        };
-        let action: Box<dyn gpui::Action> = match command {
-            AppCommand::IncreaseFont => Box::new(IncreaseFont),
-            AppCommand::DecreaseFont => Box::new(DecreaseFont),
-            AppCommand::ResetFont => Box::new(ResetFont),
-            AppCommand::CopySelection => Box::new(CopySelection),
-            AppCommand::PasteClipboard => Box::new(PasteClipboard),
-            AppCommand::SelectAll => Box::new(SelectAllTerminal),
-            AppCommand::OpenPreferences => Box::new(OpenPreferences),
-        };
-        // Claim the key so neither the binding (on platforms where it would
-        // fire) nor the terminal's key listener sees it twice.
-        cx.stop_propagation();
-        cx.dispatch_action(action.as_ref());
-    })
-    .detach();
+    }
+    if let Some(id) = saved_profile {
+        match profiles::find_profile(profiles, id) {
+            Some(profile) => return profile.command.clone(),
+            None => log::error("startup", &format!("saved shell profile not found: {id}")),
+        }
+    }
+    profiles::default_profile_id(profiles)
+        .and_then(|id| profiles::find_profile(profiles, id))
+        .map(|profile| profile.command.clone())
+        .unwrap_or_else(default_shell)
 }
 
 /// Root view: Silvestris draws the frame; the terminal is the domain child.
@@ -430,7 +298,6 @@ struct AppView {
     #[allow(dead_code)]
     pty: Arc<Mutex<Option<Box<dyn PlatformPty>>>>,
     title: SharedString,
-    chain: ResponderChain,
 }
 
 impl Render for AppView {
@@ -441,29 +308,6 @@ impl Render for AppView {
 
 /// Synthetic byte producer: exactly the entry point a ConPTY/POSIX reader will
 /// use, but with fixture chunks instead of OS output.
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn responder_allowlist_is_exactly_the_app_commands() {
-        let allowed = whitelisted_commands();
-        assert_eq!(allowed.len(), 7);
-        for expected in [
-            INCREASE_FONT,
-            DECREASE_FONT,
-            RESET_FONT,
-            COPY_SELECTION,
-            PASTE_CLIPBOARD,
-            SELECT_ALL,
-            OPEN_PREFERENCES,
-        ] {
-            assert!(allowed.iter().any(|id| id.as_str() == expected));
-        }
-        assert!(!allowed.iter().any(|id| id.as_str() == "edit.paste"));
-    }
-}
-
 fn start_producer(session: Arc<TerminalSession>, stop: Arc<AtomicBool>) {
     std::thread::Builder::new()
         .name("pain-fixture-producer".into())
@@ -477,4 +321,52 @@ fn start_producer(session: Arc<TerminalSession>, stop: Arc<AtomicBool>) {
             }
         })
         .expect("spawn synthetic fixture producer");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn profile(id: &str, program: &str) -> ShellProfile {
+        ShellProfile {
+            id: id.to_owned(),
+            label: id.to_owned(),
+            command: ShellCommand::new(program),
+        }
+    }
+
+    #[test]
+    fn launch_prefers_explicit_shell_then_profile_then_saved_then_default() {
+        let profiles = vec![profile("cmd", "cmd.exe"), profile("pwsh7", "pwsh.exe")];
+        let explicit = Config {
+            shell: Some(ShellCommand::new("git-bash.exe")),
+            profile: Some("pwsh7".to_owned()),
+            ..Config::default()
+        };
+        assert_eq!(
+            choose_shell(&explicit, Some("cmd"), &profiles).program,
+            "git-bash.exe"
+        );
+
+        let by_profile = Config {
+            profile: Some("pwsh7".to_owned()),
+            ..Config::default()
+        };
+        assert_eq!(
+            choose_shell(&by_profile, Some("cmd"), &profiles).program,
+            "pwsh.exe"
+        );
+
+        let by_saved = Config::default();
+        assert_eq!(
+            choose_shell(&by_saved, Some("cmd"), &profiles).program,
+            "cmd.exe"
+        );
+
+        let fallback = Config::default();
+        #[cfg(target_os = "windows")]
+        assert_eq!(choose_shell(&fallback, None, &profiles).program, "pwsh.exe");
+        #[cfg(target_os = "linux")]
+        assert_eq!(choose_shell(&fallback, None, &profiles).program, "cmd.exe");
+    }
 }

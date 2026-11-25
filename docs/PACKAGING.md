@@ -62,13 +62,17 @@ and Linux.
 ## Command-line surface
 
 ```text
-pain [--shell <program> [args...]] [-- <program> [args...]]
+pain [--profile <id>] [--shell <program> [args...]] [-- <program> [args...]]
      [--font-size <pixels>] [--scrollback-lines <n>]
      [--scrollback-bytes <n>] [--version] [--help]
 ```
 
-- Shell defaults to `%ComSpec%`/`cmd.exe` on Windows and `$SHELL`/`/bin/sh` on
-  Linux. `--` is an alternative way to pass a shell command.
+- The default profile is PowerShell 7 when installed, then Windows PowerShell,
+  then `cmd.exe`; Linux uses `$SHELL`/`/bin/sh`. A profile saved in Preferences
+  replaces the automatic choice. `--profile <id>` selects one launch, and
+  `--shell`/`--` overrides both.
+- Windows installs a taskbar jump list at startup with one `New <profile>
+  window` task per detected shell, each running `pain --profile <id>`.
 - `--font-size` sets the starting logical pixel size; `Ctrl+=`, `Ctrl+-` and
   `Ctrl+0` still work at runtime.
 - Scrollback caps default to 10,000 lines and 16 MiB and are applied to Ghostty
@@ -99,7 +103,9 @@ per frame.
 ## Unsupported features
 
 See [docs/SUPPORTED.md](SUPPORTED.md). The short version: one window, one
-session, no tabs/splits/profiles/settings GUI/plugins/images/macOS build.
+session, no tabs/splits/workspaces/multi-pane settings/plugins/images/macOS
+build. Shell profiles are a single default-shell choice, not saved window
+layouts.
 
 ## Release checks
 

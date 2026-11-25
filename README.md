@@ -1,6 +1,6 @@
 # Silvestris Terminal Demo — Engineering Packet
 
-This packet defines a deliberately small terminal application built as a **Silvestris consumer** on **Windows and Linux**. The program is intended to prove that a real terminal can live cleanly inside the current Silvestris/GPUI stack without importing the application complexity of Ghostty, Wintty, Zed, Windows Terminal, or a modern multi-pane terminal. The first useful version has one window, one terminal session, one shell, scrollback, keyboard and text input, selection/copy/paste, resize, focus, basic mouse support, and correct terminal colors. It has one small Preferences window for the Silvestris theme and terminal palette. It does not have tabs, splits, profiles, a command palette, shell integration, session restoration, remote-control APIs, image protocols or shader systems.
+This packet defines a deliberately small terminal application built as a **Silvestris consumer** on **Windows and Linux**. The program is intended to prove that a real terminal can live cleanly inside the current Silvestris/GPUI stack without importing the application complexity of Ghostty, Wintty, Zed, Windows Terminal, or a modern multi-pane terminal. The first useful version has one window, one terminal session, one shell, scrollback, keyboard and text input, selection/copy/paste, resize, focus, basic mouse support, and correct terminal colors. It has one small Preferences window for the Silvestris theme, terminal palette and default shell profile, plus a Windows taskbar jump list for starting each detected profile. It does not have tabs, splits, a command palette, shell integration, session restoration, remote-control APIs, image protocols or shader systems.
 
 The architectural decision is simple: **Ghostty owns terminal semantics; the application owns PTY transport; GPUI owns rendering and platform input; Silvestris owns the window shell and application chrome.** Current `libghostty-vt` is a particularly good fit because its terminal API explicitly states that a `GhosttyTerminal` keeps the screen, scrollback, cursor, styles, and modes while **not drawing and not talking to a PTY**; both are left to the embedder. Its render API exposes dirty/full/partial state and dirty-row iteration, so the GPUI renderer can redraw only what changed instead of copying or rebuilding the entire terminal every frame. See [Ghostty `terminal.h`](https://github.com/ghostty-org/ghostty/blob/64a6fedfd26d1fa687733f9f411db5eb8e205ebe/include/ghostty/vt/terminal.h) and [Ghostty `render.h`](https://github.com/ghostty-org/ghostty/blob/64a6fedfd26d1fa687733f9f411db5eb8e205ebe/include/ghostty/vt/render.h).
 
@@ -95,7 +95,8 @@ M0–M7 are implemented and smoke-tested on Windows and Linux/WSLg.
   suppression. `PAIN_STRESS=1` runs the synthetic background producer.
 
 - M3: `src/platform/windows.rs` creates an OS ConPTY with anonymous pipes,
-  attaches `cmd.exe` (or `--shell`) through `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE`,
+  attaches the selected profile (`pwsh7`/`pwsh5`/`cmd` or `--shell`) through
+  `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE`,
   and runs blocking reader/writer/waiter threads off the GPUI foreground thread.
   `src/platform/mod.rs` owns the shell policy and conservative terminal
   environment. Windows command-line quoting and environment-block construction
@@ -108,28 +109,33 @@ M0–M7 are implemented and smoke-tested on Windows and Linux/WSLg.
 - Input: `src/terminal/input.rs` maps GPUI keys/modifiers and mouse events to
   Ghostty key/mouse encoders; `TerminalView` registers key, pointer and IME
   handlers. Clipboard copy uses Ghostty's formatter/selection; paste uses the
-  terminal-aware paste API (bracketed paste). `Ctrl+Shift+C/V/A` are the
-  whitelisted app commands; all other keys go to the PTY.
+  terminal-aware paste API (bracketed paste). `Ctrl+Shift+C/V/A`, `Ctrl+,`,
+  `Shift+Insert` and the font keys are element-level GPUI actions on the
+  focused terminal; all other keys go to the PTY.
 
-- Appearance: `Ctrl+,` opens the one-window Preferences form (Chaus's
-  `WindowFrame` + `Form` pattern). It switches between all four Silvestris
-  Aqua/Geist light/dark themes and between Ghostty's default palette, a palette
-  that follows the theme, and three named ANSI palettes. `src/terminal/palette.rs`
-  holds only base-16 colours; Ghostty generates the other 240 entries. Choices
-  persist in `%LOCALAPPDATA%\pain\preferences.json` (or the XDG data dir).
+- Appearance and profiles: `Ctrl+,` opens the one-window Preferences form
+  (Chaus's `WindowFrame` + `Form` pattern). It switches between all four
+  Silvestris Aqua/Geist light/dark themes and between Ghostty's default palette,
+  a palette that follows the theme, and three named ANSI palettes.
+  `src/terminal/palette.rs` holds only base-16 colours; Ghostty generates the
+  other 240 entries. The Shell profile row persists the default choice and
+  `src/platform/profiles.rs` detects PowerShell 7/5, cmd, Git Bash, devkitPro
+  Bash and every WSL distribution. Choices persist in
+  `%LOCALAPPDATA%\pain\preferences.json` (or the XDG data dir).
 
 - M5: `ghostty_terminal_scroll_viewport` drives wheel/trackpad history
   scrolling and a thin scrollbar view; mouse-reporting TUIs receive wheel
   reports instead. Double/triple click selects Ghostty-owned word/line ranges.
-  OSC 0/2 title effects update both window titles with a `pain` fallback. A
-  Silvestris `ResponderChain` entry captures commands while the terminal canvas
-  is focused and lets only the six app-owned commands through.
+  OSC 0/2 title effects update both window titles with a `pain` fallback. The
+  focused `TerminalView` handles only its small app-action allowlist; every
+  other key stays with the terminal.
 - M6: `tests/m6.rs` is the repeatable stress suite; its measured counters are
   recorded in [docs/PERFORMANCE.md](docs/PERFORMANCE.md). Scrollback caps are
   set deliberately (10,000 lines / 16 MiB by default), cursor-only frames do
   no shaping and resize storms coalesce to distinct grid sizes.
-- M7: `--shell`, `--font-size`, `--scrollback-lines`, `--scrollback-bytes`,
-  `--version` and `--help` are the whole CLI. GUI builds report errors to
+- M7: `--profile`, `--shell`, `--font-size`, `--scrollback-lines`,
+  `--scrollback-bytes`, `--version` and `--help` are the whole CLI. GUI builds
+  report errors to
   `%LOCALAPPDATA%\pain\pain.log` (or `$XDG_DATA_HOME/pain/pain.log`) instead of
   an invisible stderr. See [docs/PACKAGING.md](docs/PACKAGING.md) for release
   steps, [docs/SUPPORTED.md](docs/SUPPORTED.md) for the unsupported-feature

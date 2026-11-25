@@ -167,11 +167,12 @@ and two-cell geometry remain correct.
   for a UTF-16 environment block, and `STARTF_USESTDHANDLES` must be set even
   though ConPTY replaces the child's std handles. The pipe ends handed to
   `CreatePseudoConsole` stay owned for the session.
-- The app launches the real shell by default; use `--shell <program> [args]` or
-  `-- <program> [args]` to override, `PAIN_FIXTURE=1` for the canned snapshot,
-  and `PAIN_STRESS=1` for the M2 producer. `Ctrl+Shift+C/V/A` are the only
-  clipboard/selection commands sent to the app; every other key goes through
-  Ghostty's encoder to the PTY.
+- The app launches the real shell by default; Windows resolves a profile at
+  startup (PowerShell 7, then Windows PowerShell, then cmd). Use `--profile
+  <id>` or `--shell <program> [args]` to override, `PAIN_FIXTURE=1` for the
+  canned snapshot, and `PAIN_STRESS=1` for the M2 producer. `Ctrl+Shift+C/V/A`,
+  `Ctrl+,`, `Shift+Insert` and the font keys are element-level app actions;
+  every other key goes through Ghostty's encoder to the PTY.
 
 `TerminalElement` passes one cell width (not the run width) as `shape_line`'s
 `force_width`: GPUI treats that argument as the per-glyph advance, so passing
