@@ -741,7 +741,10 @@ mod tests {
             None,
             Modifiers::new(false, true, true, false)
         )); // AltGr
-        assert!(!is_app_shortcut("c", Modifiers::new(false, true, false, false)));
+        assert!(!is_app_shortcut(
+            "c",
+            Modifiers::new(false, true, false, false)
+        ));
     }
 
     #[test]

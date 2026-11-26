@@ -5,6 +5,7 @@
 //! this API. Raw handles are `Send` only so M2's single `TerminalSession` lock
 //! can move them to the reader thread; they are never `Sync` or shared
 //! directly. All access is serialized through that one lock.
+#![allow(clippy::chunks_exact_to_as_chunks)]
 
 use std::ffi::{c_void, CStr};
 use std::fmt;
@@ -144,10 +145,7 @@ fn rgba_from_decoded(
             if bytes.len() < pixels.checked_mul(2)? {
                 return None;
             }
-            for (dst, src) in rgba
-                .chunks_exact_mut(4)
-                .zip(bytes.chunks_exact(2))
-            {
+            for (dst, src) in rgba.chunks_exact_mut(4).zip(bytes.chunks_exact(2)) {
                 let value = u16::from_ne_bytes([src[0], src[1]]);
                 let v = take(value);
                 dst.copy_from_slice(&[v, v, v, 0xff]);
@@ -157,10 +155,7 @@ fn rgba_from_decoded(
             if bytes.len() < pixels.checked_mul(4)? {
                 return None;
             }
-            for (dst, src) in rgba
-                .chunks_exact_mut(4)
-                .zip(bytes.chunks_exact(4))
-            {
+            for (dst, src) in rgba.chunks_exact_mut(4).zip(bytes.chunks_exact(4)) {
                 let value = u16::from_ne_bytes([src[0], src[1]]);
                 let v = take(value);
                 dst.copy_from_slice(&[v, v, v, take(u16::from_ne_bytes([src[2], src[3]]))]);
@@ -170,10 +165,7 @@ fn rgba_from_decoded(
             if bytes.len() < pixels.checked_mul(6)? {
                 return None;
             }
-            for (dst, src) in rgba
-                .chunks_exact_mut(4)
-                .zip(bytes.chunks_exact(6))
-            {
+            for (dst, src) in rgba.chunks_exact_mut(4).zip(bytes.chunks_exact(6)) {
                 let r = take(u16::from_ne_bytes([src[0], src[1]]));
                 let g = take(u16::from_ne_bytes([src[2], src[3]]));
                 let b = take(u16::from_ne_bytes([src[4], src[5]]));
@@ -184,10 +176,7 @@ fn rgba_from_decoded(
             if bytes.len() < pixels.checked_mul(8)? {
                 return None;
             }
-            for (dst, src) in rgba
-                .chunks_exact_mut(4)
-                .zip(bytes.chunks_exact(8))
-            {
+            for (dst, src) in rgba.chunks_exact_mut(4).zip(bytes.chunks_exact(8)) {
                 let r = take(u16::from_ne_bytes([src[0], src[1]]));
                 let g = take(u16::from_ne_bytes([src[2], src[3]]));
                 let b = take(u16::from_ne_bytes([src[4], src[5]]));
@@ -524,8 +513,6 @@ impl KittyConfig {
     }
 }
 
-
-
 /// Backwards-compatible name used by existing call sites.
 pub type RenderSnapshot = RenderFrame;
 
@@ -576,7 +563,6 @@ pub enum KittyImageRead {
     GenerationChanged,
     Missing,
 }
-
 
 /// Owns one `GhosttyTerminal` handle.
 pub struct GhosttyTerminal {
@@ -778,10 +764,7 @@ impl GhosttyTerminal {
     /// Advance playing Kitty animations once and return the next absolute
     /// frame time. Uses the caller's monotonic clock. Returns `None` when
     /// nothing is playing.
-    pub fn tick_kitty_animation(
-        &mut self,
-        now_ms: u64,
-    ) -> Result<Option<u64>, GhosttyError> {
+    pub fn tick_kitty_animation(&mut self, now_ms: u64) -> Result<Option<u64>, GhosttyError> {
         let graphics = self.kitty_graphics()?;
         let mut next = 0u64;
         let result = unsafe {
@@ -811,6 +794,9 @@ impl GhosttyTerminal {
     }
 
     /// Batched variant: one storage handle, many image lookups.
+    // The graphics handle is an opaque borrow from Ghostty storage, validated
+    // below and only used for the duration of this call; it never escapes.
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
     pub fn read_kitty_image_from(
         graphics: sys::GhosttyKittyGraphics,
         image_id: u32,
@@ -843,7 +829,11 @@ impl GhosttyTerminal {
                 }
             };
         }
-        query!(sys::GHOSTTY_KITTY_GRAPHICS_IMAGE_DATA_GENERATION, generation, u64);
+        query!(
+            sys::GHOSTTY_KITTY_GRAPHICS_IMAGE_DATA_GENERATION,
+            generation,
+            u64
+        );
         if generation != expected_generation {
             return Ok(KittyImageRead::GenerationChanged);
         }
@@ -1513,24 +1503,32 @@ impl SelectionGesture {
         // SAFETY: valid out-parameter, NULL allocator selects the default, and
         // the handle is exclusively owned by this wrapper.
         check(unsafe { sys::ghostty_selection_gesture_new(ptr::null(), &mut raw) })?;
-        let new_event = |event_type: i32| -> Result<sys::GhosttySelectionGestureEvent, GhosttyError> {
-            let mut event = ptr::null_mut();
-            // SAFETY: valid out-parameter; the event type is fixed for life.
-            check(unsafe {
-                sys::ghostty_selection_gesture_event_new(ptr::null(), &mut event, event_type)
-            })?;
-            Ok(event)
-        };
+        let new_event =
+            |event_type: i32| -> Result<sys::GhosttySelectionGestureEvent, GhosttyError> {
+                let mut event = ptr::null_mut();
+                // SAFETY: valid out-parameter; the event type is fixed for life.
+                check(unsafe {
+                    sys::ghostty_selection_gesture_event_new(ptr::null(), &mut event, event_type)
+                })?;
+                Ok(event)
+            };
         Ok(Self {
             gesture: Some(raw),
             press: Some(new_event(sys::GHOSTTY_SELECTION_GESTURE_EVENT_TYPE_PRESS)?),
             drag: Some(new_event(sys::GHOSTTY_SELECTION_GESTURE_EVENT_TYPE_DRAG)?),
-            release: Some(new_event(sys::GHOSTTY_SELECTION_GESTURE_EVENT_TYPE_RELEASE)?),
+            release: Some(new_event(
+                sys::GHOSTTY_SELECTION_GESTURE_EVENT_TYPE_RELEASE,
+            )?),
             terminal: terminal.as_raw(),
         })
     }
 
-    fn grid_ref(&self, terminal: &GhosttyTerminal, x: u16, y: u16) -> Result<sys::GhosttyGridRef, GhosttyError> {
+    fn grid_ref(
+        &self,
+        terminal: &GhosttyTerminal,
+        x: u16,
+        y: u16,
+    ) -> Result<sys::GhosttyGridRef, GhosttyError> {
         let mut reference = sys::GhosttyGridRef::default();
         // SAFETY: viewport points and out-parameters are documented types; the
         // returned untracked ref is consumed by the gesture call below.
@@ -1588,12 +1586,7 @@ impl SelectionGesture {
     }
 
     /// Press: cell/word/line behavior is configured once here.
-    pub fn press(
-        &self,
-        terminal: &GhosttyTerminal,
-        x: u16,
-        y: u16,
-    ) -> Result<(), GhosttyError> {
+    pub fn press(&self, terminal: &GhosttyTerminal, x: u16, y: u16) -> Result<(), GhosttyError> {
         let reference = self.grid_ref(terminal, x, y)?;
         let behaviors = sys::GhosttySelectionGestureBehaviors::default();
         // SAFETY: the event copies the behavior table into event-owned storage.
@@ -1604,7 +1597,11 @@ impl SelectionGesture {
                 (&behaviors as *const sys::GhosttySelectionGestureBehaviors).cast(),
             )
         })?;
-        self.apply(terminal, self.press.expect("press event present"), Some(reference))
+        self.apply(
+            terminal,
+            self.press.expect("press event present"),
+            Some(reference),
+        )
     }
 
     /// Drag: Ghostty decides word/line granularity and keeps ownership of the
@@ -1883,8 +1880,16 @@ impl GhosttyRenderState {
                 viewport_row,
                 i32
             );
-            read!(sys::GHOSTTY_RENDER_STATE_IMAGE_DATA_GRID_COLS, grid_cols, u32);
-            read!(sys::GHOSTTY_RENDER_STATE_IMAGE_DATA_GRID_ROWS, grid_rows, u32);
+            read!(
+                sys::GHOSTTY_RENDER_STATE_IMAGE_DATA_GRID_COLS,
+                grid_cols,
+                u32
+            );
+            read!(
+                sys::GHOSTTY_RENDER_STATE_IMAGE_DATA_GRID_ROWS,
+                grid_rows,
+                u32
+            );
             read!(
                 sys::GHOSTTY_RENDER_STATE_IMAGE_DATA_CELL_OFFSET_X,
                 cell_offset_x,
@@ -2796,8 +2801,8 @@ mod decoder_tests {
 
     #[test]
     fn rgba_conversion_is_exact_and_checked() {
-        let rgba = rgba_from_decoded(1, 1, image::ColorType::Rgb8, &[0x10, 0x20, 0x30])
-            .expect("rgb");
+        let rgba =
+            rgba_from_decoded(1, 1, image::ColorType::Rgb8, &[0x10, 0x20, 0x30]).expect("rgb");
         assert_eq!(rgba, vec![0x10, 0x20, 0x30, 0xff]);
         let rgba = rgba_from_decoded(1, 1, image::ColorType::Rgba8, &[0x10, 0x20, 0x30, 0x40])
             .expect("rgba");

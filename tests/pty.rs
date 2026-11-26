@@ -9,9 +9,9 @@ use std::time::{Duration, Instant};
 use pain::platform::{spawn_pty, PtyConfig, ShellCommand};
 use pain::terminal::session::{NoopWakeup, TerminalSession};
 
+#[cfg(target_os = "windows")]
 fn b64(data: &[u8]) -> String {
-    const A: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::new();
     for chunk in data.chunks(3) {
         let b = [
@@ -39,6 +39,7 @@ fn b64(data: &[u8]) -> String {
 #[cfg(target_os = "windows")]
 static NEXT_APC_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
+#[cfg(target_os = "windows")]
 fn wait_for_image(session: &TerminalSession, image_id: u32) -> bool {
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
@@ -56,6 +57,7 @@ fn wait_for_image(session: &TerminalSession, image_id: u32) -> bool {
     false
 }
 
+#[cfg(target_os = "linux")]
 fn wait_for_any_image(session: &TerminalSession) -> bool {
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
@@ -271,7 +273,11 @@ fn conpty_apc_survives_to_ghostty_graphics() {
         rows: 24,
         command: ShellCommand {
             program: r"C:\Windows\System32\cmd.exe".into(),
-            args: vec!["/c".into(), "type".into(), path.to_string_lossy().into_owned()],
+            args: vec![
+                "/c".into(),
+                "type".into(),
+                path.to_string_lossy().into_owned(),
+            ],
         },
     };
     let pty = spawn_pty(&config, Arc::clone(&session)).expect("spawn cmd.exe");

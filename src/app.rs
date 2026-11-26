@@ -259,54 +259,41 @@ pub fn run() {
         // view's ownership check, and claims the key without calling back into
         // a window that GPUI has already leased for key dispatch. The actual
         // command is dispatched on the focused view after this dispatch ends.
-        cx.intercept_keystrokes(
-            move |event: &gpui::KeystrokeEvent, window, cx| {
-                let Some(focus) = cx.try_global::<crate::terminal::render::TerminalFocusGlobal>()
-                else {
-                    return;
+        cx.intercept_keystrokes(move |event: &gpui::KeystrokeEvent, window, cx| {
+            let Some(focus) = cx.try_global::<crate::terminal::render::TerminalFocusGlobal>()
+            else {
+                return;
+            };
+            if !focus.0.is_focused(window) {
+                return;
+            }
+            let m = event.keystroke.modifiers;
+            let mods =
+                crate::terminal::input::Modifiers::new(m.shift, m.control, m.alt, m.platform);
+            let Some(command) = crate::terminal::input::app_command(
+                &event.keystroke.key,
+                event.keystroke.key_char.as_deref(),
+                mods,
+            ) else {
+                return;
+            };
+            cx.stop_propagation();
+            let handle = window.window_handle();
+            cx.defer(move |cx| {
+                let action: Box<dyn gpui::Action> = match command {
+                    crate::terminal::input::AppCommand::IncreaseFont => Box::new(IncreaseFont),
+                    crate::terminal::input::AppCommand::DecreaseFont => Box::new(DecreaseFont),
+                    crate::terminal::input::AppCommand::ResetFont => Box::new(ResetFont),
+                    crate::terminal::input::AppCommand::CopySelection => Box::new(CopySelection),
+                    crate::terminal::input::AppCommand::PasteClipboard => Box::new(PasteClipboard),
+                    crate::terminal::input::AppCommand::SelectAll => Box::new(SelectAllTerminal),
+                    crate::terminal::input::AppCommand::OpenPreferences => {
+                        Box::new(OpenPreferences)
+                    }
                 };
-                if !focus.0.is_focused(window) {
-                    return;
-                }
-                let m = event.keystroke.modifiers;
-                let mods = crate::terminal::input::Modifiers::new(
-                    m.shift, m.control, m.alt, m.platform,
-                );
-                let Some(command) = crate::terminal::input::app_command(
-                    &event.keystroke.key,
-                    event.keystroke.key_char.as_deref(),
-                    mods,
-                ) else {
-                    return;
-                };
-                cx.stop_propagation();
-                let handle = window.window_handle();
-                cx.defer(move |cx| {
-                    let action: Box<dyn gpui::Action> = match command {
-                        crate::terminal::input::AppCommand::IncreaseFont => {
-                            Box::new(IncreaseFont)
-                        }
-                        crate::terminal::input::AppCommand::DecreaseFont => {
-                            Box::new(DecreaseFont)
-                        }
-                        crate::terminal::input::AppCommand::ResetFont => Box::new(ResetFont),
-                        crate::terminal::input::AppCommand::CopySelection => {
-                            Box::new(CopySelection)
-                        }
-                        crate::terminal::input::AppCommand::PasteClipboard => {
-                            Box::new(PasteClipboard)
-                        }
-                        crate::terminal::input::AppCommand::SelectAll => {
-                            Box::new(SelectAllTerminal)
-                        }
-                        crate::terminal::input::AppCommand::OpenPreferences => {
-                            Box::new(OpenPreferences)
-                        }
-                    };
-                    let _ = handle.update(cx, |_, window, cx| window.dispatch_action(action, cx));
-                });
-            },
-        )
+                let _ = handle.update(cx, |_, window, cx| window.dispatch_action(action, cx));
+            });
+        })
         .detach();
 
         let window_handle = view;

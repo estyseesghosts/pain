@@ -341,7 +341,7 @@ Never continue after FFI wrapper invariants fail. A partially constructed termin
 - Scrollback compression colliding with reader/render access.
 - Cell pixel dimensions omitted on resize.
 - New Ghostty release changing enum/struct size assumptions.
-- Enabling graphics protocol storage without renderer support.
+- Enabling graphics protocol storage without a finite cap or without the generation-based renderer cache.
 - `TERM` identity drifting ahead of capability.
 
 ## Source anchors

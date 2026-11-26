@@ -1111,7 +1111,7 @@ mod tests {
         assert_eq!(size_of::<GhosttyTerminalScrollViewport>(), 24);
         assert_eq!(size_of::<GhosttyTerminalScrollbar>(), 24);
         assert_eq!(size_of::<GhosttySysImage>(), 24);
-        assert_eq!(size_of::<GhosttySysImage>().align(), 8);
+        assert_eq!(std::mem::align_of::<GhosttySysImage>(), 8);
     }
 
     #[test]

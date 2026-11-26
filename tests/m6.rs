@@ -7,7 +7,8 @@ use std::thread;
 
 use pain::terminal::geometry::RowCache;
 use pain::terminal::ghostty::ghostty_vt_sys as sys;
-use pain::terminal::session::{CountersSnapshot, NoopWakeup, TerminalSession};fn report(label: &str, counters: &CountersSnapshot) {
+use pain::terminal::session::{CountersSnapshot, NoopWakeup, TerminalSession};
+fn report(label: &str, counters: &CountersSnapshot) {
     println!(
         "M6 {label}: writes={} bytes={} wakeups_scheduled={} wakeups_coalesced={} \
          render_updates={} dirty_full={} dirty_partial={} dirty_clean={} \
@@ -157,8 +158,7 @@ fn resize_storm_coalesces_to_distinct_grid_sizes() {
 }
 
 fn b64(data: &[u8]) -> String {
-    const A: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::new();
     for chunk in data.chunks(3) {
         let b = [
@@ -216,8 +216,7 @@ fn static_image_plus_cursor_change_does_zero_image_work() {
     assert!(second.dirty_rows.is_empty());
     assert_eq!(second.image_placements.len(), 1);
     assert_eq!(
-        counters.image_placement_list_rebuilds,
-        after_first.image_placement_list_rebuilds,
+        counters.image_placement_list_rebuilds, after_first.image_placement_list_rebuilds,
         "an unchanged placement generation must not rebuild the list"
     );
     assert!(counters.image_placement_cache_hits >= 1);
@@ -270,19 +269,18 @@ fn animation_frame_does_not_materialize_text_rows() {
     session.apply_layout_geometry(20, 10, 9, 18).unwrap();
     let red = b64(&[255, 0, 0, 255]);
     let blue = b64(&[0, 0, 255, 255]);
-    session.write_vt(
-        format!("\x1b_Ga=t,f=32,s=1,v=1,i=3,q=2;{red}\x1b\\").as_bytes(),
-    );
-    session.write_vt(
-        format!("\x1b_Ga=f,f=32,s=1,v=1,i=3,r=2,z=40,q=2;{blue}\x1b\\").as_bytes(),
-    );
+    session.write_vt(format!("\x1b_Ga=t,f=32,s=1,v=1,i=3,q=2;{red}\x1b\\").as_bytes());
+    session.write_vt(format!("\x1b_Ga=f,f=32,s=1,v=1,i=3,r=2,z=40,q=2;{blue}\x1b\\").as_bytes());
     session.write_vt(b"\x1b_Ga=p,i=3,p=300,q=2\x1b\\");
     session.write_vt(b"\x1b_Ga=a,i=3,s=3,q=2\x1b\\");
     let _ = session.render_snapshot().expect("first frame");
     session.mark_frame_complete().expect("complete");
     let before = session.snapshot_counters();
 
-    let next = session.tick_kitty_animation(0).expect("tick").expect("deadline");
+    let next = session
+        .tick_kitty_animation(0)
+        .expect("tick")
+        .expect("deadline");
     assert!(next > 0);
     let frame = session.render_snapshot().expect("animation frame");
     session.mark_frame_complete().expect("complete");
@@ -314,8 +312,7 @@ fn dpi_only_change_does_not_resize_the_pty() {
         before.ghostty_geometry_updates + 1
     );
     assert_eq!(
-        counters.pty_grid_resize_requests,
-        before.pty_grid_resize_requests,
+        counters.pty_grid_resize_requests, before.pty_grid_resize_requests,
         "DPI must never reach ResizePseudoConsole/TIOCSWINSZ"
     );
     assert_eq!(session.applied_geometry().cell_width_px, 14);

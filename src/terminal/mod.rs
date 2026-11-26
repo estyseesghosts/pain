@@ -18,7 +18,7 @@ pub mod render;
 
 pub use ghostty::{
     paste_encode, paste_is_safe, CallbackRegistration, Cell, Colors, Cursor, FrameMeta,
-    GhosttyRenderState, GhosttyTerminal, GhosttyError, ImagePlacement, ImagePlacementCache,
+    GhosttyError, GhosttyRenderState, GhosttyTerminal, ImagePlacement, ImagePlacementCache,
     KeyEncoder, KeyEvent, KittyConfig, KittyImagePixels, MouseEncoder, MouseEvent, RenderFrame,
     RenderSnapshot, RowSelection, Style,
 };

@@ -240,9 +240,8 @@ impl LinuxPty {
             };
             // SAFETY: the winsize value is POD and the master fd is alive until
             // shutdown joins this worker.
-            let result = unsafe {
-                libc::ioctl(resize_master.raw(), libc::TIOCSWINSZ, &winsize_for(next))
-            };
+            let result =
+                unsafe { libc::ioctl(resize_master.raw(), libc::TIOCSWINSZ, &winsize_for(next)) };
             if result != 0 {
                 crate::log::error(
                     "resize",

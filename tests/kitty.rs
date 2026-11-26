@@ -37,8 +37,7 @@ fn session_with_kitty(cols: u16, rows: u16, kitty: KittyConfig) -> TerminalSessi
 }
 
 fn b64(data: &[u8]) -> String {
-    const A: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::new();
     for chunk in data.chunks(3) {
         let b = [
@@ -214,7 +213,10 @@ fn png_payload_decodes_to_rgba_through_the_process_global_decoder() {
         &apc("a=T,f=100,s=2,v=2,i=9,C=1,q=2", &png(2, 2, &source)),
     );
     let placements = snapshot(&session);
-    let p = placements.iter().find(|p| p.image_id == 9).expect("png placement");
+    let p = placements
+        .iter()
+        .find(|p| p.image_id == 9)
+        .expect("png placement");
     let pixels = session.read_kitty_images(&[(9, p.image_generation)]);
     assert_eq!(pixels.len(), 1);
     assert_eq!(pixels[0].format, sys::GHOSTTY_KITTY_IMAGE_FORMAT_RGBA);
@@ -234,10 +236,7 @@ fn malformed_png_is_rejected_without_a_panic_or_poisoned_storage() {
     // A later valid PNG still works: a failure must not disable the callback.
     feed(
         &session,
-        &apc(
-            "a=T,f=100,s=1,v=1,i=11,C=1,q=2",
-            &png(1, 1, &[1, 2, 3, 4]),
-        ),
+        &apc("a=T,f=100,s=1,v=1,i=11,C=1,q=2", &png(1, 1, &[1, 2, 3, 4])),
     );
     assert!(snapshot(&session).iter().any(|p| p.image_id == 11));
 }
@@ -247,13 +246,7 @@ fn zlib_transmission_and_multi_chunk_assembly() {
     let session = session(20, 8);
     let pixels = rgba_pixels(3, 2, [0x10, 0x20, 0x30, 0x40]);
     let compressed = zlib_stored(&pixels);
-    feed(
-        &session,
-        &apc(
-            "a=t,f=32,s=3,v=2,i=3,o=z,q=2",
-            &compressed,
-        ),
-    );
+    feed(&session, &apc("a=t,f=32,s=3,v=2,i=3,o=z,q=2", &compressed));
     // Multi-chunk direct transmission: the control header is only on the
     // first chunk; continuation chunks only repeat `m`.
     let chunks = b64(&rgba_pixels(2, 1, [1, 2, 3, 4]));
@@ -263,9 +256,8 @@ fn zlib_transmission_and_multi_chunk_assembly() {
     assert!(split > 0 && split < chunks.len());
     let mut bytes = Vec::new();
     bytes.extend_from_slice(b"\x1b_G");
-    bytes.extend_from_slice(
-        format!("a=t,f=32,s=2,v=1,i=4,m=1,q=2;{}", &chunks[..split]).as_bytes(),
-    );
+    bytes
+        .extend_from_slice(format!("a=t,f=32,s=2,v=1,i=4,m=1,q=2;{}", &chunks[..split]).as_bytes());
     bytes.extend_from_slice(b"\x1b\\");
     bytes.extend_from_slice(b"\x1b_G");
     bytes.extend_from_slice(format!("m=0;{}", &chunks[split..]).as_bytes());
@@ -275,13 +267,19 @@ fn zlib_transmission_and_multi_chunk_assembly() {
     feed(&session, &control("a=p,i=4,p=40,q=2"));
     let placements = snapshot(&session);
     let zlib = placements.iter().find(|p| p.image_id == 3).expect("zlib");
-    let chunked = placements.iter().find(|p| p.image_id == 4).expect("chunked");
+    let chunked = placements
+        .iter()
+        .find(|p| p.image_id == 4)
+        .expect("chunked");
     let read = session.read_kitty_images(&[
         (zlib.image_id, zlib.image_generation),
         (chunked.image_id, chunked.image_generation),
     ]);
     assert_eq!(read.len(), 2);
-    assert_eq!(read.iter().find(|p| p.image_id == 3).unwrap().pixels, pixels);
+    assert_eq!(
+        read.iter().find(|p| p.image_id == 3).unwrap().pixels,
+        pixels
+    );
     assert_eq!(
         read.iter().find(|p| p.image_id == 4).unwrap().pixels,
         rgba_pixels(2, 1, [1, 2, 3, 4])
@@ -332,9 +330,7 @@ fn deletion_removes_placements_and_images() {
     assert_eq!(snapshot(&session).len(), 1);
     feed(&session, &control("a=d,d=i,i=7,q=2"));
     assert!(snapshot(&session).is_empty());
-    assert!(session
-        .read_kitty_images(&[(7, 1)])
-        .is_empty());
+    assert!(session.read_kitty_images(&[(7, 1)]).is_empty());
 }
 
 #[test]
@@ -343,10 +339,7 @@ fn source_rectangles_and_destination_pixels_are_reported_verbatim() {
     let pixels = [
         0xff, 0, 0, 255, 0, 0xff, 0, 255, 0, 0, 0xff, 255, 255, 255, 255, 255,
     ];
-    feed(
-        &session,
-        &apc("a=t,f=32,s=2,v=2,i=8,q=2", &pixels),
-    );
+    feed(&session, &apc("a=t,f=32,s=2,v=2,i=8,q=2", &pixels));
     feed(&session, &control("a=p,i=8,p=8,x=1,y=0,w=1,h=2,q=2"));
     let placements = snapshot(&session);
     let p = &placements[0];
@@ -457,7 +450,9 @@ fn unicode_placeholder_placement_comes_from_the_render_state() {
         "placeholder cells must yield virtual placements"
     );
     assert!(virtuals.iter().all(|p| p.image_id == 1));
-    assert!(virtuals.iter().all(|p| p.layer == sys::GHOSTTY_IMAGE_LAYER_BELOW_TEXT));
+    assert!(virtuals
+        .iter()
+        .all(|p| p.layer == sys::GHOSTTY_IMAGE_LAYER_BELOW_TEXT));
     assert!(virtuals.iter().all(|p| p.z == -1));
 }
 
@@ -492,7 +487,9 @@ fn resize_reflow_and_alternate_screen_keep_the_placement_model_coherent() {
     );
     let before = snapshot(&session);
     assert_eq!(before.len(), 1);
-    session.apply_layout_geometry(30, 12, CELL_W, CELL_H).unwrap();
+    session
+        .apply_layout_geometry(30, 12, CELL_W, CELL_H)
+        .unwrap();
     let resized = snapshot(&session);
     assert_eq!(resized.len(), 1);
     assert_eq!(resized[0].image_generation, before[0].image_generation);
@@ -534,15 +531,26 @@ fn animation_frames_advance_on_tick_and_stop_without_a_loop() {
     );
     feed(&session, &control("a=p,i=70,p=700,q=2"));
     let placements = snapshot(&session);
-    let gen_before = placements.iter().find(|p| p.image_id == 70).unwrap().image_generation;
+    let gen_before = placements
+        .iter()
+        .find(|p| p.image_id == 70)
+        .unwrap()
+        .image_generation;
     feed(&session, &control("a=a,i=70,s=3,q=2"));
 
     // One tick advances at most one frame and returns the next deadline.
-    let next = session.tick_kitty_animation(0).expect("tick").expect("deadline");
+    let next = session
+        .tick_kitty_animation(0)
+        .expect("tick")
+        .expect("deadline");
     assert!(next > 0);
     assert!(session.read_kitty_images(&[(70, gen_before)]).is_empty());
     let placements = snapshot(&session);
-    let gen_after = placements.iter().find(|p| p.image_id == 70).unwrap().image_generation;
+    let gen_after = placements
+        .iter()
+        .find(|p| p.image_id == 70)
+        .unwrap()
+        .image_generation;
     assert_ne!(gen_after, gen_before);
     let pixels = session.read_kitty_images(&[(70, gen_after)]);
     assert_eq!(pixels[0].pixels, vec![0, 0, 255, 255]);
@@ -618,7 +626,10 @@ fn transport_media_policy_is_explicit_and_finite() {
         ..KittyConfig::default()
     }
     .validated();
-    assert!(file_enabled.arbitrary_file, "advanced option must be expressible");
+    assert!(
+        file_enabled.arbitrary_file,
+        "advanced option must be expressible"
+    );
 
     let session = session_with_kitty(20, 8, file_enabled);
     let (limit, file, _shared) = session.kitty_policy_state().expect("policy");

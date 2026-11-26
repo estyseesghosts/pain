@@ -114,9 +114,7 @@ impl PtyResizeMailbox {
                         .pending
                         .lock()
                         .expect("PTY resize pending mutex poisoned");
-                    while pending.is_none()
-                        && !worker_state.stopping.load(Ordering::Acquire)
-                    {
+                    while pending.is_none() && !worker_state.stopping.load(Ordering::Acquire) {
                         pending = worker_state
                             .wake
                             .wait(pending)
@@ -153,7 +151,11 @@ impl PtyResizeMailbox {
         }
         let size = (cols.max(1), rows.max(1));
         self.requested.fetch_add(1, Ordering::Relaxed);
-        let mut pending = self.state.pending.lock().expect("PTY resize pending mutex poisoned");
+        let mut pending = self
+            .state
+            .pending
+            .lock()
+            .expect("PTY resize pending mutex poisoned");
         if *pending == Some(size) {
             return;
         }
@@ -177,7 +179,11 @@ impl PtyResizeMailbox {
             self.state.stopping.store(true, Ordering::Release);
         }
         self.state.wake.notify_all();
-        if let Some(worker) = self.worker.lock().expect("PTY resize worker mutex poisoned").take()
+        if let Some(worker) = self
+            .worker
+            .lock()
+            .expect("PTY resize worker mutex poisoned")
+            .take()
         {
             let _ = worker.join();
         }

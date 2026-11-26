@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 
-use windows::core::{HRESULT, PCSTR, PCWSTR, PWSTR};
+use windows::core::{HRESULT, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{
     CloseHandle, DuplicateHandle, DUPLICATE_SAME_ACCESS, GENERIC_READ, HANDLE, HMODULE,
 };
@@ -19,9 +19,7 @@ use windows::Win32::Storage::FileSystem::{
     PIPE_ACCESS_OUTBOUND,
 };
 use windows::Win32::System::Console::{COORD, HPCON};
-use windows::Win32::System::LibraryLoader::{
-    GetModuleFileNameW, GetProcAddress, LoadLibraryW,
-};
+use windows::Win32::System::LibraryLoader::{GetModuleFileNameW, GetProcAddress, LoadLibraryW};
 use windows::Win32::System::Pipes::CreatePipe;
 use windows::Win32::System::Pipes::{CreateNamedPipeW, PIPE_TYPE_BYTE};
 use windows::Win32::System::Threading::{
@@ -200,13 +198,19 @@ static CONPTY_API: OnceLock<ConPtyApi> = OnceLock::new();
 /// fallback into a full-support claim.
 pub const CONPTY_FALLBACK_WARNING: &str = "no adjacent conpty.dll; using in-box kernel32 ConPTY. Kitty graphics APCs are stripped by the legacy host: graphics are DEGRADED (direct transmission may not reach libghostty-vt).";
 
-fn resolve_pseudo_console(module: HMODULE) -> Option<(CreatePseudoConsoleFn, ResizePseudoConsoleFn, ClosePseudoConsoleFn)> {
+fn resolve_pseudo_console(
+    module: HMODULE,
+) -> Option<(
+    CreatePseudoConsoleFn,
+    ResizePseudoConsoleFn,
+    ClosePseudoConsoleFn,
+)> {
     // SAFETY: `module` is a live module handle and each name is NUL-terminated.
     // The resolved addresses are only called with the documented signatures.
     unsafe {
-        let create = GetProcAddress(module, PCSTR(b"CreatePseudoConsole\0".as_ptr()))?;
-        let resize = GetProcAddress(module, PCSTR(b"ResizePseudoConsole\0".as_ptr()))?;
-        let close = GetProcAddress(module, PCSTR(b"ClosePseudoConsole\0".as_ptr()))?;
+        let create = GetProcAddress(module, windows::core::s!("CreatePseudoConsole"))?;
+        let resize = GetProcAddress(module, windows::core::s!("ResizePseudoConsole"))?;
+        let close = GetProcAddress(module, windows::core::s!("ClosePseudoConsole"))?;
         Some((
             std::mem::transmute::<unsafe extern "system" fn() -> isize, CreatePseudoConsoleFn>(
                 create,
@@ -280,11 +284,7 @@ fn load_conpty_api() -> ConPtyApi {
                 "adjacent conpty.dll is missing ConPTY exports; falling back to kernel32",
             );
         } else {
-            crate::log::log(
-                "WARN",
-                "conpty",
-                CONPTY_FALLBACK_WARNING,
-            );
+            crate::log::log("WARN", "conpty", CONPTY_FALLBACK_WARNING);
         }
     }
     let module = load_kernel32().expect("kernel32 is always loadable");

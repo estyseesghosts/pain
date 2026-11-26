@@ -122,7 +122,11 @@ impl TerminalGeometry {
             cell_height: metrics.line_height,
             cols,
             rows,
-            scale: if scale.is_finite() && scale > 0.0 { scale } else { 1.0 },
+            scale: if scale.is_finite() && scale > 0.0 {
+                scale
+            } else {
+                1.0
+            },
         }
     }
 

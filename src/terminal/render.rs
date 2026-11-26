@@ -15,7 +15,7 @@ use gpui::{
     Hsla, InputHandler, InspectorElementId, InteractiveElement, KeyContext, KeyDownEvent,
     KeyUpEvent, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad,
     Pixels, Point, Render, Rgba, ScrollDelta, ScrollEvent, ShapedLine, SharedString,
-    StrikethroughStyle, Subscription, Style, TextAlign, TextRun, UTF16Selection, UnderlineStyle,
+    StrikethroughStyle, Style, Subscription, TextAlign, TextRun, UTF16Selection, UnderlineStyle,
     Window,
 };
 use silvestris::ActiveTheme;
@@ -37,9 +37,7 @@ use crate::terminal::input::{
 use crate::terminal::selection::{
     accumulate_wheel, scrollbar_geometry, scrollbar_row_at, wheel_button, ScrollbarGeometry,
 };
-use crate::terminal::session::{
-    CountersHandle, MouseInput, MouseRoute, TerminalSession,
-};
+use crate::terminal::session::{CountersHandle, MouseInput, MouseRoute, TerminalSession};
 
 /// Ghostty exposes whether a cursor blinks but not a period; 530 ms matches
 /// conventional terminal timing without a continuous frame loop.
@@ -170,7 +168,8 @@ pub struct TerminalView {
     /// Ghostty-derived scrollbar thumb and the state behind it, both
     /// recomputed once in prepaint or from a scroll operation's result.
     scrollbar: RefCell<Option<ScrollbarGeometry>>,
-    scroll_state: RefCell<Option<crate::terminal::ghostty::ghostty_vt_sys::GhosttyTerminalScrollbar>>,
+    scroll_state:
+        RefCell<Option<crate::terminal::ghostty::ghostty_vt_sys::GhosttyTerminalScrollbar>>,
     /// Explicit capture state for the scrollbar thumb.
     capture: PointerCapture,
     /// Kept alive so focus loss / deactivation can always cancel a drag.
@@ -228,9 +227,10 @@ impl TerminalView {
         };
         // A lost OS release must never strand a scrollbar drag or a held
         // terminal button. Both focus loss and window deactivation cancel it.
-        view.subscriptions.push(cx.on_focus_lost(window, |this, _, cx| {
-            this.cancel_pointer_capture(cx);
-        }));
+        view.subscriptions
+            .push(cx.on_focus_lost(window, |this, _, cx| {
+                this.cancel_pointer_capture(cx);
+            }));
         view.subscriptions
             .push(cx.observe_window_activation(window, |this, window, cx| {
                 if !window.is_window_active() {
@@ -328,7 +328,12 @@ impl TerminalView {
     }
 
     /// Composition callbacks only update local preedit; no PTY write here.
-    fn set_preedit(&mut self, text: &str, selected: Option<(usize, usize)>, cx: &mut Context<Self>) {
+    fn set_preedit(
+        &mut self,
+        text: &str,
+        selected: Option<(usize, usize)>,
+        cx: &mut Context<Self>,
+    ) {
         *self.preedit.borrow_mut() = PreeditState {
             text: text.to_owned(),
             selected,
@@ -475,11 +480,9 @@ impl TerminalView {
         let (_, press) = self.held_keys.borrow_mut().remove(index);
         let m = event.keystroke.modifiers;
         let release_mods = InputModifiers::new(m.shift, m.control, m.alt, m.platform);
-        let Some(encoded) = key_release_for_keystroke(
-            name,
-            event.keystroke.key_char.as_deref(),
-            release_mods,
-        ) else {
+        let Some(encoded) =
+            key_release_for_keystroke(name, event.keystroke.key_char.as_deref(), release_mods)
+        else {
             return;
         };
         let Ok(mut key_event) = KeyEvent::new() else {
@@ -577,8 +580,7 @@ impl TerminalView {
             // One terminal mouse wheel report per whole row. The session owns
             // the tracking decision under the terminal lock.
             let button = wheel_button(rows < 0);
-            let (x, _y, w, h, px, py, mods) =
-                self.mouse_event(event.position, event.modifiers);
+            let (x, _y, w, h, px, py, mods) = self.mouse_event(event.position, event.modifiers);
             let mut reported = false;
             for _ in 0..rows.unsigned_abs() {
                 let route = self.route_pointer(MouseInput {
@@ -645,6 +647,7 @@ impl TerminalView {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn pointer_input(
         &self,
         action: MouseAction,
@@ -731,7 +734,10 @@ impl TerminalView {
             // reporting off belong to the platform (context menu), not Ghostty.
             *self.selection_anchor.borrow_mut() = Some((x, y));
             self.last_drag_cell.set(Some((x, y)));
-            if let Err(error) = self.session.begin_selection_gesture(x, y, event.click_count) {
+            if let Err(error) = self
+                .session
+                .begin_selection_gesture(x, y, event.click_count)
+            {
                 crate::log::error("selection", &format!("gesture press failed: {error}"));
             }
             cx.stop_propagation();
@@ -1064,9 +1070,7 @@ impl Element for TerminalElement {
                 cache
                     .row_cache
                     .rows_to_rebuild(generation, snapshot.dirty, &snapshot.dirty_rows);
-            let invalid = cache.geometry != geometry
-                || cache.cols != cols
-                || cache.rows != rows;
+            let invalid = cache.geometry != geometry || cache.cols != cols || cache.rows != rows;
             if invalid {
                 cache.row_cache = RowCache::new(usize::from(rows));
                 let _ = cache
@@ -1119,8 +1123,8 @@ impl Element for TerminalElement {
                     quads.push(bg_quad(&metrics, origin, y, run_bg));
                     counters.background_quads(1);
                 }
-                if let Some((start_x, cells_len)) = snapshot.selection(y)
-                    .and_then(|s| selection_span(Some(s)))
+                if let Some((start_x, cells_len)) =
+                    snapshot.selection(y).and_then(|s| selection_span(Some(s)))
                 {
                     let (x, top, w, h) = metrics.span_bounds(origin, start_x, y as u16, cells_len);
                     quads.push(fill(
@@ -1151,8 +1155,7 @@ impl Element for TerminalElement {
             view.blink.borrow_mut().blinking = cursor_blinking;
         }
         let cursor_visible = !cursor_blinking || view.blink.borrow().on;
-        let cursor = if snapshot.cursor.visible && snapshot.cursor.has_value && cursor_visible
-        {
+        let cursor = if snapshot.cursor.visible && snapshot.cursor.has_value && cursor_visible {
             cursor_quad(&metrics, origin, &snapshot.cursor, default_fg)
         } else {
             None
@@ -1179,7 +1182,8 @@ impl Element for TerminalElement {
                     Some(px(metrics.cell_width)),
                 );
                 counters.shape_line(state.text.len());
-                let (x, y) = geometry.cell_origin(view.cursor_cell.get().0, view.cursor_cell.get().1);
+                let (x, y) =
+                    geometry.cell_origin(view.cursor_cell.get().0, view.cursor_cell.get().1);
                 Some((point(px(x), px(y)), shaped))
             }
         };
@@ -1207,14 +1211,13 @@ impl Element for TerminalElement {
         counters.prepaint_micros(u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX));
         if blink_changed {
             let entity = self.view.clone();
-            entity
-                .update(cx, |this, cx| {
-                    if cursor_blinking && this.focus.is_focused(window) {
-                        this.restart_blink(window, cx);
-                    } else {
-                        this.stop_blink(cx);
-                    }
-                });
+            entity.update(cx, |this, cx| {
+                if cursor_blinking && this.focus.is_focused(window) {
+                    this.restart_blink(window, cx);
+                } else {
+                    this.stop_blink(cx);
+                }
+            });
         }
         {
             let entity = self.view.clone();
@@ -1319,7 +1322,9 @@ impl Element for TerminalElement {
                 size(px(g.content_width), px(g.content_height)),
             );
             // The element-level listener handles moves inside the surface.
-            if view.capture != PointerCapture::Scrollbar && terminal_bounds.contains(&event.position) {
+            if view.capture != PointerCapture::Scrollbar
+                && terminal_bounds.contains(&event.position)
+            {
                 return;
             }
             mouse_view.update(cx, |view, cx| view.on_mouse_move(event, window, cx));
@@ -1377,9 +1382,7 @@ impl InputHandler for TerminalInputHandler {
         _window: &mut Window,
         cx: &mut App,
     ) -> Option<std::ops::Range<usize>> {
-        self.view
-            .read(cx)
-            .marked_range()
+        self.view.read(cx).marked_range()
     }
 
     fn text_for_range(

@@ -603,14 +603,8 @@ impl TerminalSession {
         let next = terminal.tick_kitty_animation(now_ms)?;
         let after = terminal.kitty_storage_generation().unwrap_or(before);
         let elapsed = Counters::micros(start);
-        Counters::add(
-            &self.counters.terminal_lock_hold_total_micros,
-            elapsed,
-        );
-        Counters::record_max(
-            &self.counters.terminal_lock_hold_max_micros,
-            elapsed,
-        );
+        Counters::add(&self.counters.terminal_lock_hold_total_micros, elapsed);
+        Counters::record_max(&self.counters.terminal_lock_hold_max_micros, elapsed);
         drop(terminal);
         if before != after {
             Counters::add(&self.counters.kitty_animation_frames, 1);
@@ -634,10 +628,7 @@ impl TerminalSession {
                 unique.push(item);
             }
         }
-        Counters::add(
-            &self.counters.image_cache_misses,
-            unique.len() as u64,
-        );
+        Counters::add(&self.counters.image_cache_misses, unique.len() as u64);
         let start = Instant::now();
         let mut copied = Vec::with_capacity(unique.len());
         {
@@ -665,18 +656,9 @@ impl TerminalSession {
                 }
             }
             let elapsed = Counters::micros(start);
-            Counters::add(
-                &self.counters.terminal_lock_hold_total_micros,
-                elapsed,
-            );
-            Counters::record_max(
-                &self.counters.terminal_lock_hold_max_micros,
-                elapsed,
-            );
-            Counters::record_max(
-                &self.counters.image_copy_lock_max_micros,
-                elapsed,
-            );
+            Counters::add(&self.counters.terminal_lock_hold_total_micros, elapsed);
+            Counters::record_max(&self.counters.terminal_lock_hold_max_micros, elapsed);
+            Counters::record_max(&self.counters.image_copy_lock_max_micros, elapsed);
         }
         copied
     }
@@ -718,9 +700,12 @@ impl TerminalSession {
         };
         {
             let mut terminal = self.terminal.lock().expect("terminal mutex poisoned");
-            if let Err(error) =
-                terminal.resize(cols, rows, requested.cell_width_px, requested.cell_height_px)
-            {
+            if let Err(error) = terminal.resize(
+                cols,
+                rows,
+                requested.cell_width_px,
+                requested.cell_height_px,
+            ) {
                 // Never keep a "last applied" geometry that Ghostty rejected.
                 *self.geometry.lock().expect("geometry mutex poisoned") = previous;
                 return Err(error);
@@ -753,8 +738,7 @@ impl TerminalSession {
         cell_width_px: u32,
         cell_height_px: u32,
     ) -> Result<ResizeOutcome, GhosttyError> {
-        let outcome =
-            self.apply_layout_geometry(cols, rows, cell_width_px, cell_height_px)?;
+        let outcome = self.apply_layout_geometry(cols, rows, cell_width_px, cell_height_px)?;
         if outcome.changed() {
             self.schedule_wakeup();
         }
@@ -989,7 +973,9 @@ impl TerminalSession {
         self.writer.push(bytes);
         Counters::add(&self.counters.mouse_events_encoded, 1);
         Counters::add(&self.counters.mouse_bytes_queued, queued as u64);
-        Ok(MouseRoute::Reported { bytes_queued: queued })
+        Ok(MouseRoute::Reported {
+            bytes_queued: queued,
+        })
     }
 
     fn encode_with_encoder(
@@ -1006,13 +992,7 @@ impl TerminalSession {
         size.cell_width = input.cell_width.max(1);
         size.cell_height = input.cell_height.max(1);
         encoder.set_size(&size)?;
-        event.configure(
-            input.action,
-            input.button,
-            input.mods,
-            input.x,
-            input.y,
-        )?;
+        event.configure(input.action, input.button, input.mods, input.x, input.y)?;
         let mut buf = [0u8; 128];
         let written = encoder.encode(event, &mut buf)?;
         Ok(if written == 0 {
@@ -1313,7 +1293,7 @@ mod tests {
         let outcome = session
             .apply_layout_geometry(81, 24, 10, 20)
             .expect("grid geometry applied");
-        assert_eq!(outcome.grid_changed, true);
+        assert!(outcome.grid_changed);
         assert_eq!(pty_calls.load(Ordering::SeqCst), 1);
 
         // Repeating the exact four fields does nothing.

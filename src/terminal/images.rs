@@ -5,16 +5,15 @@
 //! the current render-state placement list, keyed by
 //! `(protocol, image_id, generation)`. A static image therefore costs zero
 //! uploads and zero pixel reads across repaints.
+#![allow(clippy::chunks_exact_to_as_chunks)]
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use gpui::{px, point, size, Bounds, Pixels, RenderImage, Window};
+use gpui::{point, px, size, Bounds, Pixels, RenderImage, Window};
 use image::{Frame, ImageBuffer, Rgba};
 
-use crate::terminal::ghostty::{
-    ghostty_vt_sys as sys, ImagePlacement, KittyImagePixels,
-};
+use crate::terminal::ghostty::{ghostty_vt_sys as sys, ImagePlacement, KittyImagePixels};
 use crate::terminal::session::{CountersHandle, TerminalSession};
 
 /// One texture identity. The protocol is part of the key because image IDs are
@@ -183,8 +182,7 @@ impl ImageCache {
         // deduplicated again by `read_kitty_images` under one terminal lock.
         let mut missing: Vec<(u32, u64)> = Vec::new();
         for key in &referenced {
-            if !self.entries.contains_key(key)
-                && !missing.contains(&(key.image_id, key.generation))
+            if !self.entries.contains_key(key) && !missing.contains(&(key.image_id, key.generation))
             {
                 missing.push((key.image_id, key.generation));
             }
@@ -409,7 +407,10 @@ mod tests {
             format: sys::GHOSTTY_KITTY_IMAGE_FORMAT_RGB,
             pixels: vec![0x11, 0x22, 0x33],
         };
-        assert_eq!(ImageCache::to_bgra(&rgb).unwrap(), vec![0x33, 0x22, 0x11, 0xff]);
+        assert_eq!(
+            ImageCache::to_bgra(&rgb).unwrap(),
+            vec![0x33, 0x22, 0x11, 0xff]
+        );
 
         let rgba = KittyImagePixels {
             image_id: 1,
@@ -466,8 +467,8 @@ mod tests {
 
     #[test]
     fn projection_places_image_at_cell_and_offset() {
-        let (bounds, full) = project_placement(&placement(2, 0, 2, 1), 10, 10, &geometry(1.0))
-            .expect("visible");
+        let (bounds, full) =
+            project_placement(&placement(2, 0, 2, 1), 10, 10, &geometry(1.0)).expect("visible");
         assert_eq!(f32::from(bounds.origin.x), 120.0);
         assert_eq!(f32::from(bounds.origin.y), 70.0);
         assert_eq!(f32::from(bounds.size.width), 30.0);
@@ -480,8 +481,7 @@ mod tests {
     fn projection_clips_negative_rows_to_terminal_bounds() {
         let mut p = placement(2, 0, 0, -2);
         p.pixel_height = 80;
-        let (bounds, full) = project_placement(&p, 10, 10, &geometry(1.0))
-            .expect("partly visible");
+        let (bounds, full) = project_placement(&p, 10, 10, &geometry(1.0)).expect("partly visible");
         // Destination starts above the terminal and is clipped at its top.
         assert_eq!(f32::from(bounds.origin.y), 50.0);
         assert_eq!(f32::from(bounds.size.height), 40.0);
@@ -492,21 +492,15 @@ mod tests {
 
     #[test]
     fn projection_is_empty_when_fully_outside() {
-        assert!(project_placement(
-            &placement(2, 0, 0, -10),
-            10,
-            10,
-            &geometry(1.0)
-        )
-        .is_none());
+        assert!(project_placement(&placement(2, 0, 0, -10), 10, 10, &geometry(1.0)).is_none());
     }
 
     #[test]
     fn projection_hidpi_keeps_source_in_image_pixels() {
         // At 2x, a 30-device-pixel destination is 15 logical pixels. Source
         // coordinates remain image pixels and must not be divided by scale.
-        let (bounds, full) = project_placement(&placement(2, 0, 0, 0), 20, 20, &geometry(2.0))
-            .expect("visible");
+        let (bounds, full) =
+            project_placement(&placement(2, 0, 0, 0), 20, 20, &geometry(2.0)).expect("visible");
         assert_eq!(f32::from(bounds.size.width), 15.0);
         assert_eq!(f32::from(bounds.size.height), 10.0);
         // scale_x = 15 / 10 = 1.5; full image = 20 * 1.5 = 30 logical px.
@@ -519,8 +513,8 @@ mod tests {
     fn projection_at_150_percent_does_not_change_source_rectangles() {
         // The exact fractional case that used to floor and crop: 30 device
         // pixels become 20 logical pixels at 1.5x, not 19.
-        let (bounds, full) = project_placement(&placement(2, 0, 0, 0), 20, 20, &geometry(1.5))
-            .expect("visible");
+        let (bounds, full) =
+            project_placement(&placement(2, 0, 0, 0), 20, 20, &geometry(1.5)).expect("visible");
         assert!((f32::from(bounds.size.width) - 20.0).abs() < 0.001);
         assert!((f32::from(bounds.size.height) - 40.0 / 3.0).abs() < 0.001);
         // scale_x = 20 / 10 = 2; the whole 20 px image projects to 40 logical.
@@ -533,8 +527,7 @@ mod tests {
     fn negative_columns_are_clipped_like_negative_rows() {
         let mut p = placement(2, 0, -2, 0);
         p.pixel_width = 80;
-        let (bounds, full) = project_placement(&p, 10, 10, &geometry(1.0))
-            .expect("partly visible");
+        let (bounds, full) = project_placement(&p, 10, 10, &geometry(1.0)).expect("partly visible");
         // Destination starts 20 logical px left of the terminal and is clipped.
         assert_eq!(f32::from(bounds.origin.x), 100.0);
         assert_eq!(f32::from(bounds.size.width), 60.0);
@@ -562,7 +555,11 @@ mod tests {
     #[test]
     fn alpha_is_preserved_for_both_alpha_formats() {
         for (format, pixels, expected_alpha) in [
-            (sys::GHOSTTY_KITTY_IMAGE_FORMAT_RGBA, vec![10, 20, 30, 40], 40),
+            (
+                sys::GHOSTTY_KITTY_IMAGE_FORMAT_RGBA,
+                vec![10, 20, 30, 40],
+                40,
+            ),
             (sys::GHOSTTY_KITTY_IMAGE_FORMAT_GRAY_ALPHA, vec![50, 60], 60),
         ] {
             let image = KittyImagePixels {
@@ -588,8 +585,7 @@ mod tests {
         p.source_height = 5;
         p.pixel_width = 50;
         p.pixel_height = 50;
-        let (bounds, full) = project_placement(&p, 10, 10, &geometry(1.0))
-            .expect("visible");
+        let (bounds, full) = project_placement(&p, 10, 10, &geometry(1.0)).expect("visible");
         // scale = 50/5 = 10; full image is 100x100 logical, starting 50 px
         // above/left of the destination because source started at (5,5).
         assert_eq!(f32::from(full.origin.x), 100.0 - 50.0);
@@ -601,7 +597,7 @@ mod tests {
     #[test]
     fn layer_partition_is_stable_for_sorted_placements() {
         let p = |layer, z| placement(layer, z, 0, 0);
-        let all = vec![
+        let all = [
             p(sys::GHOSTTY_IMAGE_LAYER_BELOW_BACKGROUND, -2),
             p(sys::GHOSTTY_IMAGE_LAYER_BELOW_BACKGROUND, 0),
             p(sys::GHOSTTY_IMAGE_LAYER_BELOW_TEXT, -1),

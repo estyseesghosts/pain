@@ -1,16 +1,33 @@
 # Windows Backend
 
-The Windows backend provides **transport and child-process ownership only**. It creates one OS ConPTY, launches one child process attached to that pseudoconsole, moves bytes between ConPTY and the shared `TerminalSession`, resizes the pseudoconsole when the terminal grid changes, and shuts the process down cleanly. It does not render terminal content, interpret ANSI, own keyboard focus, or create a second native child window.
+The Windows backend provides **transport and child-process ownership only**. It
+resolves the bundled or in-box ConPTY, launches one child process attached to
+that pseudoconsole, moves bytes between ConPTY and the shared `TerminalSession`,
+resizes the pseudoconsole when the terminal grid changes, and shuts the process
+down cleanly. It does not render terminal content, interpret ANSI, own keyboard
+focus, or create a second native child window.
 
 This is deliberately smaller than Wintty. Current Wintty uses Ghostty's larger Windows integration, WinUI 3 application shell and a DirectX 12 terminal renderer; its PTY layer is still valuable as a source reference because it confirms ConPTY is its sole Windows transport and shows the exact create/resize/close seam. See [Wintty `src/pty.zig`](https://github.com/pawaca/wintty/blob/047cd33cd1a24602cc4887ac260e2f922943cac0/src/pty.zig). Ghostty's VT library remains the terminal engine and explicitly leaves PTY transport to us. See [Ghostty `terminal.h`](https://github.com/ghostty-org/ghostty/blob/64a6fedfd26d1fa687733f9f411db5eb8e205ebe/include/ghostty/vt/terminal.h). The visible HWND/window remains GPUI/Silvestris-owned; current Silvestris already uses GPUI/native frame integration for Windows chrome. See [Silvestris `chrome.rs`](https://github.com/estyseesghosts/silvestris/blob/0d5cc609171992d003994c8d8fd44b014b4d0b94/crates/silvestris/src/chrome.rs) and [GPUI platform source](https://github.com/zed-industries/zed/blob/6b720973027999bae402df23d469026f4cced988/crates/gpui/src/platform.rs).
 
 ## 1. MVP policy
 
-Use the **OS-provided ConPTY implementation**. Do not bundle a private `conpty.dll` in the first release.
+Prefer the **adjacent bundled OpenConsole ConPTY** and fall back to the
+OS-provided `kernel32` implementation only when it is absent.
 
-Wintty's current PTY source optionally looks for an adjacent newer `conpty.dll` and falls back to the kernel32 ConPTY API. Its comments explain why: the in-box path can strip Kitty graphics APC and Sixel DCS sequences, while a newer OpenConsole-based DLL can pass them through. Those protocols are explicitly out of scope for this minimal terminal, so carrying a private console host would add build, signing, servicing and compatibility complexity without improving the feature set we actually render. See [Wintty `src/pty.zig`](https://github.com/pawaca/wintty/blob/047cd33cd1a24602cc4887ac260e2f922943cac0/src/pty.zig).
+Wintty's current PTY source looks for an adjacent newer `conpty.dll` because
+the in-box path can strip Kitty graphics APC sequences. Pain needs that path:
+Kitty graphics is implemented end to end, so a Windows build that always used
+the in-box host would silently lose images. Pain therefore ships a pinned,
+MIT-licensed `Microsoft.Windows.Console.ConPTY` pair (`conpty.dll` plus the
+matching `OpenConsole.exe`) beside `pain.exe`. The resolver in
+`src/platform/windows.rs` loads the module once, holds it for the process
+lifetime, and uses its `CreatePseudoConsole`/`ResizePseudoConsole`/
+`ClosePseudoConsole` exports for the whole session. Provenance, version and
+SHA-256 checksums are in [`windows/conpty/README.md`](../windows/conpty/README.md).
 
-If later work adds image protocols and proves the OS host is the blocker, revisit this as a separate milestone.
+If the pair is missing, Pain falls back to `kernel32` and logs a warning that
+the transport is Kitty-graphics-degraded; it never claims full graphics support
+in that state. See [Wintty `src/pty.zig`](https://github.com/pawaca/wintty/blob/047cd33cd1a24602cc4887ac260e2f922943cac0/src/pty.zig).
 
 ## 2. Backend shape
 
