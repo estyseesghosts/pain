@@ -126,11 +126,11 @@ struct Threads {
 
 /// Owns one POSIX PTY, its child, and its worker threads.
 pub struct LinuxPty {
-    master: Arc<MasterFd>,
+    _master: Arc<MasterFd>,
     child: pid_t,
     stop: Arc<AtomicBool>,
     session: Arc<TerminalSession>,
-    size: Arc<Mutex<GridSize>>,
+    _size: Arc<Mutex<GridSize>>,
     /// Latest-value mailbox; the UI only updates the pending grid.
     resize_mailbox: Arc<PtyResizeMailbox>,
     threads: Mutex<Option<Threads>>,
@@ -252,11 +252,11 @@ impl LinuxPty {
             *resize_size.lock().expect("PTY size mutex poisoned") = next;
         })));
         Ok(Self {
-            master,
+            _master: master,
             child: child.id() as pid_t,
             stop,
             session,
-            size,
+            _size: size,
             resize_mailbox,
             threads: Mutex::new(Some(threads)),
         })

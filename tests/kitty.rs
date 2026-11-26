@@ -327,10 +327,29 @@ fn deletion_removes_placements_and_images() {
     let session = session(20, 8);
     transmit_rgba(&session, 7, 1, 1, [1, 1, 1, 1]);
     feed(&session, &control("a=p,i=7,p=7,q=2"));
-    assert_eq!(snapshot(&session).len(), 1);
+    let placed = snapshot(&session);
+    assert_eq!(placed.len(), 1);
+
+    // Lowercase d=i removes the placement but keeps the image data. Read the
+    // generation from a fresh placement rather than hard-coding 1: image
+    // generations are not a test-local constant.
     feed(&session, &control("a=d,d=i,i=7,q=2"));
     assert!(snapshot(&session).is_empty());
-    assert!(session.read_kitty_images(&[(7, 1)]).is_empty());
+    feed(&session, &control("a=p,i=7,p=7,q=2"));
+    let retained = snapshot(&session);
+    assert_eq!(retained.len(), 1);
+    let retained_generation = retained[0].image_generation;
+    assert_eq!(
+        session.read_kitty_images(&[(7, retained_generation)]).len(),
+        1
+    );
+
+    // Uppercase d=I frees the image data once it has no placements.
+    feed(&session, &control("a=d,d=I,i=7,q=2"));
+    assert!(snapshot(&session).is_empty());
+    assert!(session
+        .read_kitty_images(&[(7, retained_generation)])
+        .is_empty());
 }
 
 #[test]
