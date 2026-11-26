@@ -66,6 +66,8 @@ the commit year, the two-digit commit month, and Git's seven-character short
 hash, e.g. `v26-11-0566384`. This matches Chaus's tag shape. `build.rs` computes
 the string from HEAD and embeds it as `PAIN_RELEASE_VERSION`; a source archive
 with no `.git` gets the obviously synthetic `v00-00-unknown`.
+`crates/ghostty-vt-sys/build.rs` passes Ghostty's pinned app version to Zig
+explicitly, so Ghostty's own `vX.Y.Z` tag validation never inspects pain's tag.
 
 The Windows release target is the GNU host (Zig builds the pinned static
 `libghostty-vt`, MinGW `windres` embeds the icon). GitHub CI installs the same

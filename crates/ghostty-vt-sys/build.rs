@@ -64,6 +64,10 @@ fn main() {
         .arg("--prefix")
         .arg(&prefix)
         .arg("-Demit-lib-vt")
+        // Pain's consumer tags are vYY-MM-xxxxxxx, not Ghostty's vX.Y.Z app
+        // tags. Give Zig the pinned app version so it never validates pain's
+        // tags as if they were Ghostty releases.
+        .arg("-Dversion-string=1.4.1")
         .arg("-Doptimize=ReleaseFast")
         .arg("-Dcpu=baseline")
         .status()
