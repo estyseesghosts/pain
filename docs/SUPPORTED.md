@@ -32,7 +32,8 @@ implement.
   rows/columns, alpha, positive/negative `z`, Ghostty's below-background,
   below-text and above-text layers, fixed, relative and Unicode-placeholder
   placements, scrollback movement, clipping, resize/reflow, alternate screen,
-  animation frames, stop/resume, and bounded storage-limit eviction. Kitty
+  animation frames, animation composition, stop/resume, and bounded
+  storage-limit eviction. Kitty
   textures are cached by `(protocol, image_id, generation)` and dropped from
   the GPUI atlas when superseded.
 - Kitty transport policy: the arbitrary-file medium is implemented but disabled

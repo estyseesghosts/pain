@@ -558,9 +558,67 @@ fn animation_frames_advance_on_tick_and_stop_without_a_loop() {
     // Stopping is immediate; a stale deadline must not resurrect it.
     feed(&session, &control("a=a,i=70,s=1,q=2"));
     assert!(session.tick_kitty_animation(next).expect("tick").is_none());
+
+    // Resuming schedules a new deadline; stopping again clears it.
+    feed(&session, &control("a=a,i=70,s=3,q=2"));
+    assert!(session
+        .tick_kitty_animation(next)
+        .expect("resume tick")
+        .is_some());
+    feed(&session, &control("a=a,i=70,s=1,q=2"));
+    assert!(session
+        .tick_kitty_animation(next)
+        .expect("stop tick")
+        .is_none());
+
     let counters = session.snapshot_counters();
-    assert!(counters.kitty_animation_ticks >= 2);
+    assert!(counters.kitty_animation_ticks >= 4);
     assert!(counters.kitty_animation_frames >= 1);
+}
+
+#[test]
+fn animation_composition_merges_a_source_frame() {
+    let session = session(20, 8);
+    // Root is 2x1 RGB: red then blue.
+    feed(
+        &session,
+        &apc("a=t,f=24,s=2,v=1,i=71,q=2", &[255, 0, 0, 0, 0, 255]),
+    );
+    // Frame 2 starts as a white pixel on a transparent 2x1 canvas.
+    feed(
+        &session,
+        &apc("a=f,i=71,f=24,s=1,v=1,z=40,q=2", &[255, 255, 255]),
+    );
+    // Compose root pixel (1,0) onto frame 2 at (0,0).
+    feed(&session, &control("a=c,i=71,r=1,c=2,w=1,h=1,X=1,x=0,q=2"));
+    feed(&session, &control("a=p,i=71,p=710,q=2"));
+    feed(&session, &control("a=a,i=71,s=3,q=2"));
+
+    let before = snapshot(&session)
+        .into_iter()
+        .find(|p| p.image_id == 71)
+        .expect("placement")
+        .image_generation;
+    let next = session
+        .tick_kitty_animation(0)
+        .expect("tick")
+        .expect("deadline");
+    assert!(next > 0);
+    let after = snapshot(&session)
+        .into_iter()
+        .find(|p| p.image_id == 71)
+        .expect("placement")
+        .image_generation;
+    assert_ne!(after, before);
+    let pixels = session.read_kitty_images(&[(71, after)]);
+    assert_eq!(pixels.len(), 1);
+    assert_eq!(pixels[0].format, sys::GHOSTTY_KITTY_IMAGE_FORMAT_RGBA);
+    assert_eq!(
+        pixels[0].pixels,
+        vec![0, 0, 255, 255, 0, 0, 0, 0],
+        "composed frame is blue at x=0 and transparent at x=1"
+    );
+    feed(&session, &control("a=a,i=71,s=1,q=2"));
 }
 
 #[test]
