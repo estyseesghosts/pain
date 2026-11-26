@@ -25,9 +25,9 @@ runs:
           libva-dev libvulkan1 libwayland-dev libx11-xcb-dev \
           libxkbcommon-x11-dev libzstd-dev
         curl -fsSLo "$RUNNER_TEMP/zig.tar.xz" \
-          "https://ziglang.org/download/${{ inputs.zig-version }}/zig-linux-x86_64-${{ inputs.zig-version }}.tar.xz"
+          "https://ziglang.org/download/${{ inputs.zig-version }}/zig-x86_64-linux-${{ inputs.zig-version }}.tar.xz"
         tar -xJf "$RUNNER_TEMP/zig.tar.xz" -C "$RUNNER_TEMP"
-        zig_dir="$RUNNER_TEMP/zig-linux-x86_64-${{ inputs.zig-version }}"
+        zig_dir="$RUNNER_TEMP/zig-x86_64-linux-${{ inputs.zig-version }}"
         echo "ZIG=$zig_dir/zig" >> "$GITHUB_ENV"
         echo "$zig_dir" >> "$GITHUB_PATH"
 
@@ -44,9 +44,9 @@ runs:
       run: |
         $version = '${{ inputs.zig-version }}'
         $archive = Join-Path $env:RUNNER_TEMP 'zig-windows.zip'
-        Invoke-WebRequest -Uri "https://ziglang.org/download/$version/zig-windows-x86_64-$version.zip" -OutFile $archive
+        Invoke-WebRequest -Uri "https://ziglang.org/download/$version/zig-x86_64-windows-$version.zip" -OutFile $archive
         Expand-Archive -Path $archive -DestinationPath $env:RUNNER_TEMP -Force
-        $zigDir = Join-Path $env:RUNNER_TEMP "zig-windows-x86_64-$version"
+        $zigDir = Join-Path $env:RUNNER_TEMP "zig-x86_64-windows-$version"
         "ZIG=$(Join-Path $zigDir 'zig.exe')" >> $env:GITHUB_ENV
         $zigDir >> $env:GITHUB_PATH
 
