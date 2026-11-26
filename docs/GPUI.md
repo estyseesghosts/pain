@@ -89,7 +89,7 @@ Cursor blink alone must not invalidate shaped row text.
 
 ### Font metrics
 
-Measure the actual resolved monospace font. Terminal cell width must be deterministic. If the chosen font has a representative mono advance, use GPUI measurement rather than a hardcoded width. Line height should be an explicit terminal metric based on font metrics/desired leading.
+Measure the actual resolved monospace font. Terminal cell width must be deterministic. If the chosen font has a representative mono advance, use GPUI measurement rather than a hardcoded width. Row height should be the font's own line box (`ascent + descent`, clamped to at least the font size): GPUI centers each shaped row inside the height passed to `ShapedLine::paint`, so extra leading becomes a visible gap between rows and breaks contiguous box-drawing borders in TUIs.
 
 The application can default to Silvestris's mono role, but GPUI owns actual font resolution/shaping. See [Silvestris fonts/theme guidance](https://github.com/estyseesghosts/silvestris/blob/0d5cc609171992d003994c8d8fd44b014b4d0b94/docs/consumers.md).
 

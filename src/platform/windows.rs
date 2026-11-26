@@ -123,7 +123,7 @@ pub fn environment_block(
     let mut block = Vec::new();
     // CreateProcessW expects a case-insensitively sorted, NUL-terminated
     // double-NUL block. An unsorted block is rejected with ERROR_INVALID_PARAMETER.
-    values.sort_by(|a, b| a.0.to_ascii_uppercase().cmp(&b.0.to_ascii_uppercase()));
+    values.sort_by_key(|(key, _)| key.to_ascii_uppercase());
     for (key, value) in values {
         block.extend(key.encode_utf16());
         block.push(b'=' as u16);

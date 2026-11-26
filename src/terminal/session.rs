@@ -33,6 +33,9 @@ impl WakeupSink for NoopWakeup {
     fn schedule(&self) {}
 }
 
+/// Platform PTY resize hook, installed by the app when a real PTY exists.
+type PtyResize = Arc<dyn Fn(u16, u16) + Send + Sync>;
+
 /// Point-in-time copy of the instrumentation counters in docs/PERFORMANCE.md.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CountersSnapshot {
@@ -221,8 +224,7 @@ pub struct TerminalSession {
     writer: Arc<WriterQueue>,
     cols: Mutex<u16>,
     rows: Mutex<u16>,
-    /// Platform PTY resize hook, installed by the app when a real PTY exists.
-    pty_resize: Mutex<Option<Arc<dyn Fn(u16, u16) + Send + Sync>>>,
+    pty_resize: Mutex<Option<PtyResize>>,
     counters: Arc<Counters>,
 }
 
@@ -627,6 +629,9 @@ impl TerminalSession {
     /// Encode one pointer event from Ghostty's current tracking mode and
     /// geometry and queue the resulting bytes. Zero bytes are a valid outcome
     /// (tracking off, or a motion deduplicated inside Ghostty).
+    // The argument list mirrors Ghostty's mouse-event API; grouping it into a
+    // struct would add a new model for a single call site.
+    #[allow(clippy::too_many_arguments)]
     pub fn encode_mouse(
         &self,
         action: i32,

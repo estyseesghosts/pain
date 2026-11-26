@@ -97,7 +97,7 @@ fn font_size_steps_change_cell_metrics_and_clamp() {
 #[test]
 fn pixel_only_window_resize_does_not_resize_ghostty_grid() {
     let session = TerminalSession::new(80, 24, Box::new(NoopWakeup)).expect("session");
-    assert!(session.resize(80, 24, 9, 18).expect("duplicate suppressed") == false);
+    assert!(!session.resize(80, 24, 9, 18).expect("duplicate suppressed"));
     assert!(session.resize(79, 24, 10, 19).expect("grid changed"));
     let counters = session.snapshot_counters();
     assert_eq!(counters.ghostty_resize_calls, 1);

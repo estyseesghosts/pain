@@ -7,9 +7,9 @@ This packet is intentionally source-grounded. The URLs below are immutable commi
 | Dependency | What pain consumes | Pin |
 |---|---|---|
 | `libghostty-vt` | vendored source snapshot in `vendor/ghostty-vt` | release tag `vt-1.0.2` / commit `573c4a21e02311ae87844af26b6a7a179f82858e` |
-| Silvestris | path dependency on the freshest `~/workdir/silvestris-cont` checkout, crate `crates/silvestris` | branch `devel/sil-cocoa-fixture`, HEAD `30173a5860ad263feacb3d417a73c3a354a21e78` when wired; the path follows future HEADs |
-| Zed/GPUI | exact revision inherited from `silvestris-cont/config/pins.toml` | `6b720973027999bae402df23d469026f4cced988` (unchanged) |
-| Rust | `silvestris-cont/rust-toolchain.toml` | `1.98.1`, GNU host on Windows |
+| Silvestris | git dependency on `estyseesghosts/silvestris`, crate `crates/silvestris` | `f1c2a010c1c84a90c9ad938eb307f5f2ef5a5ba7` (pushed, same pin Chaus uses) |
+| Zed/GPUI | exact revision inherited from that Silvestris `config/pins.toml` | `6b720973027999bae402df23d469026f4cced988` (unchanged) |
+| Rust | `rust-toolchain.toml`, matched to Silvestris | `1.98.1`, GNU host on Windows |
 
 `vt-1.0.2` is the released tag closest to the research snapshot: the research
 commit `64a6fedfd26d1fa687733f9f411db5eb8e205ebe` is `bump for lib-vt 1.0.3-dev`
@@ -19,11 +19,11 @@ as a dependency. `vendor/ghostty-vt/PIN.txt` records the exact source snapshot;
 `crates/ghostty-vt-sys/build.rs` refuses to build if that pin changes.
 
 The Silvestris dependency is optional (`shell` feature) so M0's headless tests
-do not compile GPUI. It is deliberately a path dependency to the freshest
-`silvestris-cont` checkout, as requested; keep that checkout clean and update
-the recorded HEAD here whenever it moves. The GPUI git revision in
-`pain/Cargo.toml` is pinned to the same rev as that checkout, so enabling the
-feature cannot introduce a second GPUI type universe.
+do not compile GPUI. It is pinned to a pushed revision rather than a sibling
+checkout so a fresh GitHub clone can build without local layout assumptions.
+The GPUI git revision in `pain/Cargo.toml` is pinned to the same rev as that
+Silvestris `config/pins.toml`, so enabling the feature cannot introduce a
+second GPUI type universe.
 
 ### Build and test commands
 
@@ -81,8 +81,7 @@ opened in either run.
 ## Implemented milestones M1/M2 — 2026-11-24
 
 M1 and M2 add no new upstream pins. The M1 window renderer consumes the same
-Silvestris checkout and the same GPUI revision listed above; the local path
-dependency still resolves to `~/workdir/silvestris-cont/crates/silvestris`.
+pushed Silvestris revision and the same GPUI revision listed above.
 `gpui_platform` is also taken from the pinned Zed revision so one GPUI type
 universe is used end to end. `async-channel` is only the capacity-one wakeup
 bridge to GPUI's foreground executor; it adds no separate runtime.
@@ -109,9 +108,7 @@ wsl -d FedoraLinux-44 -- bash -lc 'cd /mnt/c/Users/terezi/workdir/ghostty/pain \
   && cargo run --features shell'
 
 # Preferred: keep the working copy and target dir on WSL ext4, not /mnt/c.
-# The relative Silvestris path dependency needs the /workdir/<repo> layout.
-cp -a --reflink=auto /mnt/c/Users/terezi/workdir/ghostty/pain /home/terezi/workdir/ghostty/
-cp -a /mnt/c/Users/terezi/workdir/silvestris-cont /home/terezi/workdir/
+git clone https://github.com/estyseesghosts/pain.git /home/terezi/workdir/ghostty/pain
 cd /home/terezi/workdir/ghostty/pain
 export ZIG=/home/terezi/zig-linux/zig CARGO_TARGET_DIR=/home/terezi/pain-target
 export DISPLAY=:0 WAYLAND_DISPLAY=wayland-0 XDG_RUNTIME_DIR=/run/user/1000

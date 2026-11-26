@@ -13,3 +13,4 @@ pub mod platform;
 #[cfg(feature = "shell")]
 pub mod preferences;
 pub mod terminal;
+pub mod version;

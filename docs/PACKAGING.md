@@ -59,6 +59,43 @@ There is no `.desktop` file in this release; launch it from a shell or a
 terminal launcher. The app uses the same GPUI/Silvestris window code on Windows
 and Linux.
 
+## Versioning
+
+Release tags and `pain --version` use `vYY-MM-xxxxxxx`: the last two digits of
+the commit year, the two-digit commit month, and Git's seven-character short
+hash, e.g. `v26-11-0566384`. This matches Chaus's tag shape. `build.rs` computes
+the string from HEAD and embeds it as `PAIN_RELEASE_VERSION`; a source archive
+with no `.git` gets the obviously synthetic `v00-00-unknown`.
+
+The Windows release target is the GNU host (Zig builds the pinned static
+`libghostty-vt`, MinGW `windres` embeds the icon). GitHub CI installs the same
+toolchain through `.github/actions/setup` and builds with
+`--target x86_64-pc-windows-gnu`.
+
+## Local and GitHub CI
+
+Run the complete local gate from a checkout:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci.ps1
+```
+
+```sh
+./scripts/ci.sh
+```
+
+Both scripts check formatting, clippy with `-D warnings`, the full test suite,
+the M6 stress counters, a release build, and that `--version` names HEAD. They
+do not open a window; pass `-Gui` or `--gui` to opt into the existing smoke
+launch check.
+
+`.github/workflows/verify.yml` runs the same gate on Ubuntu and Windows for
+branches and pull requests. `.github/workflows/release.yml` reruns it for a
+`vYY-MM-xxxxxxx` tag, builds `pain-linux-x64` and `pain-windows-x64.exe` with
+`.sha256` files, checks that each binary prints the tagged version, and
+publishes the assets with `gh release create --verify-tag`. A manual
+`workflow_dispatch` with an existing tag rebuilds a failed release.
+
 ## Command-line surface
 
 ```text
@@ -91,7 +128,8 @@ per frame.
 
 ## Version and source attribution
 
-- App version: `env!("CARGO_PKG_VERSION")` in `Cargo.toml`.
+- App version: `PAIN_RELEASE_VERSION` from `build.rs`, formatted as
+  `vYY-MM-xxxxxxx` by `src/version.rs`.
 - Linked engine: `libghostty-vt` release `vt-1.0.2`, commit
   `573c4a21e02311ae87844af26b6a7a179f82858e`, vendored in `vendor/ghostty-vt`.
   `PIN.txt` and `crates/ghostty-vt-sys/build.rs` refuse a mismatched snapshot.

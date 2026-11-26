@@ -1066,6 +1066,9 @@ impl<'a> RowIterator<'a> {
             .expect("owned row iterator handle is still present")
     }
 
+    // This mirrors Ghostty's C iterator handle, whose `next` advances a cursor
+    // and returns whether a row is available; it is not an Iterator<Item>.
+    #[allow(clippy::should_implement_trait)]
     #[must_use]
     pub fn next(&mut self) -> bool {
         // SAFETY: the handle is non-null, valid and uniquely borrowed here.
@@ -1167,6 +1170,8 @@ impl RowCells {
         Ok(())
     }
 
+    // Same Ghostty C iterator shape as the row iterator above, not Iterator.
+    #[allow(clippy::should_implement_trait)]
     #[must_use]
     pub fn next(&mut self) -> bool {
         // SAFETY: the handle is valid and uniquely borrowed here.

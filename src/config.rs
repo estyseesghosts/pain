@@ -164,7 +164,7 @@ pub fn usage() -> &'static str {
 pub fn version_line() -> String {
     format!(
         "pain {} (libghostty-vt {})",
-        env!("CARGO_PKG_VERSION"),
+        env!("PAIN_RELEASE_VERSION"),
         ghostty_version()
     )
 }
@@ -240,7 +240,22 @@ mod tests {
     #[test]
     fn version_line_attributes_libghostty_vt() {
         let line = version_line();
-        assert!(line.starts_with("pain "));
         assert!(line.contains("libghostty-vt"));
+        let version = line
+            .strip_prefix("pain ")
+            .expect("version line starts with pain")
+            .split_whitespace()
+            .next()
+            .expect("version line has a version token");
+        let parts: Vec<&str> = version
+            .strip_prefix('v')
+            .expect("release version starts with v")
+            .split('-')
+            .collect();
+        assert_eq!(parts.len(), 3);
+        assert_eq!(parts[0].len(), 2);
+        assert_eq!(parts[1].len(), 2);
+        assert_eq!(parts[2].len(), 7);
+        assert!(parts[2].bytes().all(|byte| byte.is_ascii_hexdigit()));
     }
 }

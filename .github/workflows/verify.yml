@@ -1,0 +1,48 @@
+name: Verify
+
+# Tags go through release.yml, which reruns this same gate before publishing.
+on:
+  push:
+    branches:
+      - '**'
+    tags-ignore:
+      - '**'
+  pull_request:
+  workflow_call:
+    inputs:
+      ref:
+        description: Commit or tag to verify
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+      - uses: ./.github/actions/setup
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --all-targets --features shell --locked
+      - name: Release build
+        run: cargo build --release --features shell --locked
+      - name: CLI version smoke test
+        shell: bash
+        run: |
+          binary="target/release/pain"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            binary="target/x86_64-pc-windows-gnu/release/pain.exe"
+          fi
+          "$binary" --version
+          "$binary" --help > /dev/null

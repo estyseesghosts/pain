@@ -38,16 +38,15 @@ windows = { version = "0.61.3", features = [
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
 
-# Silvestris is consumed from the freshest devel/sil-cocoa-fixture checkout.
-# HEAD when wired: 30173a5860ad263feacb3d417a73c3a354a21e78. The path follows
-# newer commits in that checkout; keep it clean and update docs/SOURCE-MAP.md
-# with its HEAD when moving this path. M0 headless builds do not compile it:
-# GPUI is only needed once the M1 window renderer exists.
+# Pinned to a pushed Silvestris revision so a fresh clone builds without a
+# sibling checkout, matching Chaus. This revision's config/pins.toml carries
+# the same GPUI commit declared below. Bump both pins together.
 [dependencies.silvestris]
-path = "../../silvestris-cont/crates/silvestris"
+git = "https://github.com/estyseesghosts/silvestris"
+rev = "f1c2a010c1c84a90c9ad938eb307f5f2ef5a5ba7"
 optional = true
 
-# Must match silvestris-cont's config/pins.toml exactly. Never upgrade this
+# Must match the pinned Silvestris config/pins.toml exactly. Never upgrade this
 # independently: two GPUI revisions produce incompatible types.
 [dependencies.gpui]
 git = "https://github.com/zed-industries/zed"

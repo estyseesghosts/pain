@@ -19,6 +19,17 @@ pub fn adjust_font_size(current: f32, delta: f32) -> f32 {
     (current + delta).clamp(MIN_FONT_SIZE, MAX_FONT_SIZE)
 }
 
+/// Row height for a font's measured line box.
+///
+/// GPUI centers the glyphs inside the line height passed to `ShapedLine::paint`.
+/// Leading beyond `ascent + descent` therefore appears as a gap between
+/// terminal rows, which breaks connected box-drawing borders in TUIs. Use the
+/// font's own line box and clamp only for degenerate metrics.
+#[must_use]
+pub fn line_height_for(ascent: f32, descent: f32, font_size: f32) -> f32 {
+    (ascent + descent).max(font_size).max(1.0)
+}
+
 /// Cell width and line height measured from the resolved GPUI mono font.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CellMetrics {
@@ -320,7 +331,7 @@ impl RowCache {
         }
         let mut out: Vec<usize> = dirty_rows
             .iter()
-            .filter_map(|y| usize::try_from(*y).ok())
+            .map(|y| usize::from(*y))
             .filter(|y| *y < self.rows)
             .collect();
         out.sort_unstable();
@@ -373,6 +384,25 @@ mod tests {
     }
 
     #[test]
+    fn line_height_has_no_extra_leading_between_rows() {
+        // Representative mono metrics at 12px: 0.984em ascent + 0.273em descent.
+        let ascent = 11.808;
+        let descent = 3.276;
+        let line_height = line_height_for(ascent, descent, 12.0);
+        // A previous 1.25 multiplier gave GPUI 12.5% padding above and below
+        // every glyph, which showed up as gaps between TUI borders.
+        assert!((line_height - (ascent + descent)).abs() < f32::EPSILON);
+        assert!(line_height < (ascent + descent) * 1.05);
+    }
+
+    #[test]
+    fn line_height_clamps_degenerate_metrics() {
+        assert_eq!(line_height_for(2.0, 1.0, 12.0), 12.0);
+        assert_eq!(line_height_for(0.0, 0.0, 0.0), 1.0);
+        assert_eq!(line_height_for(f32::NAN, f32::NAN, 12.0), 12.0);
+    }
+
+    #[test]
     fn adjacent_same_style_cells_share_one_run() {
         let cells = vec![cell("H", false, None), cell("i", false, None)];
         let runs = batch_row(&cells);
@@ -393,7 +423,7 @@ mod tests {
             runs.iter().map(|r| r.text.as_str()).collect::<Vec<_>>(),
             ["a", "B", "c"]
         );
-        assert_eq!(runs[1].style.bold, true);
+        assert!(runs[1].style.bold);
     }
 
     #[test]

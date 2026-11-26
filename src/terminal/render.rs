@@ -23,8 +23,8 @@ use crate::app::{
     SelectAllTerminal,
 };
 use crate::terminal::geometry::{
-    adjust_font_size, background_runs, batch_row, selection_span, BgRun, CellMetrics, RowCache,
-    TextRun as CellRun, FONT_SIZE_STEP,
+    adjust_font_size, background_runs, batch_row, line_height_for, selection_span, BgRun,
+    CellMetrics, RowCache, TextRun as CellRun, FONT_SIZE_STEP,
 };
 use crate::terminal::ghostty::{Cursor, KeyEvent};
 use crate::terminal::input::{
@@ -602,9 +602,14 @@ impl Element for TerminalElement {
             .text_system()
             .shape_line("M".into(), font_size, &[probe_run], None);
         let cell_width = f32::from(probe.width()).max(1.0);
-        let line_height = (f32::from(probe.ascent + probe.descent) * 1.25)
-            .max(f32::from(font_size))
-            .max(1.0);
+        // Use the font's own line box. GPUI centers each shaped row inside the
+        // height passed to `ShapedLine::paint`, so extra leading would show up
+        // as a gap between rows and break TUI box-drawing borders.
+        let line_height = line_height_for(
+            f32::from(probe.ascent),
+            f32::from(probe.descent),
+            f32::from(font_size),
+        );
         let metrics = CellMetrics::new(cell_width, line_height);
         // Keep input mapping in sync even on a cache-hit frame: dragging the
         // window changes `bounds` without changing any cached rows.
@@ -843,7 +848,7 @@ impl Element for TerminalElement {
             if terminal_bounds.contains(&event.position) {
                 return;
             }
-            let _ = mouse_view.update(cx, |view, cx| view.on_mouse_move(event, window, cx));
+            mouse_view.update(cx, |view, cx| view.on_mouse_move(event, window, cx));
         });
         let mouse_view = self.view.clone();
         window.on_mouse_event(move |event: &MouseUpEvent, phase, window, cx| {
@@ -854,7 +859,7 @@ impl Element for TerminalElement {
             if !view.focus.is_focused(window) || view.held_mouse.get() == 0 {
                 return;
             }
-            let _ = mouse_view.update(cx, |view, cx| view.on_mouse_up(event, window, cx));
+            mouse_view.update(cx, |view, cx| view.on_mouse_up(event, window, cx));
         });
         let view = self.view.read(cx);
         window.handle_input(
@@ -978,6 +983,9 @@ fn bg_quad(metrics: &CellMetrics, origin: (f32, f32), row: usize, run: BgRun) ->
     )
 }
 
+// Shaping parameters are recorded explicitly rather than wrapped in a struct
+// used by one caller; the count mirrors GPUI's text-run inputs.
+#[allow(clippy::too_many_arguments)]
 fn shape_run(
     run: &CellRun,
     text: SharedString,
