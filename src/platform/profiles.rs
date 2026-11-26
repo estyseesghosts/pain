@@ -11,6 +11,7 @@
 
 #[cfg(target_os = "linux")]
 use std::path::Path;
+#[cfg(target_os = "windows")]
 use std::path::PathBuf;
 
 use crate::platform::ShellCommand;
@@ -40,6 +41,9 @@ pub struct ShellProfile {
     pub command: ShellCommand,
 }
 
+// Only the Windows detector needs this constructor; Linux builds a single
+// login profile directly and must not trip `-D dead-code` in CI.
+#[cfg(target_os = "windows")]
 impl ShellProfile {
     fn new(
         id: impl Into<String>,

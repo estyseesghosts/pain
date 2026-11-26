@@ -90,7 +90,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci.ps1
 Both scripts check formatting, clippy with `-D warnings`, the full test suite,
 the M6 stress counters, a release build, and that `--version` names HEAD. They
 do not open a window; pass `-Gui` or `--gui` to opt into the existing smoke
-launch check.
+launch check. Set `CARGO_TARGET_DIR` to an isolated directory when a previously
+launched release window still has the default binary open.
 
 `.github/workflows/verify.yml` runs the same gate on Ubuntu and Windows for
 branches and pull requests. `.github/workflows/release.yml` reruns it for a

@@ -38,7 +38,7 @@ if (Test-Path $shim) {
 Write-Host '== format =='
 Invoke-Cargo @('fmt', '--all', '--', '--check')
 Write-Host '== clippy =='
-Invoke-Cargo @('clippy', '--workspace', '--all-targets', '--locked', '--', '-D', 'warnings')
+Invoke-Cargo @('clippy', '--workspace', '--all-targets', '--features', 'shell', '--locked', '--', '-D', 'warnings')
 Write-Host '== tests =='
 Invoke-Cargo @('test', '--workspace', '--all-targets', '--features', 'shell', '--locked')
 Write-Host '== performance counters =='
@@ -46,7 +46,10 @@ Invoke-Cargo @('test', '--release', '--test', 'm6', '--features', 'shell', '--lo
 Write-Host '== release build =='
 Invoke-Cargo @('build', '--release', '--features', 'shell', '--locked')
 
-$exe = Join-Path (Get-Location) 'target\release\pain.exe'
+# An isolated CARGO_TARGET_DIR lets this gate run while release windows from
+# earlier smoke tests still have the default binary open.
+$targetDir = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { Join-Path (Get-Location) 'target' }
+$exe = Join-Path $targetDir 'release\pain.exe'
 $versionLine = (& $exe --version | Select-Object -First 1).Trim()
 if ($LASTEXITCODE -ne 0) {
     throw "pain --version failed with exit code $LASTEXITCODE"

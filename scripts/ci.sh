@@ -16,7 +16,7 @@ echo "expected release version: $expected_version"
 echo '== format =='
 cargo fmt --all -- --check
 echo '== clippy =='
-cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo clippy --workspace --all-targets --features shell --locked -- -D warnings
 echo '== tests =='
 cargo test --workspace --all-targets --features shell --locked
 echo '== performance counters =='
@@ -24,7 +24,10 @@ cargo test --release --test m6 --features shell --locked -- --nocapture
 echo '== release build =='
 cargo build --release --features shell --locked
 
-version_line="$(target/release/pain --version | head -n 1)"
+# An isolated CARGO_TARGET_DIR lets this gate run while release windows from
+# earlier smoke tests still have the default binary open.
+target_dir="${CARGO_TARGET_DIR:-target}"
+version_line="$("$target_dir/release/pain" --version | head -n 1)"
 if [[ "$version_line" != "pain $expected_version "* ]]; then
   echo "release version mismatch: expected '$expected_version' in '$version_line'" >&2
   exit 1
