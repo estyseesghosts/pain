@@ -168,32 +168,23 @@ pub fn run() {
         let stop = Arc::new(AtomicBool::new(false));
         let pty_holder: Arc<Mutex<Option<Box<dyn PlatformPty>>>> = Arc::new(Mutex::new(None));
 
-        if !fixture && !stress {
-            let pty_config = PtyConfig {
+        // A real Kitty client asks for device-pixel geometry before it draws.
+        // Spawning the shell here would race the first prepaint, so the PTY
+        // starts only after that frame has applied the measured cell pixels.
+        let pending_shell = if !fixture && !stress {
+            Some(PtyConfig {
                 cols: 80,
                 rows: 24,
+                // Replaced with the measured values before the shell starts;
+                // the PTY must not see a guessed cell size.
+                cell_width_px: 0,
+                cell_height_px: 0,
                 command,
-            };
-            let pty = match spawn_pty(&pty_config, Arc::clone(&session)) {
-                Ok(pty) => pty,
-                Err(error) => {
-                    log::error("shell", &format!("could not start shell: {error}"));
-                    cx.quit();
-                    return;
-                }
-            };
-            // Pixel-only resizes never reach the PTY: the session invokes this
-            // hook only after the Ghostty grid changes.
-            let resize_holder = Arc::clone(&pty_holder);
-            session.set_pty_resize(Arc::new(move |cols, rows| {
-                if let Some(pty) = resize_holder.lock().expect("pty holder poisoned").as_ref() {
-                    if let Err(error) = pty.resize(cols, rows) {
-                        log::error("resize", &format!("PTY resize failed: {error}"));
-                    }
-                }
-            }));
-            *pty_holder.lock().expect("pty holder poisoned") = Some(pty);
+            })
         } else {
+            None
+        };
+        if pending_shell.is_none() {
             Fixture::WideAndStyles.apply_session(&session);
             if !stress {
                 // The first frame renders this fixture unconditionally from an
@@ -227,6 +218,50 @@ pub fn run() {
                 app.terminal
                     .update(cx, |terminal, cx| terminal.set_font_size(size, cx));
             });
+        }
+
+        if let Some(pty_config) = pending_shell {
+            // Pixel-only resizes never reach the PTY: the session invokes this
+            // hook only after the Ghostty grid changes. Install it before the
+            // first frame so a measured grid is never lost.
+            let resize_holder = Arc::clone(&pty_holder);
+            session.set_pty_resize(Arc::new(
+                move |cols, rows, cell_width_px, cell_height_px| {
+                    if let Some(pty) = resize_holder.lock().expect("pty holder poisoned").as_ref() {
+                        if let Err(error) = pty.resize(cols, rows, cell_width_px, cell_height_px) {
+                            log::error("resize", &format!("PTY resize failed: {error}"));
+                        }
+                    }
+                },
+            ));
+            // The first frame's prepaint applies the measured cell pixels and
+            // grid. Only then can a Kitty client's XTWINOPS pixel-size query be
+            // answered, so start the shell after that frame and use the grid
+            // Ghostty actually adopted instead of the initial 80x24 guess.
+            let spawn_session = Arc::clone(&session);
+            let spawn_holder = Arc::clone(&pty_holder);
+            view.update(cx, move |_, window, _| {
+                window.on_next_frame(move |_, cx| {
+                    let geometry = spawn_session.applied_geometry();
+                    let config = PtyConfig {
+                        cols: geometry.cols,
+                        rows: geometry.rows,
+                        cell_width_px: geometry.cell_width_px,
+                        cell_height_px: geometry.cell_height_px,
+                        ..pty_config
+                    };
+                    match spawn_pty(&config, Arc::clone(&spawn_session)) {
+                        Ok(pty) => {
+                            *spawn_holder.lock().expect("pty holder poisoned") = Some(pty);
+                        }
+                        Err(error) => {
+                            log::error("shell", &format!("could not start shell: {error}"));
+                            cx.quit();
+                        }
+                    }
+                });
+            })
+            .expect("schedule shell start");
         }
 
         cx.bind_keys([

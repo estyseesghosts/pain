@@ -172,11 +172,21 @@ scheduler and filesystem):
 | resize storm | 10 Ghostty geometry updates, 9 coalesced OS PTY resizes |
 | bounded images | 100 transmitted images under a 64-byte storage cap stay bounded; max terminal lock 44 us |
 
-The WSLg GUI gate additionally ran `chafa --format kitty` through the real
-window; the gradient image was visible at the terminal origin, proving the
-Geometry -> Ghostty render state -> pixel copy -> GPUI texture -> paint path on
-Linux. The same fixed image, plus placeholders and animation, are covered
-deterministically by `tests/kitty.rs`.
+The WSLg GUI gate additionally ran the real Kitty client `kitten icat`
+(kitty 0.47.1) through the window: a fixed PNG on the Unicode-placeholder path
+and a looping four-frame GIF. The captured window showed the checkerboard image
+on its placeholder cells and successive animation frames in different colors,
+exercising client -> WSL PTY -> Pain -> libghostty-vt render-state placements ->
+GPUI texture -> paint. `kitten` reads pixel geometry from `TIOCGWINSZ`, so Pain
+reports the measured device cell size through `ws_xpixel`/`ws_ypixel` when the
+PTY is created and when the grid changes; a DPI-only change never reaches the
+PTY. XTWINOPS `CSI 14/16/18/19 t` is answered separately by
+`GHOSTTY_TERMINAL_OPT_SIZE`. Placeholder cells are shaped as blanks: the
+virtual placement supplies their pixels, so the fallback font cannot draw tofu
+over or beside the image. `tests/pty.rs` repeats the real
+`kitten icat --unicode-placeholder` gate; `tests/kitty.rs`, `tests/m6.rs` and
+`tests/gpui_render.rs` cover placeholders, animation and the render path
+deterministically.
 
 
 ### Resize

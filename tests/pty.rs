@@ -102,6 +102,8 @@ fn linux_pty_runs_shell_input_resize_and_shutdown() {
     let config = PtyConfig {
         cols: 80,
         rows: 24,
+        cell_width_px: 0,
+        cell_height_px: 0,
         command: ShellCommand::new("/bin/sh"),
     };
     let pty = spawn_pty(&config, Arc::clone(&session)).expect("spawn /bin/sh");
@@ -115,8 +117,8 @@ fn linux_pty_runs_shell_input_resize_and_shutdown() {
 
     // Distinct grid size reaches the PTY; a duplicate is coalesced by the
     // backend and must not disturb the session.
-    pty.resize(100, 30).expect("resize PTY");
-    pty.resize(100, 30).expect("duplicate resize");
+    pty.resize(100, 30, 10, 20).expect("resize PTY");
+    pty.resize(100, 30, 10, 20).expect("duplicate resize");
     session.enqueue_writer(b"stty size\n".to_vec());
     assert!(
         wait_for(&session, "30 100"),
@@ -139,6 +141,8 @@ fn windows_conpty_runs_cmd_input_resize_and_shutdown() {
     let config = PtyConfig {
         cols: 80,
         rows: 24,
+        cell_width_px: 0,
+        cell_height_px: 0,
         command: ShellCommand::new("C:\\Windows\\System32\\cmd.exe"),
     };
     let pty = spawn_pty(&config, Arc::clone(&session)).expect("spawn cmd.exe");
@@ -156,8 +160,8 @@ fn windows_conpty_runs_cmd_input_resize_and_shutdown() {
         snapshot_text(&session)
     );
 
-    pty.resize(100, 30).expect("resize ConPTY");
-    pty.resize(100, 30).expect("duplicate resize");
+    pty.resize(100, 30, 10, 20).expect("resize ConPTY");
+    pty.resize(100, 30, 10, 20).expect("duplicate resize");
 
     pty.shutdown();
 }
@@ -169,6 +173,8 @@ fn windows_conpty_runs_powershell() {
     let config = PtyConfig {
         cols: 80,
         rows: 24,
+        cell_width_px: 0,
+        cell_height_px: 0,
         command: ShellCommand {
             program: "powershell.exe".into(),
             args: vec![
@@ -194,6 +200,8 @@ fn windows_conpty_runs_vim_alternate_screen_and_mouse_mode() {
     let config = PtyConfig {
         cols: 80,
         rows: 24,
+        cell_width_px: 0,
+        cell_height_px: 0,
         command: ShellCommand {
             program: "vim.exe".into(),
             args: vec!["-u".into(), "NONE".into()],
@@ -271,6 +279,8 @@ fn conpty_apc_survives_to_ghostty_graphics() {
     let config = PtyConfig {
         cols: 80,
         rows: 24,
+        cell_width_px: 0,
+        cell_height_px: 0,
         command: ShellCommand {
             program: r"C:\Windows\System32\cmd.exe".into(),
             args: vec![
@@ -308,6 +318,8 @@ fn wsl_client_apc_survives_wsl_pty_and_conpty() {
     let config = PtyConfig {
         cols: 80,
         rows: 24,
+        cell_width_px: 0,
+        cell_height_px: 0,
         command: ShellCommand {
             program: "wsl.exe".into(),
             args: vec!["-e".into(), "bash".into(), "-c".into(), script.into()],
@@ -352,6 +364,8 @@ fn linux_real_kitty_client_image_reaches_ghostty() {
     let config = PtyConfig {
         cols: 80,
         rows: 24,
+        cell_width_px: 0,
+        cell_height_px: 0,
         command: ShellCommand {
             program: "chafa".into(),
             args: vec![
@@ -375,6 +389,74 @@ fn linux_real_kitty_client_image_reaches_ghostty() {
     assert!(
         placed,
         "chafa's Kitty output never produced a placement in Ghostty"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_kitten_unicode_placeholder_reaches_ghostty() {
+    // A real Kitty client using the Unicode-placeholder path, not a
+    // hand-written APC: kitten -> Linux PTY -> Pain -> libghostty-vt.
+    let available = std::process::Command::new("kitten")
+        .args(["icat", "--help"])
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false);
+    if !available {
+        eprintln!("SKIP kitten placeholder gate: kitten is not installed");
+        return;
+    }
+    let session = Arc::new(TerminalSession::new(80, 24, Box::new(NoopWakeup)).expect("session"));
+    session.install_pty_writer().expect("writer");
+    session
+        .apply_layout_geometry(80, 24, 10, 20)
+        .expect("geometry");
+    let path = std::env::temp_dir().join(format!("pain-kitten-{}.png", std::process::id()));
+    let image = image::ImageBuffer::from_pixel(32, 32, image::Rgba([30u8, 200, 90, 255]));
+    image.save(&path).expect("write test PNG");
+    let config = PtyConfig {
+        cols: 80,
+        rows: 24,
+        cell_width_px: 10,
+        cell_height_px: 20,
+        command: ShellCommand {
+            program: "kitten".into(),
+            args: vec![
+                "icat".into(),
+                "--transfer-mode=stream".into(),
+                "--detect-support=no".into(),
+                "--unicode-placeholder".into(),
+                path.to_string_lossy().into_owned(),
+            ],
+        },
+    };
+    let pty = match spawn_pty(&config, Arc::clone(&session)) {
+        Ok(pty) => pty,
+        Err(error) => {
+            let _ = std::fs::remove_file(&path);
+            eprintln!("SKIP kitten placeholder gate: {error}");
+            return;
+        }
+    };
+    let placed = wait_for_any_image(&session);
+    let snapshot = session.render_snapshot().expect("render snapshot");
+    let virtual_placement = snapshot
+        .image_placements
+        .iter()
+        .any(|placement| {
+            placement.kind
+                == pain::terminal::ghostty::ghostty_vt_sys::GHOSTTY_RENDER_STATE_KITTY_PLACEMENT_KIND_VIRTUAL
+        });
+    session.mark_frame_complete().expect("frame complete");
+    pty.shutdown();
+    let _ = std::fs::remove_file(&path);
+    assert!(
+        placed,
+        "kitten's Unicode-placeholder image did not produce a placement"
+    );
+    assert!(
+        virtual_placement,
+        "kitten's U=1 transmission did not produce a virtual placement"
     );
 }
 

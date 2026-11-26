@@ -713,3 +713,49 @@ fn transport_media_policy_is_explicit_and_finite() {
     assert!(limit > 0);
     assert!(file);
 }
+
+/// A real Kitty client such as `kitten icat` refuses to draw until the
+/// terminal answers XTWINOPS with device-pixel geometry. Pain's callback must
+/// report the same cell pixels Ghostty was given, and a DPI-only update must
+/// change them without touching the PTY grid.
+#[test]
+fn size_reports_use_device_cell_pixels_and_follow_geometry() {
+    let session = session(80, 24);
+    session.install_pty_writer().expect("writer bridge");
+
+    session.write_vt(b"\x1b[14t\x1b[16t\x1b[18t\x1b[19t");
+    let replies: Vec<u8> = session.drain_writer(8).concat();
+    let text = String::from_utf8_lossy(&replies);
+    assert!(
+        text.contains("\x1b[4;480;800t"),
+        "CSI 14 t must report the text area in pixels, got {text:?}"
+    );
+    assert!(
+        text.contains("\x1b[6;20;10t"),
+        "CSI 16 t must report device cell pixels, got {text:?}"
+    );
+    assert!(
+        text.contains("\x1b[8;24;80t"),
+        "CSI 18 t must report the grid in cells, got {text:?}"
+    );
+    assert!(
+        text.contains("\x1b[9;24;80t"),
+        "CSI 19 t must report the screen in cells, got {text:?}"
+    );
+
+    // 150 percent HiDPI: same grid, different device cell pixels.
+    session
+        .apply_layout_geometry(80, 24, 15, 30)
+        .expect("HiDPI geometry");
+    session.write_vt(b"\x1b[14t\x1b[16t");
+    let replies: Vec<u8> = session.drain_writer(4).concat();
+    let text = String::from_utf8_lossy(&replies);
+    assert!(
+        text.contains("\x1b[4;720;1200t"),
+        "HiDPI text area must use device pixels, got {text:?}"
+    );
+    assert!(
+        text.contains("\x1b[6;30;15t"),
+        "HiDPI cell pixels must be device pixels, got {text:?}"
+    );
+}

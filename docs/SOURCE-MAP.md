@@ -50,11 +50,14 @@ Windows installs `lib/ghostty-vt-static.lib` (plus `bin/ghostty-vt.dll` and
 `lib/libghostty-vt.a` and `lib/libghostty-vt.so*`. The static link also needs
 `ntdll`/`kernel32` on Windows and `pthread`/`m`/`dl` on Linux. Zig emits
 `call __chkstk; sub %rax, %rsp`, i.e. a probe that must not move RSP and must
-preserve RAX and the argument registers. MinGW libgcc's `___chkstk` moves RSP
-and `___chkstk_ms` clobbers RCX, so Windows links the small local probe in
-`crates/ghostty-vt-sys/chkstk.S` instead. Set `ZIG` to choose a different
-compiler or `GHOSTTY_VT_SOURCE` to point at another pinned source tree (its
-`PIN.txt` must still match).
+preserve RAX and the argument registers. Rust and GCC call `___chkstk_ms` and
+subtract RAX themselves. Windows links the local probes in
+`crates/ghostty-vt-sys/chkstk.S`: separate `__chkstk` and `___chkstk_ms`
+entry points both probe from the current stack downward, so a large frame in a
+thread with a small committed stack grows the stack instead of touching an
+unmapped page. Set `ZIG` to choose a different compiler or
+`GHOSTTY_VT_SOURCE` to point at another pinned source tree (its `PIN.txt` must
+still match).
 
 Cross-building the library from Windows for Linux is possible with
 `-Dtarget=x86_64-linux-gnu`; the static `libghostty-vt.a` installs correctly.
@@ -358,17 +361,24 @@ Use for bracketed paste and unsafe-paste policy. Do not raw-write clipboard text
 - [`include/ghostty/vt/sys.h`](https://github.com/ghostty-org/ghostty/blob/573c4a21e02311ae87844af26b6a7a179f82858e/include/ghostty/vt/sys.h)
   - process-global `decode_png` callback and `ghostty_alloc`.
 - [`include/ghostty/vt/terminal.h`](https://github.com/ghostty-org/ghostty/blob/573c4a21e02311ae87844af26b6a7a179f82858e/include/ghostty/vt/terminal.h)
-  - image storage cap, APC limits, temp/shared-memory/file media.
+  - image storage cap, APC limits, temp/shared-memory/file media;
+  - `GHOSTTY_TERMINAL_OPT_SIZE` (`GhosttyTerminalSizeFn`).
+- [`include/ghostty/vt/size_report.h`](https://github.com/ghostty-org/ghostty/blob/573c4a21e02311ae87844af26b6a7a179f82858e/include/ghostty/vt/size_report.h)
+  - `GhosttySizeReportSize` and XTWINOPS `CSI 14/16/18/19 t` formats.
 - Vendored execution evidence:
   - `vendor/ghostty-vt/src/terminal/kitty/graphics_exec.zig` (data/chunk/place/policy);
   - `vendor/ghostty-vt/src/terminal/kitty/graphics_storage.zig` (generations, clipping, relative/virtual placements, animation);
   - `vendor/ghostty-vt/src/terminal/kitty/graphics_unicode.zig` (placeholder cells).
 - Pain integration anchors:
-  - `src/terminal/ghostty.rs` — FFI wrappers, PNG decoder, placement cache, Kitty policy;
-  - `src/terminal/session.rs` — batched pixel copy, animation clock, counters;
+  - `src/terminal/ghostty.rs` — FFI wrappers, PNG decoder, placement cache, Kitty policy, size-report callback;
+  - `src/terminal/geometry.rs` — device cell pixels and blank shaping for U+10EEEE placeholder cells;
+  - `src/terminal/session.rs` — batched pixel copy, animation clock, counters, geometry-to-PTY handoff;
   - `src/terminal/images.rs` — BGRA conversion, texture cache, projection/clipping;
   - `src/terminal/render.rs` — layer paint order and epoch timer;
-  - `tests/kitty.rs` and `tests/m6.rs` — protocol matrix and invariants.
+  - `src/platform/linux.rs` — `TIOCSWINSZ` `ws_xpixel`/`ws_ypixel` reporting at creation and grid changes; DPI-only changes never reach it;
+  - `tests/kitty.rs` and `tests/m6.rs` — protocol matrix and invariants;
+  - `tests/gpui_render.rs` — real GPUI window render gates (crop, alpha, layers, negative rows, HiDPI, animation);
+  - `tests/pty.rs` — bundled-ConPTY/WSL APC gates and the real `kitten icat` Unicode-placeholder gate.
 
 ### Bundled ConPTY provenance
 

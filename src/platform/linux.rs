@@ -14,21 +14,29 @@ use libc::{c_int, pid_t};
 use super::{terminal_environment, PlatformPty, PtyConfig, PtyError, PtyResizeMailbox};
 use crate::terminal::session::TerminalSession;
 
-/// `TIOCSWINSZ` payload derived from the terminal grid. Pixel dimensions are
-/// deliberately zero: cell metrics live in Ghostty/GPUI, not in this backend.
+/// `TIOCSWINSZ` payload derived from the terminal grid. The pixel fields stay
+/// zero until the renderer has measured a cell; they are carried only when the
+/// grid itself changes, so a DPI-only update never reaches this backend.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct GridSize {
     cols: u16,
     rows: u16,
+    cell_width_px: u32,
+    cell_height_px: u32,
 }
 
 #[must_use]
 fn winsize_for(size: GridSize) -> libc::winsize {
+    let pixels = |cells: u16, cell: u32| -> u16 {
+        u32::from(cells)
+            .saturating_mul(cell.max(1))
+            .min(u32::from(u16::MAX)) as u16
+    };
     libc::winsize {
         ws_row: size.rows,
         ws_col: size.cols,
-        ws_xpixel: 0,
-        ws_ypixel: 0,
+        ws_xpixel: pixels(size.cols, size.cell_width_px),
+        ws_ypixel: pixels(size.rows, size.cell_height_px),
     }
 }
 
@@ -143,6 +151,8 @@ impl LinuxPty {
         let initial = GridSize {
             cols: config.cols.max(1),
             rows: config.rows.max(1),
+            cell_width_px: config.cell_width_px,
+            cell_height_px: config.cell_height_px,
         };
         // SAFETY: openpty writes two valid fds into our locals; all pointers
         // are either valid or NULL with the documented meaning.
@@ -233,24 +243,29 @@ impl LinuxPty {
         let size = Arc::new(Mutex::new(initial));
         let resize_master = Arc::clone(&master);
         let resize_size = Arc::clone(&size);
-        let resize_mailbox = Arc::new(PtyResizeMailbox::new(Arc::new(move |cols, rows| {
-            let next = GridSize {
-                cols: cols.max(1),
-                rows: rows.max(1),
-            };
-            // SAFETY: the winsize value is POD and the master fd is alive until
-            // shutdown joins this worker.
-            let result =
-                unsafe { libc::ioctl(resize_master.raw(), libc::TIOCSWINSZ, &winsize_for(next)) };
-            if result != 0 {
-                crate::log::error(
-                    "resize",
-                    &format!("TIOCSWINSZ failed: {}", io::Error::last_os_error()),
-                );
-                return;
-            }
-            *resize_size.lock().expect("PTY size mutex poisoned") = next;
-        })));
+        let resize_mailbox = Arc::new(PtyResizeMailbox::new(Arc::new(
+            move |cols, rows, cell_width_px, cell_height_px| {
+                let next = GridSize {
+                    cols: cols.max(1),
+                    rows: rows.max(1),
+                    cell_width_px,
+                    cell_height_px,
+                };
+                // SAFETY: the winsize value is POD and the master fd is alive until
+                // shutdown joins this worker.
+                let result = unsafe {
+                    libc::ioctl(resize_master.raw(), libc::TIOCSWINSZ, &winsize_for(next))
+                };
+                if result != 0 {
+                    crate::log::error(
+                        "resize",
+                        &format!("TIOCSWINSZ failed: {}", io::Error::last_os_error()),
+                    );
+                    return;
+                }
+                *resize_size.lock().expect("PTY size mutex poisoned") = next;
+            },
+        )));
         Ok(Self {
             _master: master,
             child: child.id() as pid_t,
@@ -330,9 +345,16 @@ fn start_threads(
 }
 
 impl PlatformPty for LinuxPty {
-    fn resize(&self, cols: u16, rows: u16) -> Result<(), PtyError> {
+    fn resize(
+        &self,
+        cols: u16,
+        rows: u16,
+        cell_width_px: u32,
+        cell_height_px: u32,
+    ) -> Result<(), PtyError> {
         // TIOCSWINSZ runs on the coalescing worker, never on the UI thread.
-        self.resize_mailbox.request(cols, rows);
+        self.resize_mailbox
+            .request(cols, rows, cell_width_px, cell_height_px);
         Ok(())
     }
 
@@ -370,15 +392,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn winsize_uses_grid_dimensions_only() {
+    fn winsize_reports_grid_and_device_pixels() {
         let size = winsize_for(GridSize {
             cols: 132,
             rows: 43,
+            cell_width_px: 10,
+            cell_height_px: 20,
         });
         assert_eq!(size.ws_col, 132);
         assert_eq!(size.ws_row, 43);
-        assert_eq!(size.ws_xpixel, 0);
-        assert_eq!(size.ws_ypixel, 0);
+        assert_eq!(size.ws_xpixel, 1320);
+        assert_eq!(size.ws_ypixel, 860);
     }
 
     #[test]

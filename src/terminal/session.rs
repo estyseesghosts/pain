@@ -13,7 +13,7 @@ use std::time::Instant;
 use crate::terminal::ghostty::{
     ghostty_vt_sys as sys, CallbackRegistration, GhosttyError, GhosttyRenderState, GhosttyTerminal,
     KeyEncoder, KeyEvent, KittyConfig, KittyImagePixels, KittyImageRead, MouseEncoder, MouseEvent,
-    RenderSnapshot, SelectionGesture,
+    RenderSnapshot, SelectionGesture, SizeReportState,
 };
 use crate::terminal::writer::WriterQueue;
 
@@ -35,7 +35,7 @@ impl WakeupSink for NoopWakeup {
 }
 
 /// Platform PTY resize hook, installed by the app when a real PTY exists.
-type PtyResize = Arc<dyn Fn(u16, u16) + Send + Sync>;
+type PtyResize = Arc<dyn Fn(u16, u16, u32, u32) + Send + Sync>;
 
 /// Result of one viewport operation, read while the terminal lock is held.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -355,6 +355,9 @@ pub struct TerminalSession {
     /// reset on resize, alternate-screen switches or pause.
     kitty_clock: Instant,
     kitty_config: KittyConfig,
+    /// Geometry shared with Ghostty's size-report callback. It must be
+    /// lock-free because the callback runs inside the VT parser.
+    size_report: Arc<SizeReportState>,
 }
 
 impl TerminalSession {
@@ -373,6 +376,7 @@ impl TerminalSession {
         config: SessionConfig,
         wakeup: Box<dyn WakeupSink>,
     ) -> Result<Self, GhosttyError> {
+        let size_report = Arc::new(SizeReportState::new(config.cols, config.rows));
         let mut terminal = GhosttyTerminal::new(config.cols, config.rows)?;
         let kitty = config.kitty.clone().validated();
         // Policy is applied immediately after creation, on the one terminal
@@ -405,6 +409,7 @@ impl TerminalSession {
             counters: Arc::new(Counters::default()),
             kitty_clock: Instant::now(),
             kitty_config: kitty,
+            size_report,
         })
     }
 
@@ -698,6 +703,15 @@ impl TerminalSession {
             terminal_changed: true,
             grid_changed: previous.cols != cols || previous.rows != rows,
         };
+        // Update the size-report callback first: `ghostty_terminal_resize`
+        // itself may emit a mode-2048 report, and that report must describe the
+        // new geometry. Revert if Ghostty rejects the resize.
+        self.size_report.update(
+            requested.cols,
+            requested.rows,
+            requested.cell_width_px,
+            requested.cell_height_px,
+        );
         {
             let mut terminal = self.terminal.lock().expect("terminal mutex poisoned");
             if let Err(error) = terminal.resize(
@@ -707,6 +721,12 @@ impl TerminalSession {
                 requested.cell_height_px,
             ) {
                 // Never keep a "last applied" geometry that Ghostty rejected.
+                self.size_report.update(
+                    previous.cols,
+                    previous.rows,
+                    previous.cell_width_px,
+                    previous.cell_height_px,
+                );
                 *self.geometry.lock().expect("geometry mutex poisoned") = previous;
                 return Err(error);
             }
@@ -715,7 +735,9 @@ impl TerminalSession {
         if outcome.grid_changed {
             Counters::add(&self.counters.grid_size_changes, 1);
             // The platform PTY sees only cell counts, never pixels, and only
-            // for distinct grids. The callback runs with no terminal lock held.
+            // for distinct grids. The pixel fields travel with that grid change
+            // so TIOCGWINSZ can report them; a DPI-only update never reaches
+            // this path. The callback runs with no terminal lock held.
             Counters::add(&self.counters.pty_grid_resize_requests, 1);
             if let Some(resize) = self
                 .pty_resize
@@ -723,7 +745,12 @@ impl TerminalSession {
                 .expect("pty_resize poisoned")
                 .as_ref()
             {
-                resize(cols, rows);
+                resize(
+                    cols,
+                    rows,
+                    requested.cell_width_px,
+                    requested.cell_height_px,
+                );
             }
         }
         Ok(outcome)
@@ -752,7 +779,7 @@ impl TerminalSession {
     }
 
     /// Install the platform resize hook. Called once after PTY creation.
-    pub fn set_pty_resize(&self, resize: Arc<dyn Fn(u16, u16) + Send + Sync>) {
+    pub fn set_pty_resize(&self, resize: Arc<dyn Fn(u16, u16, u32, u32) + Send + Sync>) {
         *self.pty_resize.lock().expect("pty_resize poisoned") = Some(resize);
     }
 
@@ -845,7 +872,11 @@ impl TerminalSession {
     ) -> Result<(), GhosttyError> {
         let registration = {
             let mut terminal = self.terminal.lock().expect("terminal mutex poisoned");
-            terminal.install_callbacks(Arc::clone(&self.writer), on_title)?
+            terminal.install_callbacks(
+                Arc::clone(&self.writer),
+                on_title,
+                Arc::clone(&self.size_report),
+            )?
         };
         *self.callbacks.lock().expect("callbacks mutex poisoned") = Some(registration);
         Ok(())
@@ -1272,7 +1303,7 @@ mod tests {
         let session = TerminalSession::new(80, 24, Box::new(NoopWakeup)).expect("session created");
         let pty_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let seen = Arc::clone(&pty_calls);
-        session.set_pty_resize(Arc::new(move |_, _| {
+        session.set_pty_resize(Arc::new(move |_, _, _, _| {
             seen.fetch_add(1, Ordering::SeqCst);
         }));
 

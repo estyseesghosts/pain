@@ -542,22 +542,24 @@ impl WindowsPty {
         let size = Arc::new(Mutex::new((config.cols.max(1), config.rows.max(1))));
         let resize_size = Arc::clone(&size);
         let resize_conpty = Arc::clone(&conpty);
-        let resize_mailbox = Arc::new(PtyResizeMailbox::new(Arc::new(move |cols, rows| {
-            let coord = COORD {
-                X: cols as i16,
-                Y: rows as i16,
-            };
-            // SAFETY: the ConPTY handle stays alive until shutdown joins this
-            // worker, and the COORD is POD. The entry point is process-global.
-            let result = unsafe { (conpty_api().resize)(resize_conpty.raw, coord) };
-            match result.ok() {
-                Ok(()) => *resize_size.lock().expect("PTY size mutex poisoned") = (cols, rows),
-                Err(error) => crate::log::error(
-                    "resize",
-                    &format!("ResizePseudoConsole failed: {}", error.message()),
-                ),
-            }
-        })));
+        let resize_mailbox = Arc::new(PtyResizeMailbox::new(Arc::new(
+            move |cols, rows, _cell_width_px, _cell_height_px| {
+                let coord = COORD {
+                    X: cols as i16,
+                    Y: rows as i16,
+                };
+                // SAFETY: the ConPTY handle stays alive until shutdown joins this
+                // worker, and the COORD is POD. The entry point is process-global.
+                let result = unsafe { (conpty_api().resize)(resize_conpty.raw, coord) };
+                match result.ok() {
+                    Ok(()) => *resize_size.lock().expect("PTY size mutex poisoned") = (cols, rows),
+                    Err(error) => crate::log::error(
+                        "resize",
+                        &format!("ResizePseudoConsole failed: {}", error.message()),
+                    ),
+                }
+            },
+        )));
         Ok(Self {
             _conpty: conpty,
             _input_read: input_read,
@@ -699,10 +701,17 @@ fn start_threads(
 }
 
 impl PlatformPty for WindowsPty {
-    fn resize(&self, cols: u16, rows: u16) -> Result<(), PtyError> {
+    fn resize(
+        &self,
+        cols: u16,
+        rows: u16,
+        _cell_width_px: u32,
+        _cell_height_px: u32,
+    ) -> Result<(), PtyError> {
+        // ConPTY has no pixel winsize; only the cell grid is meaningful.
         // Never call ResizePseudoConsole on the GPUI/session thread: only the
         // latest requested grid is kept by the worker.
-        self.resize_mailbox.request(cols, rows);
+        self.resize_mailbox.request(cols, rows, 0, 0);
         Ok(())
     }
 

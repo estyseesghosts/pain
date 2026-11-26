@@ -68,6 +68,20 @@ Run the manual half on each platform before calling a build shippable.
 - OSC titles A/B/C arriving before a UI frame end with C applied to both the
   native title and the drawn Silvestris title band.
 
+## Kitty graphics (both platforms)
+
+- Windows: run the automated `conpty_apc_survives_to_ghostty_graphics` and
+  `wsl_client_apc_survives_wsl_pty_and_conpty` tests. They prove a raw APC and a
+  Linux-client APC survive the bundled `conpty.dll` and the WSL -> ConPTY path.
+  Removing `conpty.dll` must log the transport as Kitty-graphics-degraded; do
+  not claim graphics support in that configuration.
+- Linux/WSLg with `kitten` installed: inside pain run
+  `kitten icat --transfer-mode=stream --detect-support=no --unicode-placeholder image.png`
+  and `kitten icat --loop=-1 anim.gif`. The placeholder image must appear on its
+  cursor cells (not "does not support reporting screen sizes in pixels"), and
+  the GIF must animate. `tests/pty.rs` automates the placeholder case; keep the
+  visual animation check manual.
+
 ## Windows only
 
 - Launch `pain-release.exe` from Explorer: no dangling console.

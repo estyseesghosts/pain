@@ -304,9 +304,20 @@ pub fn display_columns(text: &str) -> u16 {
 
 /// Batch one row into text runs. Empty cells become spaces inside a run so
 /// GPUI's advance keeps later glyphs aligned, but a row of only empty cells
-/// produces no runs at all and is never shaped.
+/// produces no runs at all and is never shaped. Kitty Unicode-placeholder
+/// cells (U+10EEEE plus combining marks) are also shaped as blanks: the image
+/// placement supplies their pixels, and the fallback font would otherwise draw
+/// tofu over or beside the image.
 #[must_use]
 pub fn batch_row(cells: &[Cell]) -> Vec<TextRun> {
+    fn shaped_text(cell: &Cell) -> &str {
+        if cell.text.is_empty() || cell.text.starts_with('\u{10EEEE}') {
+            " "
+        } else {
+            &cell.text
+        }
+    }
+
     let mut runs: Vec<TextRun> = Vec::new();
     let mut col = 0usize;
     while col < cells.len() {
@@ -314,11 +325,7 @@ pub fn batch_row(cells: &[Cell]) -> Vec<TextRun> {
         // A wide tail carries no grapheme of its own and is always absorbed
         // by the preceding wide cell in the inner loop below.
         let style = StyleKey::from_cell(cell);
-        let mut text = if cell.text.is_empty() {
-            String::from(" ")
-        } else {
-            cell.text.clone()
-        };
+        let mut text = shaped_text(cell).to_owned();
         let mut span = 1u16;
         let mut next = col + 1;
         while next < cells.len() {
@@ -335,11 +342,7 @@ pub fn batch_row(cells: &[Cell]) -> Vec<TextRun> {
             if StyleKey::from_cell(candidate) != style {
                 break;
             }
-            text.push_str(if candidate.text.is_empty() {
-                " "
-            } else {
-                &candidate.text
-            });
+            text.push_str(shaped_text(candidate));
             span += 1;
             next += 1;
         }
@@ -711,5 +714,21 @@ mod tests {
         let metrics = CellMetrics::new(0.4, 0.4);
         let geometry = TerminalGeometry::new((0.0, 0.0), (10.0, 10.0), &metrics, 0.25);
         assert_eq!(geometry.cell_device_pixels(), (1, 1));
+    }
+
+    #[test]
+    fn kitty_placeholder_cells_shape_as_blanks() {
+        // U+10EEEE + combining row/column marks select an image placement.
+        // The image supplies the pixels; shaping the placeholder grapheme would
+        // draw fallback tofu over or beside it.
+        let cells = vec![
+            cell("A", false, None),
+            cell("\u{10EEEE}\u{0305}\u{030D}", false, None),
+            cell("B", false, None),
+        ];
+        let runs = batch_row(&cells);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].text, "A B");
+        assert_eq!(runs[0].cells, 3);
     }
 }

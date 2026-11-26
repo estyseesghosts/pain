@@ -38,6 +38,10 @@ impl ShellCommand {
 pub struct PtyConfig {
     pub cols: u16,
     pub rows: u16,
+    /// Device-pixel cell size. `TIOCSWINSZ` carries these as `ws_xpixel` and
+    /// `ws_ypixel` so Kitty clients can read the terminal's pixel geometry.
+    pub cell_width_px: u32,
+    pub cell_height_px: u32,
     pub command: ShellCommand,
 }
 
@@ -81,7 +85,7 @@ pub struct PtyResizeCounters {
 /// Nothing here touches Ghostty geometry, which must stay synchronous with the
 /// frame.
 struct PtyResizeState {
-    pending: Mutex<Option<(u16, u16)>>,
+    pending: Mutex<Option<(u16, u16, u32, u32)>>,
     wake: Condvar,
     stopping: AtomicBool,
 }
@@ -95,7 +99,7 @@ pub struct PtyResizeMailbox {
 
 impl PtyResizeMailbox {
     #[must_use]
-    pub fn new(apply: Arc<dyn Fn(u16, u16) + Send + Sync>) -> Self {
+    pub fn new(apply: Arc<dyn Fn(u16, u16, u32, u32) + Send + Sync>) -> Self {
         let state = Arc::new(PtyResizeState {
             pending: Mutex::new(None),
             wake: Condvar::new(),
@@ -108,7 +112,7 @@ impl PtyResizeMailbox {
         let worker = std::thread::Builder::new()
             .name("pain-pty-resize".into())
             .spawn(move || {
-                let mut last_applied: Option<(u16, u16)> = None;
+                let mut last_applied: Option<(u16, u16, u32, u32)> = None;
                 loop {
                     let mut pending = worker_state
                         .pending
@@ -129,7 +133,7 @@ impl PtyResizeMailbox {
                     if last_applied == Some(size) {
                         continue;
                     }
-                    apply(size.0, size.1);
+                    apply(size.0, size.1, size.2, size.3);
                     last_applied = Some(size);
                     worker_applied.fetch_add(1, Ordering::Relaxed);
                 }
@@ -145,11 +149,11 @@ impl PtyResizeMailbox {
 
     /// Update only the pending size and signal the worker. Never blocks on the
     /// OS PTY call, so this is safe to invoke from the UI/session path.
-    pub fn request(&self, cols: u16, rows: u16) {
+    pub fn request(&self, cols: u16, rows: u16, cell_width_px: u32, cell_height_px: u32) {
         if self.state.stopping.load(Ordering::Acquire) {
             return;
         }
-        let size = (cols.max(1), rows.max(1));
+        let size = (cols.max(1), rows.max(1), cell_width_px, cell_height_px);
         self.requested.fetch_add(1, Ordering::Relaxed);
         let mut pending = self
             .state
@@ -206,8 +210,15 @@ impl PtyResizeMailbox {
 /// Owns one live PTY/child and its worker threads. `shutdown` is the only
 /// blocking call and is always made off the GPUI foreground thread.
 pub trait PlatformPty: Send {
-    /// Request a grid resize. The implementation coalesces duplicate sizes.
-    fn resize(&self, cols: u16, rows: u16) -> Result<(), PtyError>;
+    /// Request a grid resize. The implementation coalesces duplicate sizes and
+    /// carries the current device-pixel cell size into the OS PTY winsize.
+    fn resize(
+        &self,
+        cols: u16,
+        rows: u16,
+        cell_width_px: u32,
+        cell_height_px: u32,
+    ) -> Result<(), PtyError>;
     #[must_use]
     fn process_exited(&self) -> bool;
     /// Close the PTY, unblock workers, reap the child and join threads.
@@ -343,16 +354,16 @@ mod tests {
         // otherwise-correct mailbox look like it failed to coalesce.
         let release = Arc::new(AtomicBool::new(false));
         let worker_release = Arc::clone(&release);
-        let mailbox = PtyResizeMailbox::new(Arc::new(move |cols, rows| {
+        let mailbox = PtyResizeMailbox::new(Arc::new(move |cols, rows, _cw, _ch| {
             while !worker_release.load(Ordering::Acquire) {
                 std::thread::yield_now();
             }
             seen.lock().expect("seen poisoned").push((cols, rows));
         }));
         for cols in 80..200u16 {
-            mailbox.request(cols, 24);
+            mailbox.request(cols, 24, 10, 20);
         }
-        mailbox.request(200, 24);
+        mailbox.request(200, 24, 10, 20);
         release.store(true, Ordering::Release);
         let deadline = Instant::now() + Duration::from_secs(5);
         while Instant::now() < deadline && mailbox.counters().applied == 0 {

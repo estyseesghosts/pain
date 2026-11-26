@@ -431,6 +431,17 @@ pub type GhosttySysDecodePngFn = unsafe extern "C" fn(
     out: *mut GhosttySysImage,
 ) -> bool;
 
+/// Frozen C layout from `ghostty/vt/size_report.h`. The library zeroes it
+/// before calling `GHOSTTY_TERMINAL_OPT_SIZE` and encodes the reply from it.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GhosttySizeReportSize {
+    pub rows: u16,
+    pub columns: u16,
+    pub cell_width: u32,
+    pub cell_height: u32,
+}
+
 pub type GhosttyWriterFn = unsafe extern "C" fn(*mut c_void, *const u8, usize) -> bool;
 pub type GhosttyMimeReaderFn =
     unsafe extern "C" fn(*mut c_void, GhosttyString, GhosttyWriter) -> bool;
@@ -1111,6 +1122,7 @@ mod tests {
         assert_eq!(size_of::<GhosttyTerminalScrollViewport>(), 24);
         assert_eq!(size_of::<GhosttyTerminalScrollbar>(), 24);
         assert_eq!(size_of::<GhosttySysImage>(), 24);
+        assert_eq!(size_of::<GhosttySizeReportSize>(), 12);
         assert_eq!(std::mem::align_of::<GhosttySysImage>(), 8);
     }
 

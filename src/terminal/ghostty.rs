@@ -14,7 +14,7 @@ use std::marker::PhantomData;
 use std::mem::MaybeUninit;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU16, AtomicU32, AtomicU8, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use ghostty_vt_sys as sys;
@@ -1311,11 +1311,13 @@ impl GhosttyTerminal {
         &mut self,
         writer: Arc<WriterQueue>,
         on_title: Box<dyn Fn(String) + Send + Sync>,
+        size_report: Arc<SizeReportState>,
     ) -> Result<CallbackRegistration, GhosttyError> {
         let userdata = Arc::into_raw(Arc::new(CallbackData {
             writer,
             on_title,
             color_scheme: Arc::clone(&self.color_scheme),
+            size_report,
         })) as *mut c_void;
         // SAFETY: `userdata` is a strong Arc reference kept alive by the token
         // and by the terminal option until both are torn down.
@@ -1341,6 +1343,10 @@ impl GhosttyTerminal {
             (
                 sys::GHOSTTY_TERMINAL_OPT_COLOR_SCHEME,
                 color_scheme_callback as *const c_void,
+            ),
+            (
+                sys::GHOSTTY_TERMINAL_OPT_SIZE,
+                size_report_callback as *const c_void,
             ),
         ] {
             let result = unsafe { sys::ghostty_terminal_set(self.as_raw(), option, callback) };
@@ -1371,12 +1377,74 @@ impl Drop for FormatterGuard {
     }
 }
 
+/// Live terminal geometry shared with Ghostty's size-report callback.
+///
+/// The callback runs while the VT parser is inside `ghostty_terminal_write`,
+/// so it must not take a Rust lock. Plain atomics are enough: Ghostty only
+/// needs the last values applied by the renderer.
+#[derive(Debug, Default)]
+pub struct SizeReportState {
+    columns: AtomicU16,
+    rows: AtomicU16,
+    cell_width: AtomicU32,
+    cell_height: AtomicU32,
+}
+
+impl SizeReportState {
+    #[must_use]
+    pub fn new(columns: u16, rows: u16) -> Self {
+        Self {
+            columns: AtomicU16::new(columns),
+            rows: AtomicU16::new(rows),
+            cell_width: AtomicU32::new(0),
+            cell_height: AtomicU32::new(0),
+        }
+    }
+
+    pub fn update(&self, columns: u16, rows: u16, cell_width: u32, cell_height: u32) {
+        self.columns.store(columns, Ordering::Release);
+        self.rows.store(rows, Ordering::Release);
+        self.cell_width.store(cell_width, Ordering::Release);
+        self.cell_height.store(cell_height, Ordering::Release);
+    }
+}
+
 /// Data shared with Ghostty's effect callbacks through `OPT_USERDATA`.
 /// Callbacks must stay non-blocking and must not re-enter terminal writes.
 struct CallbackData {
     writer: Arc<WriterQueue>,
     on_title: Box<dyn Fn(String) + Send + Sync>,
     color_scheme: Arc<AtomicU8>,
+    size_report: Arc<SizeReportState>,
+}
+
+/// `GhosttyTerminalSizeFn`: answer XTWINOPS size queries (CSI 14/16/18/19 t)
+/// and mode-2048 reports from the geometry measured in prepaint. Cell sizes are
+/// device pixels, exactly like Ghostty's `PIXEL_WIDTH/HEIGHT` option.
+unsafe extern "C" fn size_report_callback(
+    _terminal: sys::GhosttyTerminal,
+    userdata: *mut c_void,
+    out_size: *mut sys::GhosttySizeReportSize,
+) -> bool {
+    if userdata.is_null() || out_size.is_null() {
+        return false;
+    }
+    // SAFETY: same ownership invariant as `write_pty_callback`.
+    let callbacks = unsafe { &*(userdata.cast::<CallbackData>()) };
+    let columns = callbacks.size_report.columns.load(Ordering::Acquire);
+    let rows = callbacks.size_report.rows.load(Ordering::Acquire);
+    if columns == 0 || rows == 0 {
+        return false;
+    }
+    let size = sys::GhosttySizeReportSize {
+        rows,
+        columns,
+        cell_width: callbacks.size_report.cell_width.load(Ordering::Acquire),
+        cell_height: callbacks.size_report.cell_height.load(Ordering::Acquire),
+    };
+    // SAFETY: `out_size` is the typed out-parameter Ghostty supplies.
+    unsafe { *out_size = size };
+    true
 }
 
 /// `GhosttyTerminalColorSchemeFn`: answer `CSI ? 996 n` with the palette's

@@ -85,6 +85,9 @@ optional = true
 default = []
 # Enable only with the M1 window renderer; pulls in Silvestris and its GPUI.
 shell = ["dep:silvestris", "dep:gpui", "dep:gpui_platform", "dep:async-channel"]
+# Opt-in GPUI window/render tests. Adds GPUI's headless test platform; it is
+# not part of the normal shell binary.
+gpui-tests = ["shell", "gpui/test-support"]
 
 [profile.dev]
 debug = "line-tables-only"
