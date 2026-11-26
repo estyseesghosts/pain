@@ -69,10 +69,11 @@ with no `.git` gets the obviously synthetic `v00-00-unknown`.
 `crates/ghostty-vt-sys/build.rs` passes Ghostty's pinned app version to Zig
 explicitly, so Ghostty's own `vX.Y.Z` tag validation never inspects pain's tag.
 
-The Windows release target is the GNU host (Zig builds the pinned static
-`libghostty-vt`, MinGW `windres` embeds the icon). GitHub CI installs the same
-toolchain through `.github/actions/setup` and builds with
-`--target x86_64-pc-windows-gnu`.
+Zig builds the pinned static `libghostty-vt` on both Windows toolchains. The
+GNU host uses MinGW `windres` for the icon; GitHub's Windows runner stays on
+the native MSVC host because GPUI's `windows-manifest` feature emits an MSVC
+import library there, and `build.rs` finds `rc.exe` through `embed-resource`.
+Both paths embed the same icon resource.
 
 ## Local and GitHub CI
 

@@ -90,6 +90,12 @@ fn main() {
 
     match env::var("CARGO_CFG_TARGET_OS").as_deref() {
         Ok("windows") => {
+            // The MSVC CRT provides __chkstk, and linking a GNU-built compat
+            // archive into an MSVC binary produces a mixed-format link.
+            if env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+                println!("cargo:rustc-link-lib=static=ghostty-vt-static");
+                return;
+            }
             // When rustc emits an rlib it resolves `-l static=` using the
             // `lib<name>.a` spelling even on windows-gnu, while Zig installs
             // `ghostty-vt-static.lib`. Provide that alias name for metadata.

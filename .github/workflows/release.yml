@@ -36,7 +36,7 @@ jobs:
             binary: target/release/pain
             asset: pain-linux-x64
           - os: windows-latest
-            binary: target/x86_64-pc-windows-gnu/release/pain.exe
+            binary: target/release/pain.exe
             asset: pain-windows-x64.exe
     runs-on: ${{ matrix.os }}
     steps:

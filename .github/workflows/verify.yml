@@ -33,7 +33,7 @@ jobs:
       - uses: ./.github/actions/setup
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all -- --check
-      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo clippy --workspace --all-targets --features shell --locked -- -D warnings
       - run: cargo test --workspace --all-targets --features shell --locked
       - name: Release build
         run: cargo build --release --features shell --locked
@@ -42,7 +42,7 @@ jobs:
         run: |
           binary="target/release/pain"
           if [[ "$RUNNER_OS" == "Windows" ]]; then
-            binary="target/x86_64-pc-windows-gnu/release/pain.exe"
+            binary="target/release/pain.exe"
           fi
           "$binary" --version
           "$binary" --help > /dev/null

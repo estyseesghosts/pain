@@ -31,14 +31,11 @@ runs:
         echo "ZIG=$zig_dir/zig" >> "$GITHUB_ENV"
         echo "$zig_dir" >> "$GITHUB_PATH"
 
-    - name: Install MSYS2 MinGW toolchain
-      if: runner.os == 'Windows'
-      uses: msys2/setup-msys2@v2
-      with:
-        msystem: MINGW64
-        install: mingw-w64-x86_64-gcc mingw-w64-x86_64-binutils
-
-    - name: Install Zig and configure the GNU target on Windows
+    # GitHub's Windows runner uses the MSVC host. That is the ABI GPUI's
+    # windows-manifest resource import library is built for, so stay on the
+    # default target. build.rs resolves rc.exe from the Windows SDK for the
+    # application icon, the same way Chaus does.
+    - name: Install Zig on Windows
       if: runner.os == 'Windows'
       shell: pwsh
       run: |
@@ -49,16 +46,3 @@ runs:
         $zigDir = Join-Path $env:RUNNER_TEMP "zig-x86_64-windows-$version"
         "ZIG=$(Join-Path $zigDir 'zig.exe')" >> $env:GITHUB_ENV
         $zigDir >> $env:GITHUB_PATH
-
-        # Pain's Windows release target is the GNU host; build.rs compiles the
-        # icon with windres and links the Zig-built static library.
-        $shim = Join-Path $env:RUNNER_TEMP 'pain-windres'
-        New-Item -ItemType Directory -Force $shim | Out-Null
-        @'
-        @echo off
-        "C:\msys64\mingw64\bin\x86_64-w64-mingw32-windres.exe" %*
-        '@ | Set-Content -LiteralPath (Join-Path $shim 'windres.cmd')
-        "$shim;C:\msys64\mingw64\bin" >> $env:GITHUB_PATH
-        "CC_x86_64_pc_windows_gnu=C:\msys64\mingw64\bin\gcc.exe" >> $env:GITHUB_ENV
-        "CARGO_BUILD_TARGET=x86_64-pc-windows-gnu" >> $env:GITHUB_ENV
-        rustup target add x86_64-pc-windows-gnu

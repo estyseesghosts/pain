@@ -1,10 +1,9 @@
 //! Embeds the pain icon into the Windows executable.
 //!
-//! GPUI already compiles its own Windows manifest with `windres`, so the same
-//! tool compiles this icon resource. Paths are forwarded with `/` separators
-//! because the MSYS2 `windres` on this host treats backslashes as escapes.
-//! Only the GNU Windows toolchain is a release target; an MSVC build skips the
-//! resource rather than adding a second resource pipeline for it.
+//! GNU hosts use `windres` with forward-slash paths because the local MSYS2
+//! `windres` treats backslashes as escapes. MSVC hosts use the Windows SDK's
+//! `rc.exe`, found through `embed-resource`, as Chaus does. GPUI embeds its
+//! own Common-Controls manifest separately on both toolchains.
 
 use std::env;
 use std::ffi::OsStr;
@@ -56,6 +55,7 @@ fn main() {
         return;
     }
     if env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+        build_msvc_icon();
         return;
     }
 
@@ -94,6 +94,40 @@ fn main() {
     }
 
     println!("cargo:rustc-link-arg-bins={output}");
+}
+
+fn build_msvc_icon() {
+    let manifest_dir =
+        PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR"));
+    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("cargo sets OUT_DIR"));
+    let resources = manifest_dir.join("resources/windows");
+    let resource_file = resources.join("pain.rc");
+    let icon_file = resources.join("pain.ico");
+    let object_file = out_dir.join("pain-icon.res");
+
+    println!("cargo:rerun-if-changed={}", resource_file.display());
+    println!("cargo:rerun-if-changed={}", icon_file.display());
+
+    // The Windows SDK bin directory is not on PATH in a plain CI shell.
+    let rc =
+        embed_resource::find_windows_sdk_tool("rc.exe").unwrap_or_else(|| PathBuf::from("rc.exe"));
+    let include = forward_slashes(&resources);
+    let object = forward_slashes(&object_file);
+    let input = forward_slashes(&resource_file);
+    let result = Command::new(rc)
+        .args(["/nologo", "/i", &include, "/fo", &object, &input])
+        .output()
+        .expect("rc.exe is required to embed the Windows icon");
+
+    if !result.status.success() {
+        panic!(
+            "rc.exe could not compile {}:\n{}",
+            resource_file.display(),
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+
+    println!("cargo:rustc-link-arg-bins={object}");
 }
 
 fn forward_slashes(path: &Path) -> String {

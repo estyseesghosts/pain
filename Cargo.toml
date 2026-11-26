@@ -14,6 +14,10 @@ members = ["crates/ghostty-vt-sys"]
 ghostty-vt-sys = { path = "crates/ghostty-vt-sys" }
 serde = { version = "1", features = ["derive"] }
 
+[build-dependencies]
+# Only used on MSVC hosts to locate the Windows SDK's rc.exe for the icon.
+embed-resource = "3"
+
 # M3 ConPTY transport. Narrow Win32 features only; no WinUI, no private DLL.
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.61.3", features = [
