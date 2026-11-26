@@ -9,6 +9,7 @@ This packet is intentionally source-grounded. The URLs below are immutable commi
 | `libghostty-vt` | vendored source snapshot in `vendor/ghostty-vt` | release tag `vt-1.0.2` / commit `573c4a21e02311ae87844af26b6a7a179f82858e` |
 | Silvestris | git dependency on `estyseesghosts/silvestris`, crate `crates/silvestris` | `f1c2a010c1c84a90c9ad938eb307f5f2ef5a5ba7` (pushed, same pin Chaus uses) |
 | Zed/GPUI | exact revision inherited from that Silvestris `config/pins.toml` | `6b720973027999bae402df23d469026f4cced988` (unchanged) |
+| OpenConsole ConPTY | bundled x64 `conpty.dll` + `OpenConsole.exe` beside `pain.exe` | `Microsoft.Windows.Console.ConPTY` `1.25.261109001` (SHA-256 in [`windows/conpty/README.md`](windows/conpty/README.md)) |
 | Rust | `rust-toolchain.toml`, matched to Silvestris | `1.98.1`, GNU host on Windows |
 
 `vt-1.0.2` is the released tag closest to the research snapshot: the research
@@ -345,6 +346,41 @@ Use for terminal mouse reporting; common UI still decides local selection versus
 
 Use for bracketed paste and unsafe-paste policy. Do not raw-write clipboard text.
 
+### Kitty graphics
+
+- [`include/ghostty/vt/render.h`](https://github.com/ghostty-org/ghostty/blob/573c4a21e02311ae87844af26b6a7a179f82858e/include/ghostty/vt/render.h)
+  - render-state image iterator lifecycle;
+  - `GHOSTTY_RENDER_STATE_DATA_IMAGE_PLACEMENTS_GENERATION`;
+  - placement fields, layers, source rectangles and kinds.
+- [`include/ghostty/vt/kitty_graphics.h`](https://github.com/ghostty-org/ghostty/blob/573c4a21e02311ae87844af26b6a7a179f82858e/include/ghostty/vt/kitty_graphics.h)
+  - image lookup/get and format/generation ownership;
+  - `ghostty_kitty_graphics_animation_tick`.
+- [`include/ghostty/vt/sys.h`](https://github.com/ghostty-org/ghostty/blob/573c4a21e02311ae87844af26b6a7a179f82858e/include/ghostty/vt/sys.h)
+  - process-global `decode_png` callback and `ghostty_alloc`.
+- [`include/ghostty/vt/terminal.h`](https://github.com/ghostty-org/ghostty/blob/573c4a21e02311ae87844af26b6a7a179f82858e/include/ghostty/vt/terminal.h)
+  - image storage cap, APC limits, temp/shared-memory/file media.
+- Vendored execution evidence:
+  - `vendor/ghostty-vt/src/terminal/kitty/graphics_exec.zig` (data/chunk/place/policy);
+  - `vendor/ghostty-vt/src/terminal/kitty/graphics_storage.zig` (generations, clipping, relative/virtual placements, animation);
+  - `vendor/ghostty-vt/src/terminal/kitty/graphics_unicode.zig` (placeholder cells).
+- Pain integration anchors:
+  - `src/terminal/ghostty.rs` — FFI wrappers, PNG decoder, placement cache, Kitty policy;
+  - `src/terminal/session.rs` — batched pixel copy, animation clock, counters;
+  - `src/terminal/images.rs` — BGRA conversion, texture cache, projection/clipping;
+  - `src/terminal/render.rs` — layer paint order and epoch timer;
+  - `tests/kitty.rs` and `tests/m6.rs` — protocol matrix and invariants.
+
+### Bundled ConPTY provenance
+
+- `windows/conpty/README.md` records the `Microsoft.Windows.Console.ConPTY`
+  version, MIT license, URL and SHA-256 for both binaries.
+- `build.rs` copies the pinned x64 pair beside the executable and into
+  `deps/` for tests.
+- `src/platform/windows.rs` resolves `CreatePseudoConsole`,
+  `ResizePseudoConsole` and `ClosePseudoConsole` from the adjacent DLL, holds
+  the module for the process lifetime, and only falls back to `kernel32` with
+  an explicit Kitty-graphics-degraded warning.
+
 ### PTY implementation reference
 
 - [`src/pty.zig`](https://github.com/ghostty-org/ghostty/blob/64a6fedfd26d1fa687733f9f411db5eb8e205ebe/src/pty.zig)
@@ -526,7 +562,7 @@ A GPUI update is coupled to Silvestris. A Ghostty VT update is coupled to the FF
 - Silvestris updates GPUI but terminal retains old direct dependency.
 - Ghostty `main` changes render structs while package uses old prebuilt DLL.
 - source docs silently point to moving branch and historical rationale becomes unreproducible.
-- Wintty behavior is assumed to equal OS ConPTY even when its bundled `conpty.dll` path differs.
+- Wintty behavior is assumed to equal OS ConPTY even when its bundled `conpty.dll` path differs. Pain now pins its own redistributable OpenConsole pair; the in-box host remains a degraded fallback.
 
 ## Cross-source anchors required by this packet
 

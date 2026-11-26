@@ -9,6 +9,67 @@ use std::time::{Duration, Instant};
 use pain::platform::{spawn_pty, PtyConfig, ShellCommand};
 use pain::terminal::session::{NoopWakeup, TerminalSession};
 
+fn b64(data: &[u8]) -> String {
+    const A: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in data.chunks(3) {
+        let b = [
+            chunk[0],
+            chunk.get(1).copied().unwrap_or(0),
+            chunk.get(2).copied().unwrap_or(0),
+        ];
+        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+        out.push(A[((n >> 18) & 63) as usize] as char);
+        out.push(A[((n >> 12) & 63) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            A[((n >> 6) & 63) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            A[(n & 63) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+#[cfg(target_os = "windows")]
+static NEXT_APC_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+fn wait_for_image(session: &TerminalSession, image_id: u32) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        let snapshot = session.render_snapshot().expect("render snapshot");
+        let found = snapshot
+            .image_placements
+            .iter()
+            .any(|placement| placement.image_id == image_id);
+        session.mark_frame_complete().expect("frame complete");
+        if found {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    false
+}
+
+fn wait_for_any_image(session: &TerminalSession) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        let snapshot = session.render_snapshot().expect("render snapshot");
+        let found = !snapshot.image_placements.is_empty();
+        session.mark_frame_complete().expect("frame complete");
+        if found {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    false
+}
+
 fn snapshot_text(session: &TerminalSession) -> String {
     let snapshot = session.render_snapshot().expect("render snapshot");
     session.mark_frame_complete().expect("frame complete");
@@ -168,6 +229,147 @@ fn windows_conpty_runs_vim_alternate_screen_and_mouse_mode() {
 
     session.enqueue_writer(b":q!\r".to_vec());
     pty.shutdown();
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn bundled_conpty_is_packaged_next_to_the_test_binary() {
+    // The build script copies the pinned NuGet pair beside the executable. If
+    // this fails, the Windows graphics gate cannot be trusted: the in-box host
+    // drops Kitty APCs.
+    assert!(
+        pain::platform::windows::conpty_is_bundled(),
+        "windows/conpty/x64 was not copied beside the test binary"
+    );
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn conpty_apc_survives_to_ghostty_graphics() {
+    if !pain::platform::windows::conpty_is_bundled() {
+        eprintln!(
+            "SKIP conpty APC gate: no bundled conpty.dll; the kernel32 fallback is \
+             documented as Kitty-graphics-degraded"
+        );
+        return;
+    }
+    let session = Arc::new(TerminalSession::new(80, 24, Box::new(NoopWakeup)).expect("session"));
+    session
+        .apply_layout_geometry(80, 24, 10, 20)
+        .expect("geometry");
+    // f=32 is RGBA: four bytes per pixel, base64 "/wAA/w==".
+    let payload = b64(&[255u8, 0, 0, 255]);
+    let apc = format!("\x1b_Ga=T,f=32,s=1,v=1,i=77,C=1,q=2;{payload}\x1b\\\r\n");
+    let path = std::env::temp_dir().join(format!(
+        "pain-conpty-apc-{}-{}.bin",
+        std::process::id(),
+        NEXT_APC_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    std::fs::write(&path, apc.as_bytes()).expect("write APC payload");
+    let config = PtyConfig {
+        cols: 80,
+        rows: 24,
+        command: ShellCommand {
+            program: r"C:\Windows\System32\cmd.exe".into(),
+            args: vec!["/c".into(), "type".into(), path.to_string_lossy().into_owned()],
+        },
+    };
+    let pty = spawn_pty(&config, Arc::clone(&session)).expect("spawn cmd.exe");
+    assert!(
+        wait_for_image(&session, 77),
+        "the bundled ConPTY did not forward the Kitty APC to libghostty-vt"
+    );
+    pty.shutdown();
+    let _ = std::fs::remove_file(path);
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn wsl_client_apc_survives_wsl_pty_and_conpty() {
+    if !pain::platform::windows::conpty_is_bundled() {
+        eprintln!("SKIP WSL APC gate: bundled ConPTY is absent");
+        return;
+    }
+    // Linux client -> WSL PTY -> ConPTY -> Pain -> libghostty-vt. This is the
+    // path a WSL kitten/icat actually takes.
+    let session = Arc::new(TerminalSession::new(80, 24, Box::new(NoopWakeup)).expect("session"));
+    session
+        .apply_layout_geometry(80, 24, 10, 20)
+        .expect("geometry");
+    // bash printf turns \033 into ESC and \134 into a single backslash, so the
+    // final String terminator is the two bytes ESC \.
+    let script = "printf '\\033_Ga=T,f=32,s=1,v=1,i=78,C=1,q=2;/wAA/w==\\033\\134'";
+    let config = PtyConfig {
+        cols: 80,
+        rows: 24,
+        command: ShellCommand {
+            program: "wsl.exe".into(),
+            args: vec!["-e".into(), "bash".into(), "-c".into(), script.into()],
+        },
+    };
+    let pty = match spawn_pty(&config, Arc::clone(&session)) {
+        Ok(pty) => pty,
+        Err(error) => {
+            eprintln!("SKIP WSL APC gate: {error}");
+            return;
+        }
+    };
+    assert!(
+        wait_for_image(&session, 78),
+        "an APC produced inside WSL did not survive to libghostty-vt"
+    );
+    pty.shutdown();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_real_kitty_client_image_reaches_ghostty() {
+    // A real Kitty-protocol client (chafa's kitty output), not a hand-written
+    // APC: client -> Linux PTY -> Pain -> libghostty-vt. Skip only when the
+    // optional client is not installed.
+    let available = std::process::Command::new("chafa")
+        .arg("--version")
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false);
+    if !available {
+        eprintln!("SKIP real Kitty client gate: chafa is not installed");
+        return;
+    }
+    let session = Arc::new(TerminalSession::new(80, 24, Box::new(NoopWakeup)).expect("session"));
+    session
+        .apply_layout_geometry(80, 24, 10, 20)
+        .expect("geometry");
+    let path = std::env::temp_dir().join(format!("pain-chafa-{}.png", std::process::id()));
+    let image = image::ImageBuffer::from_pixel(16, 16, image::Rgba([220u8, 40, 40, 255]));
+    image.save(&path).expect("write test PNG");
+    let config = PtyConfig {
+        cols: 80,
+        rows: 24,
+        command: ShellCommand {
+            program: "chafa".into(),
+            args: vec![
+                "--format".into(),
+                "kitty".into(),
+                path.to_string_lossy().into_owned(),
+            ],
+        },
+    };
+    let pty = match spawn_pty(&config, Arc::clone(&session)) {
+        Ok(pty) => pty,
+        Err(error) => {
+            let _ = std::fs::remove_file(&path);
+            eprintln!("SKIP real Kitty client gate: {error}");
+            return;
+        }
+    };
+    let placed = wait_for_any_image(&session);
+    pty.shutdown();
+    let _ = std::fs::remove_file(&path);
+    assert!(
+        placed,
+        "chafa's Kitty output never produced a placement in Ghostty"
+    );
 }
 
 /// The session's writer statistics include bytes produced by Ghostty effects

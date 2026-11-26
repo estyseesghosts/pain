@@ -12,6 +12,11 @@
 /pain-release.exe
 *.exe
 
+# The pinned, MIT-licensed OpenConsole host is a redistributable payload that
+# must ship beside pain.exe for Kitty APC forwarding. Keep this one exception;
+# other .exe files remain build artifacts.
+!/windows/conpty/x64/OpenConsole.exe
+
 # OS/editor noise
 .DS_Store
 Thumbs.db

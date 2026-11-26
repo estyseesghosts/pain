@@ -3397,6 +3397,7 @@ dependencies = [
  "ghostty-vt-sys",
  "gpui",
  "gpui_platform",
+ "image",
  "libc",
  "serde",
  "silvestris",

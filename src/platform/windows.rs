@@ -1,24 +1,26 @@
 //! M3 Windows ConPTY backend. Owns one pseudoconsole, one child process and
 //! three worker threads. No WinUI, no private conpty.dll, no Ghostty surface,
-//! no direct Win32 key/text handling — GPUI owns those.
+//! no direct Win32 key/text handling â€” GPUI owns those.
 
 use std::ffi::c_void;
 use std::mem::size_of;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 
-use windows::core::{PCWSTR, PWSTR};
+use windows::core::{HRESULT, PCSTR, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{
-    CloseHandle, DuplicateHandle, DUPLICATE_SAME_ACCESS, GENERIC_READ, HANDLE,
+    CloseHandle, DuplicateHandle, DUPLICATE_SAME_ACCESS, GENERIC_READ, HANDLE, HMODULE,
 };
 use windows::Win32::Security::SECURITY_ATTRIBUTES;
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, SearchPathW, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_FIRST_PIPE_INSTANCE, OPEN_EXISTING,
     PIPE_ACCESS_OUTBOUND,
 };
-use windows::Win32::System::Console::{
-    ClosePseudoConsole, CreatePseudoConsole, ResizePseudoConsole, COORD, HPCON,
+use windows::Win32::System::Console::{COORD, HPCON};
+use windows::Win32::System::LibraryLoader::{
+    GetModuleFileNameW, GetProcAddress, LoadLibraryW,
 };
 use windows::Win32::System::Pipes::CreatePipe;
 use windows::Win32::System::Pipes::{CreateNamedPipeW, PIPE_TYPE_BYTE};
@@ -167,6 +169,148 @@ impl Drop for OwnedHandle {
     }
 }
 
+type CreatePseudoConsoleFn =
+    unsafe extern "system" fn(COORD, HANDLE, HANDLE, u32, *mut HPCON) -> HRESULT;
+type ResizePseudoConsoleFn = unsafe extern "system" fn(HPCON, COORD) -> HRESULT;
+type ClosePseudoConsoleFn = unsafe extern "system" fn(HPCON);
+
+/// Process-global ConPTY entry points. The in-box kernel32 host silently drops
+/// unknown APCs (including Kitty graphics), so an adjacent OpenConsole
+/// `conpty.dll` is preferred when present. The module stays loaded for the
+/// process lifetime: HPCON values created by it must outlive any unload.
+pub struct ConPtyApi {
+    create: CreatePseudoConsoleFn,
+    resize: ResizePseudoConsoleFn,
+    close: ClosePseudoConsoleFn,
+    /// True only when all three entry points came from an adjacent
+    /// `conpty.dll`; the fallback is explicitly Kitty-graphics-degraded.
+    pub bundled: bool,
+    _module: HMODULE,
+}
+
+// SAFETY: function pointers and a process-lifetime module handle have no
+// thread affinity. HPCON objects themselves are still owned by one WindowsPty.
+unsafe impl Send for ConPtyApi {}
+unsafe impl Sync for ConPtyApi {}
+
+static CONPTY_API: OnceLock<ConPtyApi> = OnceLock::new();
+
+/// Logged when the adjacent OpenConsole pair cannot be used. The wording is
+/// asserted by a test so a future refactor cannot quietly turn a degraded
+/// fallback into a full-support claim.
+pub const CONPTY_FALLBACK_WARNING: &str = "no adjacent conpty.dll; using in-box kernel32 ConPTY. Kitty graphics APCs are stripped by the legacy host: graphics are DEGRADED (direct transmission may not reach libghostty-vt).";
+
+fn resolve_pseudo_console(module: HMODULE) -> Option<(CreatePseudoConsoleFn, ResizePseudoConsoleFn, ClosePseudoConsoleFn)> {
+    // SAFETY: `module` is a live module handle and each name is NUL-terminated.
+    // The resolved addresses are only called with the documented signatures.
+    unsafe {
+        let create = GetProcAddress(module, PCSTR(b"CreatePseudoConsole\0".as_ptr()))?;
+        let resize = GetProcAddress(module, PCSTR(b"ResizePseudoConsole\0".as_ptr()))?;
+        let close = GetProcAddress(module, PCSTR(b"ClosePseudoConsole\0".as_ptr()))?;
+        Some((
+            std::mem::transmute::<unsafe extern "system" fn() -> isize, CreatePseudoConsoleFn>(
+                create,
+            ),
+            std::mem::transmute::<unsafe extern "system" fn() -> isize, ResizePseudoConsoleFn>(
+                resize,
+            ),
+            std::mem::transmute::<unsafe extern "system" fn() -> isize, ClosePseudoConsoleFn>(
+                close,
+            ),
+        ))
+    }
+}
+
+/// Directory containing this executable, where the packaged conpty.dll lives.
+fn executable_directory() -> Option<PathBuf> {
+    let mut buffer = vec![0u16; 32_768];
+    // SAFETY: the buffer is writable for its full length.
+    let written = unsafe { GetModuleFileNameW(None, &mut buffer) } as usize;
+    if written == 0 || written >= buffer.len() {
+        return None;
+    }
+    let path = PathBuf::from(String::from_utf16_lossy(&buffer[..written]));
+    path.parent().map(Path::to_path_buf)
+}
+
+fn load_adjacent_conpty(directory: &Path) -> Option<HMODULE> {
+    let path = directory.join("conpty.dll");
+    if !path.is_file() {
+        return None;
+    }
+    let wide: Vec<u16> = path
+        .to_string_lossy()
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    // SAFETY: NUL-terminated path; the returned module is intentionally kept
+    // loaded for the process lifetime.
+    let module = unsafe { LoadLibraryW(PCWSTR(wide.as_ptr())) }.ok()?;
+    Some(module)
+}
+
+fn load_kernel32() -> Option<HMODULE> {
+    let name: Vec<u16> = "kernel32.dll\0".encode_utf16().collect();
+    // SAFETY: NUL-terminated module name; refcount is intentionally retained.
+    unsafe { LoadLibraryW(PCWSTR(name.as_ptr())) }.ok()
+}
+
+fn load_conpty_api() -> ConPtyApi {
+    if let Some(directory) = executable_directory() {
+        if let Some(module) = load_adjacent_conpty(&directory) {
+            if let Some((create, resize, close)) = resolve_pseudo_console(module) {
+                crate::log::info(
+                    "conpty",
+                    &format!(
+                        "using bundled {} for ConPTY (Kitty APC forwarding)",
+                        directory.join("conpty.dll").display()
+                    ),
+                );
+                return ConPtyApi {
+                    create,
+                    resize,
+                    close,
+                    bundled: true,
+                    _module: module,
+                };
+            }
+            crate::log::log(
+                "WARN",
+                "conpty",
+                "adjacent conpty.dll is missing ConPTY exports; falling back to kernel32",
+            );
+        } else {
+            crate::log::log(
+                "WARN",
+                "conpty",
+                CONPTY_FALLBACK_WARNING,
+            );
+        }
+    }
+    let module = load_kernel32().expect("kernel32 is always loadable");
+    let (create, resize, close) =
+        resolve_pseudo_console(module).expect("kernel32 exports the ConPTY entry points");
+    ConPtyApi {
+        create,
+        resize,
+        close,
+        bundled: false,
+        _module: module,
+    }
+}
+
+#[must_use]
+pub fn conpty_api() -> &'static ConPtyApi {
+    CONPTY_API.get_or_init(load_conpty_api)
+}
+
+/// Whether the active transport is the bundled, APC-preserving host. Exposed
+/// so the documented smoke gate can assert degraded fallback honestly.
+#[must_use]
+pub fn conpty_is_bundled() -> bool {
+    conpty_api().bundled
+}
+
 struct ConPty {
     raw: HPCON,
 }
@@ -176,8 +320,9 @@ unsafe impl Send for ConPty {}
 
 impl Drop for ConPty {
     fn drop(&mut self) {
-        // SAFETY: `raw` is valid until this single drop closes it.
-        unsafe { ClosePseudoConsole(self.raw) };
+        // SAFETY: `raw` was created by the same process-global API and is
+        // closed exactly once. The module stays loaded for the process.
+        unsafe { (conpty_api().close)(self.raw) };
     }
 }
 
@@ -189,7 +334,7 @@ struct Threads {
 
 /// Owns one ConPTY session. `HPCON` never leaves this module.
 pub struct WindowsPty {
-    conpty: Arc<ConPty>,
+    _conpty: Arc<ConPty>,
     // Kept alive for the session: the ConPTY host uses the handles we handed
     // to CreatePseudoConsole for its whole lifetime.
     _input_read: OwnedHandle,
@@ -198,7 +343,7 @@ pub struct WindowsPty {
     reader_thread: Arc<Mutex<Option<OwnedHandle>>>,
     stop: Arc<AtomicBool>,
     session: Arc<TerminalSession>,
-    size: Arc<Mutex<(u16, u16)>>,
+    _size: Arc<Mutex<(u16, u16)>>,
     /// Latest-value mailbox; the UI only updates the pending grid.
     resize_mailbox: Arc<PtyResizeMailbox>,
     threads: Mutex<Option<Threads>>,
@@ -275,13 +420,22 @@ impl WindowsPty {
             X: config.cols.max(1) as i16,
             Y: config.rows.max(1) as i16,
         };
+        let mut hpcon = HPCON::default();
         // SAFETY: the two pipe handles are valid and exclusively ours; on
-        // success ConPTY owns its copies and we close ours below.
-        let hpcon = unsafe {
-            CreatePseudoConsole(coord, input_read.as_raw(), output_write.as_raw(), 0).map_err(
-                |error| PtyError::new("CreatePseudoConsole", error.message().to_string()),
-            )?
+        // success ConPTY owns its copies and we close ours below. The entry
+        // point is resolved once per process and never unloaded.
+        let result = unsafe {
+            (conpty_api().create)(
+                coord,
+                input_read.as_raw(),
+                output_write.as_raw(),
+                0,
+                &mut hpcon,
+            )
         };
+        result
+            .ok()
+            .map_err(|error| PtyError::new("CreatePseudoConsole", error.message().to_string()))?;
         let conpty = Arc::new(ConPty { raw: hpcon });
 
         let resolved = resolve_program(&config.command.program)?;
@@ -394,8 +548,9 @@ impl WindowsPty {
                 Y: rows as i16,
             };
             // SAFETY: the ConPTY handle stays alive until shutdown joins this
-            // worker, and the COORD is POD.
-            match unsafe { ResizePseudoConsole(resize_conpty.raw, coord) } {
+            // worker, and the COORD is POD. The entry point is process-global.
+            let result = unsafe { (conpty_api().resize)(resize_conpty.raw, coord) };
+            match result.ok() {
                 Ok(()) => *resize_size.lock().expect("PTY size mutex poisoned") = (cols, rows),
                 Err(error) => crate::log::error(
                     "resize",
@@ -404,14 +559,14 @@ impl WindowsPty {
             }
         })));
         Ok(Self {
-            conpty,
+            _conpty: conpty,
             _input_read: input_read,
             _output_write: output_write,
             process,
             reader_thread,
             stop,
             session,
-            size,
+            _size: size,
             resize_mailbox,
             threads: Mutex::new(Some(threads)),
         })
@@ -634,5 +789,32 @@ mod tests {
         assert!(!as_string.contains("TERM=dumb"));
         assert!(as_string.contains("PATH=C:\\bin"));
         assert!(environment_block(&[("BAD=KEY", "v")], []).is_err());
+    }
+
+    #[test]
+    fn missing_adjacent_conpty_dll_is_not_a_silent_kitty_claim() {
+        // The fallback message must say "degraded" and name Kitty; the Windows
+        // graphics gate relies on this being honest, not aspirational.
+        assert!(CONPTY_FALLBACK_WARNING.contains("DEGRADED"));
+        assert!(CONPTY_FALLBACK_WARNING.contains("Kitty"));
+        assert!(CONPTY_FALLBACK_WARNING.contains("kernel32"));
+        let directory = std::env::temp_dir().join(format!(
+            "pain-no-conpty-{}-{}",
+            std::process::id(),
+            NEXT_PIPE_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&directory).expect("temp dir");
+        assert!(load_adjacent_conpty(&directory).is_none());
+        let _ = std::fs::remove_dir(&directory);
+        // The resolver still finds a usable fallback; observe that it was
+        // resolved rather than silently pretending a bundled host exists.
+        let _ = conpty_is_bundled();
+        assert!(resolve_pseudo_console(load_kernel32().expect("kernel32")).is_some());
+    }
+
+    #[test]
+    fn kernel32_exports_the_conpty_entry_points() {
+        let module = load_kernel32().expect("kernel32 module");
+        assert!(resolve_pseudo_console(module).is_some());
     }
 }

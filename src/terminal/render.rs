@@ -11,11 +11,12 @@ use std::time::Duration;
 
 use gpui::{
     div, fill, hsla, point, prelude::*, px, relative, rgba, size, App, Bounds, ClipboardItem,
-    Context, DispatchPhase, Element, ElementId, FocusHandle, Focusable, GlobalElementId, Hsla,
-    InputHandler, InspectorElementId, InteractiveElement, KeyContext, KeyDownEvent, KeyUpEvent,
-    LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point,
-    Render, Rgba, ScrollDelta, ScrollEvent, ShapedLine, SharedString, StrikethroughStyle,
-    Subscription, Style, TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window,
+    Context, Corners, DispatchPhase, Element, ElementId, FocusHandle, Focusable, GlobalElementId,
+    Hsla, InputHandler, InspectorElementId, InteractiveElement, KeyContext, KeyDownEvent,
+    KeyUpEvent, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad,
+    Pixels, Point, Render, Rgba, ScrollDelta, ScrollEvent, ShapedLine, SharedString,
+    StrikethroughStyle, Subscription, Style, TextAlign, TextRun, UTF16Selection, UnderlineStyle,
+    Window,
 };
 use silvestris::ActiveTheme;
 
@@ -28,6 +29,7 @@ use crate::terminal::geometry::{
     CellMetrics, InputGeometry, RowCache, TerminalGeometry, TextRun as CellRun, FONT_SIZE_STEP,
 };
 use crate::terminal::ghostty::{Cursor, KeyEvent};
+use crate::terminal::images::{ImageCache, ImageDraw};
 use crate::terminal::input::{
     is_app_shortcut_with_char, key_for_keystroke, key_release_for_keystroke, mouse_escape,
     Modifiers as InputModifiers, MouseAction, MouseButton as PtyButton,
@@ -61,6 +63,9 @@ struct FrameCache {
     /// Canonical owner of shaped rows. Prepaint replaces only dirty entries;
     /// prepaint/paint share this handle through `Arc` rather than deep copies.
     shaped_rows: Arc<Vec<Arc<CachedRow>>>,
+    image_below_background: Arc<Vec<ImageDraw>>,
+    image_below_text: Arc<Vec<ImageDraw>>,
+    image_above_text: Arc<Vec<ImageDraw>>,
     preedit_text: String,
     cursor: Option<PaintQuad>,
     line_height: Pixels,
@@ -114,6 +119,33 @@ impl CursorBlink {
     }
 }
 
+/// Epoch-based Kitty animation clock. It is deliberately not a frame loop: one
+/// timer exists only while `next_ms` names a running animation.
+#[derive(Default)]
+struct KittyAnimation {
+    epoch: u64,
+    /// True while a timer is outstanding.
+    scheduled: bool,
+    /// Set by a current-epoch timer; forces one uncached prepaint.
+    pending: bool,
+    next_ms: Option<u64>,
+}
+
+impl KittyAnimation {
+    /// Clear and return the pending flag for this prepaint.
+    fn take_pending(&mut self) -> bool {
+        std::mem::take(&mut self.pending)
+    }
+
+    /// Invalidate any stale timer (stopped animation or a superseded deadline).
+    fn invalidate(&mut self) {
+        self.epoch = self.epoch.wrapping_add(1);
+        self.scheduled = false;
+        self.pending = false;
+        self.next_ms = None;
+    }
+}
+
 /// Explicit pointer capture. Scrollbar dragging is a UI-domain gesture and
 /// must never be represented by a fake terminal mouse-button bit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -154,6 +186,10 @@ pub struct TerminalView {
     last_drag_cell: Cell<Option<(u16, u16)>>,
     /// Temporal cursor visibility; never changes Ghostty's terminal modes.
     blink: RefCell<CursorBlink>,
+    /// Bounded GPUI texture cache keyed by protocol/image/generation.
+    images: RefCell<ImageCache>,
+    /// Demand-driven Kitty animation timer state.
+    kitty: RefCell<KittyAnimation>,
     /// Uncommitted native text composition, local to this view.
     preedit: RefCell<PreeditState>,
     /// Cursor cell from the latest snapshot, used to place IME candidates.
@@ -185,6 +221,8 @@ impl TerminalView {
             held_keys: RefCell::new(Vec::new()),
             last_drag_cell: Cell::new(None),
             blink: RefCell::new(CursorBlink::default()),
+            images: RefCell::new(ImageCache::default()),
+            kitty: RefCell::new(KittyAnimation::default()),
             preedit: RefCell::new(PreeditState::default()),
             cursor_cell: Cell::new((0, 0)),
         };
@@ -244,6 +282,49 @@ impl TerminalView {
     fn stop_blink(&mut self, cx: &mut Context<Self>) {
         self.blink.borrow_mut().stop();
         cx.notify();
+    }
+
+    /// Schedule exactly one timer for the next Kitty animation deadline. A
+    /// stopped animation invalidates any outstanding timer; a superseded
+    /// deadline gets a new epoch, so the old callback cannot resurrect it.
+    fn schedule_kitty_animation(
+        &mut self,
+        next: Option<u64>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(next_ms) = next else {
+            self.kitty.borrow_mut().invalidate();
+            return;
+        };
+        let epoch = {
+            let mut kitty = self.kitty.borrow_mut();
+            if kitty.scheduled && kitty.next_ms == Some(next_ms) {
+                return;
+            }
+            kitty.epoch = kitty.epoch.wrapping_add(1);
+            kitty.scheduled = true;
+            kitty.pending = false;
+            kitty.next_ms = Some(next_ms);
+            kitty.epoch
+        };
+        let now = self.session.kitty_clock_ms();
+        let delay_ms = next_ms.saturating_sub(now).max(1);
+        cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(delay_ms))
+                .await;
+            let _ = this.update_in(cx, |this, _window, cx| {
+                let mut kitty = this.kitty.borrow_mut();
+                if kitty.epoch != epoch {
+                    return;
+                }
+                kitty.scheduled = false;
+                kitty.pending = true;
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Composition callbacks only update local preedit; no PTY write here.
@@ -777,6 +858,22 @@ fn pty_button(button: MouseButton) -> Option<PtyButton> {
     }
 }
 
+/// One helper for all three Ghostty image stages. `paint_image` derives the
+/// atlas source subregion from the difference between `bounds` and
+/// `image_bounds`; the source buffer is never cropped here.
+fn paint_image_list(window: &mut Window, images: &[ImageDraw]) {
+    for draw in images {
+        let _ = window.paint_image(
+            draw.bounds,
+            draw.image_bounds,
+            Corners::default(),
+            Arc::clone(&draw.image),
+            0,
+            false,
+        );
+    }
+}
+
 struct TerminalElement {
     view: gpui::Entity<TerminalView>,
 }
@@ -785,6 +882,10 @@ struct TerminalElement {
 /// so a cursor blink frame can reuse every shaped row without copying them.
 struct FrameState {
     rows: Arc<Vec<Arc<CachedRow>>>,
+    /// Ghostty layer order: below backgrounds, below text, above text.
+    image_below_background: Arc<Vec<ImageDraw>>,
+    image_below_text: Arc<Vec<ImageDraw>>,
+    image_above_text: Arc<Vec<ImageDraw>>,
     cursor: Option<PaintQuad>,
     /// Locally composed IME text, drawn at the caret but never in the PTY.
     preedit: Option<(Point<Pixels>, ShapedLine)>,
@@ -893,6 +994,10 @@ impl Element for TerminalElement {
 
         let wake = session.take_wakeup();
         let generation = session.generation();
+        // A due Kitty animation must never take the cached-frame path just
+        // because PTY output stopped. The flag is consumed here so a later
+        // fast path is allowed again once this frame rendered.
+        let animation_due = view.kitty.borrow_mut().take_pending();
 
         {
             let cache = view.cache.borrow();
@@ -902,6 +1007,7 @@ impl Element for TerminalElement {
             // compared explicitly; `shaped_rows.len()` is never used to infer
             // cols or rows.
             if wake.is_none()
+                && !animation_due
                 && cache.generation == generation
                 && cache.geometry == geometry
                 && cache.cols == cols
@@ -913,6 +1019,9 @@ impl Element for TerminalElement {
                 );
                 return FrameState {
                     rows: cache.shaped_rows.clone(),
+                    image_below_background: cache.image_below_background.clone(),
+                    image_below_text: cache.image_below_text.clone(),
+                    image_above_text: cache.image_above_text.clone(),
                     cursor: cache.cursor.clone(),
                     preedit: None,
                     line_height: cache.line_height,
@@ -922,12 +1031,33 @@ impl Element for TerminalElement {
             }
         }
 
+        // One animation tick per rendered frame. This both advances a due
+        // frame and discovers a newly started animation. It mutates Kitty
+        // storage, so it must happen before render-state extraction and pixel
+        // lookup below.
+        let kitty_next = session
+            .tick_kitty_animation(session.kitty_clock_ms())
+            .ok()
+            .flatten();
+
         // Apply layout geometry synchronously: this frame paints the new
         // state, so the session must not enqueue a redundant renderer wake.
+        // Ghostty's cell geometry is terminal pixels; GPUI drawing below stays
+        // in logical pixels.
+        let (cell_width_device, cell_height_device) = geometry.cell_device_pixels();
         let _ = session
-            .apply_layout_geometry(cols, rows, cell_width as u32, line_height as u32)
+            .apply_layout_geometry(cols, rows, cell_width_device, cell_height_device)
             .expect("terminal geometry applied");
         let snapshot = session.render_snapshot().expect("render snapshot");
+        // Upload only missing generations and drop stale textures. This never
+        // touches Ghostty image pointers past the terminal lock.
+        let image_layers = view.images.borrow_mut().prepare(
+            &session,
+            &snapshot.image_placements,
+            &geometry,
+            &counters,
+            window,
+        );
         let rebuild: Vec<usize> = {
             let mut cache = view.cache.borrow_mut();
             let listed =
@@ -1054,6 +1184,9 @@ impl Element for TerminalElement {
             }
         };
         let preedit_text = view.preedit.borrow().text.clone();
+        let image_below_background = Arc::new(image_layers.below_background);
+        let image_below_text = Arc::new(image_layers.below_text);
+        let image_above_text = Arc::new(image_layers.above_text);
 
         let frame_rows = view.cache.borrow().shaped_rows.clone();
         {
@@ -1066,6 +1199,9 @@ impl Element for TerminalElement {
             cache.cursor = cursor.clone();
             cache.line_height = px(line_height);
             cache.background = default_bg;
+            cache.image_below_background = image_below_background.clone();
+            cache.image_below_text = image_below_text.clone();
+            cache.image_above_text = image_above_text.clone();
         }
         session.mark_frame_complete().expect("frame consumed");
         counters.prepaint_micros(u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX));
@@ -1080,8 +1216,17 @@ impl Element for TerminalElement {
                     }
                 });
         }
+        {
+            let entity = self.view.clone();
+            entity.update(cx, |this, cx| {
+                this.schedule_kitty_animation(kitty_next, window, cx);
+            });
+        }
         FrameState {
             rows: frame_rows,
+            image_below_background,
+            image_below_text,
+            image_above_text,
             cursor,
             preedit,
             line_height: px(line_height),
@@ -1102,10 +1247,14 @@ impl Element for TerminalElement {
     ) {
         let start = std::time::Instant::now();
         window.paint_quad(fill(bounds, prepaint.background));
+        paint_image_list(window, &prepaint.image_below_background);
         for row in prepaint.rows.iter() {
             for quad in &row.quads {
                 window.paint_quad(quad.clone());
             }
+        }
+        paint_image_list(window, &prepaint.image_below_text);
+        for row in prepaint.rows.iter() {
             for (origin, line) in &row.lines {
                 line.paint(
                     *origin,
@@ -1118,6 +1267,7 @@ impl Element for TerminalElement {
                 .expect("paint shaped terminal line");
             }
         }
+        paint_image_list(window, &prepaint.image_above_text);
         if let Some(cursor) = &prepaint.cursor {
             window.paint_quad(cursor.clone());
         }

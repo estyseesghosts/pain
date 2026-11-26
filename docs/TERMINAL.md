@@ -400,7 +400,8 @@ Implement only effects required for correctness or minimal polish:
 - clipboard read/write initiated by the child;
 - window resize requests from the child;
 - semantic prompts;
-- image protocols.
+- Sixel image protocols (Kitty graphics is implemented; see section 12 of
+  `docs/GHOSTTY.md`).
 
 Ghostty's effect documentation warns that programs can ask questions that need replies. Unknown/unsupported effects should be deliberately ignored or denied, not accidentally half-implemented. See [Ghostty `terminal.h`](https://github.com/ghostty-org/ghostty/blob/64a6fedfd26d1fa687733f9f411db5eb8e205ebe/include/ghostty/vt/terminal.h).
 

@@ -7,7 +7,10 @@ implement.
 ## Supported
 
 - One window with one terminal session and one shell on Windows and Linux.
-- Windows: OS ConPTY. Linux: POSIX PTY with `$SHELL` or `/bin/sh`.
+- Windows: ConPTY through the bundled, pinned OpenConsole `conpty.dll` when it
+  is packaged beside `pain.exe`; the in-box `kernel32` host is a documented
+  Kitty-graphics-degraded fallback. Linux: POSIX PTY with `$SHELL` or
+  `/bin/sh`.
 - Shell profiles on Windows: PowerShell 7, Windows PowerShell, cmd, Git Bash,
   devkitPro MSYS2 Bash and each registered WSL distribution. The default is
   chosen in Preferences; the same list appears in the taskbar jump list.
@@ -23,6 +26,20 @@ implement.
   to mouse-reporting TUIs.
 - Bounded scrollback configured at session creation; a scrollbar view driven by
   Ghostty's scrollbar state.
+- Kitty graphics: inline direct transmission with raw RGB/RGBA/gray/gray+alpha
+  and PNG (bounded, process-global decoder), transmit+display and
+  transmit-then-place, placement IDs and offsets, source rectangles, explicit
+  rows/columns, alpha, positive/negative `z`, Ghostty's below-background,
+  below-text and above-text layers, fixed, relative and Unicode-placeholder
+  placements, scrollback movement, clipping, resize/reflow, alternate screen,
+  animation frames, stop/resume, and bounded storage-limit eviction. Kitty
+  textures are cached by `(protocol, image_id, generation)` and dropped from
+  the GPUI atlas when superseded.
+- Kitty transport policy: the arbitrary-file medium is implemented but disabled
+  by default; the temporary-file medium requires an explicit allowed directory;
+  shared memory is disabled where the host namespace does not apply. Direct
+  inline transfer is the portable default. Storage caps remain finite and a
+  zero cap disables graphics.
 - Window title follows OSC 0/2 with a `pain` fallback.
 - Font size shortcuts `Ctrl+=`, `Ctrl+-`, `Ctrl+0`; `Ctrl+,` opens the
   one-window Preferences form.
@@ -36,7 +53,8 @@ implement.
 - Ghostty-style window/session profiles. Pain's profile setting only chooses
   the shell command; it does not save window layouts or per-profile fonts.
 - Multi-pane settings, a theme marketplace, plugins or auto-update.
-- Kitty graphics, Sixel, image protocols, shaders and ligature configuration.
+- Sixel, shaders and ligature configuration. Kitty graphics is supported, but
+  Sixel is not decoded or painted.
 - Shell integration installation, semantic prompt navigation, notifications,
   hyperlinks and OSC clipboard program access.
 - Multiple terminal sessions in one process, remote control or SSH client.

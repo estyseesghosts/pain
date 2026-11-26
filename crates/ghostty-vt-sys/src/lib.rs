@@ -37,6 +37,12 @@ pub type GhosttyMouseEvent = *mut c_void;
 pub type GhosttyFormatter = *mut c_void;
 pub type GhosttySelectionGesture = *mut c_void;
 pub type GhosttySelectionGestureEvent = *mut c_void;
+/// `ghostty/vt/kitty_graphics.h`: borrowed storage for the active screen.
+pub type GhosttyKittyGraphics = *mut c_void;
+/// Borrowed image handle from `ghostty_kitty_graphics_image`.
+pub type GhosttyKittyGraphicsImage = *mut c_void;
+/// Reusable render-state placement iterator.
+pub type GhosttyRenderStateImageIterator = *mut c_void;
 
 // `ghostty/vt/terminal.h`: options and data used by the MVP effects.
 pub const GHOSTTY_TERMINAL_OPT_USERDATA: i32 = 1;
@@ -63,6 +69,14 @@ pub const GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_LINES: i32 = 29;
 pub const GHOSTTY_TERMINAL_OPT_MODE_DEFAULT: i32 = 34;
 pub const GHOSTTY_TERMINAL_OPT_MODE: i32 = 35;
 
+// `ghostty/vt/terminal.h`: Kitty graphics storage and transport media.
+pub const GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_STORAGE_LIMIT: i32 = 16;
+pub const GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_MEDIUM_FILE: i32 = 17;
+pub const GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_MEDIUM_TEMP_FILE: i32 = 18;
+pub const GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_MEDIUM_SHARED_MEM: i32 = 19;
+pub const GHOSTTY_TERMINAL_OPT_APC_MAX_BYTES: i32 = 20;
+pub const GHOSTTY_TERMINAL_OPT_APC_MAX_BYTES_KITTY: i32 = 21;
+
 // Scroll viewport tags (`ghostty/vt/terminal.h`).
 pub const GHOSTTY_TERMINAL_SCROLL_VIEWPORT_TOP: i32 = 0;
 pub const GHOSTTY_TERMINAL_SCROLL_VIEWPORT_BOTTOM: i32 = 1;
@@ -88,6 +102,11 @@ pub const GHOSTTY_TERMINAL_DATA_HEIGHT_PX: i32 = 17;
 pub const GHOSTTY_TERMINAL_DATA_MODE: i32 = 37;
 pub const GHOSTTY_TERMINAL_DATA_VT_GROUND: i32 = 38;
 pub const GHOSTTY_TERMINAL_DATA_SELECTION: i32 = 31;
+pub const GHOSTTY_TERMINAL_DATA_KITTY_IMAGE_STORAGE_LIMIT: i32 = 26;
+pub const GHOSTTY_TERMINAL_DATA_KITTY_IMAGE_MEDIUM_FILE: i32 = 27;
+pub const GHOSTTY_TERMINAL_DATA_KITTY_IMAGE_MEDIUM_TEMP_FILE: i32 = 28;
+pub const GHOSTTY_TERMINAL_DATA_KITTY_IMAGE_MEDIUM_SHARED_MEM: i32 = 29;
+pub const GHOSTTY_TERMINAL_DATA_KITTY_GRAPHICS: i32 = 30;
 
 // `ghostty/vt/mouse/encoder.h`, `mouse/event.h`, `formatter.h`, `types.h`.
 pub const GHOSTTY_MOUSE_ACTION_PRESS: i32 = 0;
@@ -135,6 +154,30 @@ pub const GHOSTTY_RENDER_STATE_DATA_CURSOR_VIEWPORT_X: i32 = 15;
 pub const GHOSTTY_RENDER_STATE_DATA_CURSOR_VIEWPORT_Y: i32 = 16;
 pub const GHOSTTY_RENDER_STATE_DATA_CURSOR: i32 = 18;
 pub const GHOSTTY_RENDER_STATE_DATA_COLORS: i32 = 19;
+pub const GHOSTTY_RENDER_STATE_DATA_IMAGE_ITERATOR: i32 = 22;
+pub const GHOSTTY_RENDER_STATE_DATA_IMAGE_PLACEMENTS_GENERATION: i32 = 23;
+
+// `ghostty/vt/render.h`: image placement values read from the iterator.
+pub const GHOSTTY_RENDER_STATE_IMAGE_DATA_INVALID: i32 = 0;
+pub const GHOSTTY_RENDER_STATE_IMAGE_DATA_PROTOCOL: i32 = 1;
+pub const GHOSTTY_RENDER_STATE_IMAGE_DATA_IMAGE_ID: i32 = 2;
+pub const GHOSTTY_RENDER_STATE_IMAGE_DATA_IMAGE_GENERATION: i32 = 3;
+pub const GHOSTTY_RENDER_STATE_IMAGE_DATA_LAYER: i32 = 4;
+pub const GHOSTTY_RENDER_STATE_IMAGE_DATA_Z: i32 = 5;
+pub const GHOSTTY_RENDER_STATE_IMAGE_DATA_VIEWPORT_COL: i32 = 6;
+pub const GHOSTTY_RENDER_STATE_IMAGE_DATA_VIEWPORT_ROW: i32 = 7;
+pub const GHOSTTY_RENDER_STATE_IMAGE_DATA_GRID_COLS: i32 = 8;
+pub const GHOSTTY_RENDER_STATE_IMAGE_DATA_GRID_ROWS: i32 = 9;
+pub const GHOSTTY_RENDER_STATE_IMAGE_DATA_CELL_OFFSET_X: i32 = 10;
+pub const GHOSTTY_RENDER_STATE_IMAGE_DATA_CELL_OFFSET_Y: i32 = 11;
+pub const GHOSTTY_RENDER_STATE_IMAGE_DATA_PIXEL_WIDTH: i32 = 12;
+pub const GHOSTTY_RENDER_STATE_IMAGE_DATA_PIXEL_HEIGHT: i32 = 13;
+pub const GHOSTTY_RENDER_STATE_IMAGE_DATA_SOURCE_X: i32 = 14;
+pub const GHOSTTY_RENDER_STATE_IMAGE_DATA_SOURCE_Y: i32 = 15;
+pub const GHOSTTY_RENDER_STATE_IMAGE_DATA_SOURCE_WIDTH: i32 = 16;
+pub const GHOSTTY_RENDER_STATE_IMAGE_DATA_SOURCE_HEIGHT: i32 = 17;
+pub const GHOSTTY_RENDER_STATE_IMAGE_DATA_KITTY_PLACEMENT_ID: i32 = 18;
+pub const GHOSTTY_RENDER_STATE_IMAGE_DATA_KITTY_KIND: i32 = 19;
 
 pub const GHOSTTY_RENDER_STATE_ROW_DATA_DIRTY: i32 = 1;
 pub const GHOSTTY_RENDER_STATE_ROW_DATA_CELLS: i32 = 3;
@@ -156,6 +199,46 @@ pub const GHOSTTY_CURSOR_STYLE_BAR: i32 = 0;
 pub const GHOSTTY_CURSOR_STYLE_BLOCK: i32 = 1;
 pub const GHOSTTY_CURSOR_STYLE_UNDERLINE: i32 = 2;
 pub const GHOSTTY_CURSOR_STYLE_BLOCK_HOLLOW: i32 = 3;
+
+// `ghostty/vt/render.h` / `types.h`: protocol and draw-layer enums.
+pub const GHOSTTY_IMAGE_PROTOCOL_KITTY: i32 = 0;
+pub const GHOSTTY_IMAGE_LAYER_BELOW_BACKGROUND: i32 = 0;
+pub const GHOSTTY_IMAGE_LAYER_BELOW_TEXT: i32 = 1;
+pub const GHOSTTY_IMAGE_LAYER_ABOVE_TEXT: i32 = 2;
+pub const GHOSTTY_IMAGE_LAYER_MASK_BELOW_BACKGROUND: u32 =
+    1 << GHOSTTY_IMAGE_LAYER_BELOW_BACKGROUND;
+pub const GHOSTTY_IMAGE_LAYER_MASK_BELOW_TEXT: u32 = 1 << GHOSTTY_IMAGE_LAYER_BELOW_TEXT;
+pub const GHOSTTY_IMAGE_LAYER_MASK_ABOVE_TEXT: u32 = 1 << GHOSTTY_IMAGE_LAYER_ABOVE_TEXT;
+pub const GHOSTTY_RENDER_STATE_KITTY_PLACEMENT_KIND_VIRTUAL: i32 = 0;
+pub const GHOSTTY_RENDER_STATE_KITTY_PLACEMENT_KIND_RELATIVE: i32 = 1;
+pub const GHOSTTY_RENDER_STATE_KITTY_PLACEMENT_KIND_FIXED: i32 = 2;
+
+// `ghostty/vt/kitty_graphics.h`: storage and image data keys.
+pub const GHOSTTY_KITTY_GRAPHICS_DATA_PLACEMENT_ITERATOR: i32 = 1;
+pub const GHOSTTY_KITTY_GRAPHICS_DATA_GENERATION: i32 = 2;
+pub const GHOSTTY_KITTY_IMAGE_FORMAT_RGB: i32 = 0;
+pub const GHOSTTY_KITTY_IMAGE_FORMAT_RGBA: i32 = 1;
+pub const GHOSTTY_KITTY_IMAGE_FORMAT_PNG: i32 = 2;
+pub const GHOSTTY_KITTY_IMAGE_FORMAT_GRAY_ALPHA: i32 = 3;
+pub const GHOSTTY_KITTY_IMAGE_FORMAT_GRAY: i32 = 4;
+pub const GHOSTTY_KITTY_IMAGE_COMPRESSION_NONE: i32 = 0;
+pub const GHOSTTY_KITTY_IMAGE_COMPRESSION_ZLIB_DEFLATE: i32 = 1;
+pub const GHOSTTY_KITTY_GRAPHICS_IMAGE_DATA_ID: i32 = 1;
+pub const GHOSTTY_KITTY_GRAPHICS_IMAGE_DATA_NUMBER: i32 = 2;
+pub const GHOSTTY_KITTY_GRAPHICS_IMAGE_DATA_WIDTH: i32 = 3;
+pub const GHOSTTY_KITTY_GRAPHICS_IMAGE_DATA_HEIGHT: i32 = 4;
+pub const GHOSTTY_KITTY_GRAPHICS_IMAGE_DATA_FORMAT: i32 = 5;
+pub const GHOSTTY_KITTY_GRAPHICS_IMAGE_DATA_COMPRESSION: i32 = 6;
+pub const GHOSTTY_KITTY_GRAPHICS_IMAGE_DATA_PIXELS: i32 = 7;
+pub const GHOSTTY_KITTY_GRAPHICS_IMAGE_DATA_EXPECTED_LEN: i32 = 8;
+pub const GHOSTTY_KITTY_GRAPHICS_IMAGE_DATA_GENERATION: i32 = 9;
+
+// `ghostty/vt/sys.h`: process-global callbacks.
+pub const GHOSTTY_SYS_OPT_INVALID: i32 = 0;
+pub const GHOSTTY_SYS_OPT_USERDATA: i32 = 1;
+pub const GHOSTTY_SYS_OPT_DECODE_PNG: i32 = 2;
+pub const GHOSTTY_SYS_OPT_LOG: i32 = 3;
+pub const GHOSTTY_SYS_OPT_RANDOM_SECURE: i32 = 4;
 
 pub const GHOSTTY_STYLE_FLAG_BOLD: u16 = 1 << 0;
 pub const GHOSTTY_STYLE_FLAG_ITALIC: u16 = 1 << 1;
@@ -328,6 +411,25 @@ pub struct GhosttyCodepointBuffer {
     pub cap: usize,
     pub len: usize,
 }
+
+/// Frozen C layout from `ghostty/vt/sys.h`. The library zeroes this struct
+/// before calling the PNG decoder and takes ownership of `data` on success.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GhosttySysImage {
+    pub width: u32,
+    pub height: u32,
+    pub data: *mut u8,
+    pub data_len: usize,
+}
+
+pub type GhosttySysDecodePngFn = unsafe extern "C" fn(
+    userdata: *mut c_void,
+    allocator: *const c_void,
+    data: *const u8,
+    data_len: usize,
+    out: *mut GhosttySysImage,
+) -> bool;
 
 pub type GhosttyWriterFn = unsafe extern "C" fn(*mut c_void, *const u8, usize) -> bool;
 pub type GhosttyMimeReaderFn =
@@ -932,6 +1034,48 @@ unsafe extern "C" {
     /// `ghostty_free(const GhosttyAllocator*, uint8_t*, size_t)`. Pass NULL for
     /// the allocator when the buffer was allocated with the default one.
     pub fn ghostty_free(allocator: *const c_void, ptr: *mut u8, len: usize);
+
+    // `ghostty/vt/sys.h` and `ghostty/vt/allocator.h`.
+    pub fn ghostty_sys_set(option: i32, value: *const c_void) -> GhosttyResult;
+    pub fn ghostty_alloc(allocator: *const c_void, len: usize) -> *mut u8;
+
+    // `ghostty/vt/kitty_graphics.h`: active-screen storage, animations and
+    // image pixels. Every borrowed value is valid only until the next
+    // mutating terminal call.
+    pub fn ghostty_kitty_graphics_get(
+        graphics: GhosttyKittyGraphics,
+        data: i32,
+        out: *mut c_void,
+    ) -> GhosttyResult;
+    pub fn ghostty_kitty_graphics_animation_tick(
+        graphics: GhosttyKittyGraphics,
+        now_ms: u64,
+        next_ms: *mut u64,
+    ) -> GhosttyResult;
+    pub fn ghostty_kitty_graphics_image(
+        graphics: GhosttyKittyGraphics,
+        image_id: u32,
+    ) -> GhosttyKittyGraphicsImage;
+    pub fn ghostty_kitty_graphics_image_get(
+        image: GhosttyKittyGraphicsImage,
+        data: i32,
+        out: *mut c_void,
+    ) -> GhosttyResult;
+
+    // `ghostty/vt/render.h`: reusable placement iterator.
+    pub fn ghostty_render_state_image_iterator_new(
+        allocator: *const c_void,
+        out_iterator: *mut GhosttyRenderStateImageIterator,
+    ) -> GhosttyResult;
+    pub fn ghostty_render_state_image_iterator_free(iterator: GhosttyRenderStateImageIterator);
+    pub fn ghostty_render_state_image_iterator_next(
+        iterator: GhosttyRenderStateImageIterator,
+    ) -> bool;
+    pub fn ghostty_render_state_image_get(
+        iterator: GhosttyRenderStateImageIterator,
+        data: i32,
+        out: *mut c_void,
+    ) -> GhosttyResult;
 }
 
 #[cfg(test)]
@@ -966,5 +1110,26 @@ mod tests {
         assert_eq!(size_of::<GhosttyMouseEncoderSize>(), 40);
         assert_eq!(size_of::<GhosttyTerminalScrollViewport>(), 24);
         assert_eq!(size_of::<GhosttyTerminalScrollbar>(), 24);
+        assert_eq!(size_of::<GhosttySysImage>(), 24);
+        assert_eq!(size_of::<GhosttySysImage>().align(), 8);
+    }
+
+    #[test]
+    fn kitty_enum_values_match_pinned_headers() {
+        assert_eq!(GHOSTTY_IMAGE_LAYER_BELOW_BACKGROUND, 0);
+        assert_eq!(GHOSTTY_IMAGE_LAYER_BELOW_TEXT, 1);
+        assert_eq!(GHOSTTY_IMAGE_LAYER_ABOVE_TEXT, 2);
+        assert_eq!(GHOSTTY_KITTY_IMAGE_FORMAT_RGB, 0);
+        assert_eq!(GHOSTTY_KITTY_IMAGE_FORMAT_RGBA, 1);
+        assert_eq!(GHOSTTY_KITTY_IMAGE_FORMAT_PNG, 2);
+        assert_eq!(GHOSTTY_KITTY_IMAGE_FORMAT_GRAY_ALPHA, 3);
+        assert_eq!(GHOSTTY_KITTY_IMAGE_FORMAT_GRAY, 4);
+        assert_eq!(GHOSTTY_RENDER_STATE_IMAGE_DATA_PROTOCOL, 1);
+        assert_eq!(GHOSTTY_RENDER_STATE_IMAGE_DATA_KITTY_KIND, 19);
+        assert_eq!(GHOSTTY_RENDER_STATE_DATA_IMAGE_ITERATOR, 22);
+        assert_eq!(GHOSTTY_RENDER_STATE_DATA_IMAGE_PLACEMENTS_GENERATION, 23);
+        assert_eq!(GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_STORAGE_LIMIT, 16);
+        assert_eq!(GHOSTTY_TERMINAL_DATA_KITTY_GRAPHICS, 30);
+        assert_eq!(GHOSTTY_SYS_OPT_DECODE_PNG, 2);
     }
 }

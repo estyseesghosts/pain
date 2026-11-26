@@ -60,7 +60,8 @@ fn main() {
     }
 
     let zig = env::var_os("ZIG").unwrap_or_else(|| "zig".into());
-    let status = Command::new(&zig)
+    let mut command = Command::new(&zig);
+    command
         .arg("build")
         .arg("--build-file")
         .arg(source.join("build.zig"))
@@ -74,7 +75,21 @@ fn main() {
         // tags as if they were Ghostty releases.
         .arg("-Dversion-string=1.4.1")
         .arg("-Doptimize=ReleaseFast")
-        .arg("-Dcpu=baseline")
+        .arg("-Dcpu=baseline");
+    // Zig defaults to the host ABI. A windows-gnu Rust toolchain (used when
+    // MSVC is unavailable) must get a GNU-target library: the default MSVC
+    // target asks Zig for the MSVC CRT, which is not installed by the Zig
+    // distribution. This does not change the Ghostty source pin.
+    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let target_env = env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
+    let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_else(|_| "x86_64".into());
+    if target_os == "windows" && target_env == "gnu" {
+        command.arg(format!("-Dtarget={target_arch}-windows-gnu"));
+    }
+    if target_os == "linux" && target_env == "gnu" {
+        command.arg(format!("-Dtarget={target_arch}-linux-gnu"));
+    }
+    let status = command
         .status()
         .unwrap_or_else(|err| panic!("could not run {zig:?} to build libghostty-vt: {err}"));
     assert!(
@@ -132,13 +147,13 @@ fn main() {
                     OsString::from("ar"),
                     OsString::from("rcs"),
                     archive.clone().into_os_string(),
-                    obj.into_os_string(),
+                    obj.clone().into_os_string(),
                 ],
             );
             let compat_dir = compat_dir.to_string_lossy().replace('\\', "/");
             println!("cargo:rustc-link-search=native={compat_dir}");
             println!("cargo:rustc-link-lib=static=ghostty-vt-static");
-            println!("cargo:rustc-link-lib=static=pain_chkstk");
+            println!("cargo:rustc-link-lib=static:+whole-archive=pain_chkstk");
             println!("cargo:rustc-link-lib=dylib=ntdll");
             println!("cargo:rustc-link-lib=dylib=kernel32");
         }

@@ -1,6 +1,6 @@
 # Silvestris Terminal Demo — Engineering Packet
 
-This packet defines a deliberately small terminal application built as a **Silvestris consumer** on **Windows and Linux**. The program is intended to prove that a real terminal can live cleanly inside the current Silvestris/GPUI stack without importing the application complexity of Ghostty, Wintty, Zed, Windows Terminal, or a modern multi-pane terminal. The first useful version has one window, one terminal session, one shell, scrollback, keyboard and text input, selection/copy/paste, resize, focus, basic mouse support, and correct terminal colors. It has one small Preferences window for the Silvestris theme, terminal palette and default shell profile, plus a Windows taskbar jump list for starting each detected profile. It does not have tabs, splits, a command palette, shell integration, session restoration, remote-control APIs, image protocols or shader systems.
+This packet defines a deliberately small terminal application built as a **Silvestris consumer** on **Windows and Linux**. The program is intended to prove that a real terminal can live cleanly inside the current Silvestris/GPUI stack without importing the application complexity of Ghostty, Wintty, Zed, Windows Terminal, or a modern multi-pane terminal. The first useful version has one window, one terminal session, one shell, scrollback, keyboard and text input, selection/copy/paste, resize, focus, basic mouse support, and correct terminal colors. It has one small Preferences window for the Silvestris theme, terminal palette and default shell profile, plus a Windows taskbar jump list for starting each detected profile. It does not have tabs, splits, a command palette, shell integration, session restoration, remote-control APIs, Sixel image protocols or shader systems.
 
 The architectural decision is simple: **Ghostty owns terminal semantics; the application owns PTY transport; GPUI owns rendering and platform input; Silvestris owns the window shell and application chrome.** Current `libghostty-vt` is a particularly good fit because its terminal API explicitly states that a `GhosttyTerminal` keeps the screen, scrollback, cursor, styles, and modes while **not drawing and not talking to a PTY**; both are left to the embedder. Its render API exposes dirty/full/partial state and dirty-row iteration, so the GPUI renderer can redraw only what changed instead of copying or rebuilding the entire terminal every frame. See [Ghostty `terminal.h`](https://github.com/ghostty-org/ghostty/blob/64a6fedfd26d1fa687733f9f411db5eb8e205ebe/include/ghostty/vt/terminal.h) and [Ghostty `render.h`](https://github.com/ghostty-org/ghostty/blob/64a6fedfd26d1fa687733f9f411db5eb8e205ebe/include/ghostty/vt/render.h).
 
@@ -42,7 +42,8 @@ Silvestris / GPUI process
     ├─ GhosttyMouseEncoder                 introduced after keyboard baseline
     ├─ bounded/coalesced UI wakeup state
     └─ PlatformPty
-        ├─ Windows: OS ConPTY
+        ├─ Windows: bundled OpenConsole ConPTY
+        │  └─ kernel32 fallback (Kitty-degraded)
         └─ Linux: POSIX PTY
 ```
 
@@ -50,7 +51,7 @@ The initial implementation should be one Rust application crate plus the smalles
 
 ## What “minimal” means
 
-The first supported terminal should be able to run an interactive shell and ordinary TUIs correctly. A useful acceptance set is PowerShell/cmd on Windows, a normal `$SHELL` on Linux, plus applications such as `vim`, `htop`/`btop`, and a terminal agent/CLI. Correctness includes alternate screen, cursor modes, ANSI/256/true color, resizing, Ctrl combinations, arrow/function keys, bracketed paste, selection and scrollback. This does **not** imply support for every protocol Ghostty itself supports. Kitty graphics, Sixel, terminal notifications, semantic prompt navigation, shell integration, drag/drop payloads, hyperlinks, and OSC clipboard operations can remain disabled or ignored until deliberately scoped.
+The first supported terminal should be able to run an interactive shell and ordinary TUIs correctly. A useful acceptance set is PowerShell/cmd on Windows, a normal `$SHELL` on Linux, plus applications such as `vim`, `htop`/`btop`, and a terminal agent/CLI. Correctness includes alternate screen, cursor modes, ANSI/256/true color, resizing, Ctrl combinations, arrow/function keys, bracketed paste, selection, scrollback and Kitty graphics. This does **not** imply support for every protocol Ghostty itself supports. Sixel, terminal notifications, semantic prompt navigation, shell integration, drag/drop payloads, hyperlinks, and OSC clipboard operations can remain disabled or ignored until deliberately scoped.
 
 The visual target is likewise modest: a single Snow Leopard-era Terminal.app-like Aqua window, using Silvestris chrome and a clean terminal canvas. Terminal content should not be “Aqua themed” after the fact. VT colors and the application's own ANSI palette belong to terminal semantics. Silvestris should provide the surrounding window, default mono font choice and chrome; Ghostty's parsed terminal state remains authoritative for per-cell color/style.
 
@@ -66,7 +67,7 @@ Do not embed Ghostty's Metal/OpenGL renderer or Wintty's DX12 renderer inside GP
 
 Do not copy Ghostty's whole application architecture. Ghostty's README describes a dedicated read thread, write thread and render thread per terminal in the full application, but this app does not need a separate GPU render thread because GPUI already owns frame rendering. A dedicated reader and writer path is enough; the terminal renderer runs as part of GPUI's frame. See [Ghostty README](https://github.com/ghostty-org/ghostty/blob/64a6fedfd26d1fa687733f9f411db5eb8e205ebe/README.md).
 
-Do not adopt Wintty's WinUI 3 shell. Wintty is a reference for Windows PTY and edge cases, not a dependency. Its current Windows PTY implementation uses ConPTY and optionally a bundled newer `conpty.dll`; the OS fallback loses some graphics-protocol pass-through. Because graphics protocols are deliberately out of scope here, the first build should use the OS ConPTY and avoid shipping a private ConPTY DLL. See [Wintty `src/pty.zig`](https://github.com/pawaca/wintty/blob/047cd33cd1a24602cc4887ac260e2f922943cac0/src/pty.zig).
+Do not adopt Wintty's WinUI 3 shell. Wintty is a reference for Windows PTY and edge cases, not a dependency. Its current Windows PTY implementation uses ConPTY and optionally a bundled newer `conpty.dll`; the OS fallback loses some graphics-protocol pass-through. Pain now prefers a bundled, pinned OpenConsole pair from the MIT-licensed `Microsoft.Windows.Console.ConPTY` NuGet package because Kitty graphics travel in APCs that the in-box host strips. If the bundled pair is absent, Pain falls back to `kernel32` and logs the transport as Kitty-graphics-degraded. See [Wintty `src/pty.zig`](https://github.com/pawaca/wintty/blob/047cd33cd1a24602cc4887ac260e2f922943cac0/src/pty.zig) and [`windows/conpty/README.md`](windows/conpty/README.md).
 
 ## Implementation status
 
@@ -94,9 +95,10 @@ M0–M7 are implemented and smoke-tested on Windows and Linux/WSLg.
   cover coalescing, lost-wakeup re-arming, concurrent rendering and resize
   suppression. `PAIN_STRESS=1` runs the synthetic background producer.
 
-- M3: `src/platform/windows.rs` creates an OS ConPTY with anonymous pipes,
-  attaches the selected profile (`pwsh7`/`pwsh5`/`cmd` or `--shell`) through
-  `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE`,
+- M3: `src/platform/windows.rs` resolves the bundled OpenConsole `conpty.dll`
+  (falling back to `kernel32` with a degraded warning), creates the ConPTY with
+  pipes, attaches the selected profile (`pwsh7`/`pwsh5`/`cmd` or `--shell`)
+  through `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE`,
   and runs blocking reader/writer/waiter threads off the GPUI foreground thread.
   `src/platform/mod.rs` owns the shell policy and conservative terminal
   environment. Windows command-line quoting and environment-block construction
@@ -182,8 +184,8 @@ verification.
 - No raw PTY writes for paste when Ghostty can apply bracketed-paste semantics.
 - No independent GPUI upgrade from the Silvestris pin.
 - No tracking Ghostty `main` in a shipping build.
-- No bundled ConPTY DLL in the first Windows version.
-- No image protocols in the first version.
+- No Windows release that claims Kitty graphics without the pinned, bundled OpenConsole `conpty.dll`; the `kernel32` fallback is documented as Kitty-graphics-degraded.
+- No Sixel image protocol. Kitty graphics is implemented for direct/PNG transmission, fixed, relative and Unicode-placeholder placements, and animation.
 - No macOS implementation code claimed as supported without a test machine/CI.
 - No blocking PTY read/write, process wait or large terminal parse operation on GPUI's foreground thread.
 

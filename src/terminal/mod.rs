@@ -12,12 +12,15 @@ pub mod session;
 pub mod writer;
 
 #[cfg(feature = "shell")]
+pub mod images;
+#[cfg(feature = "shell")]
 pub mod render;
 
 pub use ghostty::{
     paste_encode, paste_is_safe, CallbackRegistration, Cell, Colors, Cursor, FrameMeta,
-    GhosttyRenderState, GhosttyTerminal, GhosttyError, KeyEncoder, KeyEvent, MouseEncoder,
-    MouseEvent, RenderFrame, RenderSnapshot, RowSelection, Style,
+    GhosttyRenderState, GhosttyTerminal, GhosttyError, ImagePlacement, ImagePlacementCache,
+    KeyEncoder, KeyEvent, KittyConfig, KittyImagePixels, MouseEncoder, MouseEvent, RenderFrame,
+    RenderSnapshot, RowSelection, Style,
 };
 pub use session::{CountersSnapshot, TerminalSession, WakeupSink};
 pub use writer::{WriterQueue, WriterStats};

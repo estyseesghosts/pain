@@ -188,6 +188,24 @@ impl TerminalGeometry {
             (f32::from(self.rows) * self.cell_height).max(1.0) as u32,
         )
     }
+
+    /// Cell size in terminal/device pixels. Ghostty's `CELL_OFFSET_*`,
+    /// `PIXEL_WIDTH/HEIGHT` and size-report geometry all use these units, while
+    /// GPUI drawing coordinates stay in logical pixels.
+    #[must_use]
+    pub fn cell_device_pixels(&self) -> (u32, u32) {
+        let convert = |logical: f32| -> u32 {
+            let scaled = (logical * self.scale).round();
+            if !scaled.is_finite() || scaled < 1.0 {
+                1
+            } else if scaled >= u32::MAX as f32 {
+                u32::MAX
+            } else {
+                scaled as u32
+            }
+        };
+        (convert(self.cell_width), convert(self.cell_height))
+    }
 }
 
 /// Everything that forces two adjacent cells into different text runs.
@@ -658,5 +676,36 @@ mod tests {
             Some((3, 4))
         );
         assert_eq!(selection_span(None), None);
+    }
+
+    #[test]
+    fn device_cell_pixels_follow_scale_while_the_grid_stays_put() {
+        let metrics = CellMetrics::new(10.0, 20.0);
+        let bounds = (1000.0, 500.0);
+        let mut previous_pixels = None;
+        for scale in [1.0f32, 1.25, 1.5, 2.0] {
+            let geometry = TerminalGeometry::new((0.0, 0.0), bounds, &metrics, scale);
+            // Same logical bounds and metrics: DPI never changes the grid.
+            assert_eq!(geometry.grid(), (100, 25), "grid changed at scale {scale}");
+            let (width, height) = geometry.cell_device_pixels();
+            assert_eq!(width, (10.0 * scale).round() as u32);
+            assert_eq!(height, (20.0 * scale).round() as u32);
+            assert!(width >= 1 && height >= 1);
+            if let Some(previous) = previous_pixels {
+                assert_ne!((width, height), previous, "scale {scale} was ignored");
+            }
+            previous_pixels = Some((width, height));
+        }
+        let at_125 = TerminalGeometry::new((0.0, 0.0), bounds, &metrics, 1.25);
+        assert_eq!(at_125.cell_device_pixels(), (13, 25));
+        let at_150 = TerminalGeometry::new((0.0, 0.0), bounds, &metrics, 1.5);
+        assert_eq!(at_150.cell_device_pixels(), (15, 30));
+    }
+
+    #[test]
+    fn device_cell_pixels_never_returns_zero() {
+        let metrics = CellMetrics::new(0.4, 0.4);
+        let geometry = TerminalGeometry::new((0.0, 0.0), (10.0, 10.0), &metrics, 0.25);
+        assert_eq!(geometry.cell_device_pixels(), (1, 1));
     }
 }

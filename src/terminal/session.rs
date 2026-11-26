@@ -12,7 +12,8 @@ use std::time::Instant;
 
 use crate::terminal::ghostty::{
     ghostty_vt_sys as sys, CallbackRegistration, GhosttyError, GhosttyRenderState, GhosttyTerminal,
-    KeyEncoder, KeyEvent, MouseEncoder, MouseEvent, RenderSnapshot, SelectionGesture,
+    KeyEncoder, KeyEvent, KittyConfig, KittyImagePixels, KittyImageRead, MouseEncoder, MouseEvent,
+    RenderSnapshot, SelectionGesture,
 };
 use crate::terminal::writer::WriterQueue;
 
@@ -121,6 +122,18 @@ pub struct CountersSnapshot {
     pub rows_materialized: u64,
     pub row_cache_copies: u64,
     pub scroll_lock_acquisitions: u64,
+    // Kitty graphics. Placement work is separate from row work by design.
+    pub image_placement_list_rebuilds: u64,
+    pub image_placement_cache_hits: u64,
+    pub image_pixel_reads: u64,
+    pub image_pixel_bytes_copied: u64,
+    pub image_cache_misses: u64,
+    pub image_generation_races: u64,
+    pub image_texture_uploads: u64,
+    pub image_texture_evictions: u64,
+    pub image_copy_lock_max_micros: u64,
+    pub kitty_animation_ticks: u64,
+    pub kitty_animation_frames: u64,
 }
 
 #[derive(Default)]
@@ -164,6 +177,17 @@ struct Counters {
     row_cache_copies: AtomicU64,
     scroll_lock_acquisitions: AtomicU64,
     title_changes: AtomicU64,
+    image_placement_list_rebuilds: AtomicU64,
+    image_placement_cache_hits: AtomicU64,
+    image_pixel_reads: AtomicU64,
+    image_pixel_bytes_copied: AtomicU64,
+    image_cache_misses: AtomicU64,
+    image_generation_races: AtomicU64,
+    image_texture_uploads: AtomicU64,
+    image_texture_evictions: AtomicU64,
+    image_copy_lock_max_micros: AtomicU64,
+    kitty_animation_ticks: AtomicU64,
+    kitty_animation_frames: AtomicU64,
 }
 
 impl Counters {
@@ -236,18 +260,30 @@ impl Counters {
             rows_materialized: get!(rows_materialized),
             row_cache_copies: get!(row_cache_copies),
             scroll_lock_acquisitions: get!(scroll_lock_acquisitions),
+            image_placement_list_rebuilds: get!(image_placement_list_rebuilds),
+            image_placement_cache_hits: get!(image_placement_cache_hits),
+            image_pixel_reads: get!(image_pixel_reads),
+            image_pixel_bytes_copied: get!(image_pixel_bytes_copied),
+            image_cache_misses: get!(image_cache_misses),
+            image_generation_races: get!(image_generation_races),
+            image_texture_uploads: get!(image_texture_uploads),
+            image_texture_evictions: get!(image_texture_evictions),
+            image_copy_lock_max_micros: get!(image_copy_lock_max_micros),
+            kitty_animation_ticks: get!(kitty_animation_ticks),
+            kitty_animation_frames: get!(kitty_animation_frames),
         }
     }
 }
 
 /// Deliberate scrollback caps and starting grid. Ghostty's default byte cap is
 /// 10 KiB, which discards usable history almost immediately.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SessionConfig {
     pub cols: u16,
     pub rows: u16,
     pub scrollback_lines: usize,
     pub scrollback_bytes: usize,
+    pub kitty: KittyConfig,
 }
 
 impl Default for SessionConfig {
@@ -257,6 +293,7 @@ impl Default for SessionConfig {
             rows: 24,
             scrollback_lines: 10_000,
             scrollback_bytes: 16 * 1024 * 1024,
+            kitty: KittyConfig::default(),
         }
     }
 }
@@ -314,6 +351,10 @@ pub struct TerminalSession {
     geometry: Mutex<AppliedGeometry>,
     pty_resize: Mutex<Option<PtyResize>>,
     counters: Arc<Counters>,
+    /// One monotonic clock origin for this terminal's Kitty animations. Never
+    /// reset on resize, alternate-screen switches or pause.
+    kitty_clock: Instant,
+    kitty_config: KittyConfig,
 }
 
 impl TerminalSession {
@@ -333,6 +374,11 @@ impl TerminalSession {
         wakeup: Box<dyn WakeupSink>,
     ) -> Result<Self, GhosttyError> {
         let mut terminal = GhosttyTerminal::new(config.cols, config.rows)?;
+        let kitty = config.kitty.clone().validated();
+        // Policy is applied immediately after creation, on the one terminal
+        // that this session will own. It cannot be re-applied later because
+        // the storage cap is part of the terminal's live state.
+        terminal.apply_kitty_config(&kitty)?;
         terminal.set_scrollback_limits(config.scrollback_lines, config.scrollback_bytes);
         let selection_gesture = SelectionGesture::new(&terminal)?;
         Ok(Self {
@@ -357,6 +403,8 @@ impl TerminalSession {
             }),
             pty_resize: Mutex::new(None),
             counters: Arc::new(Counters::default()),
+            kitty_clock: Instant::now(),
+            kitty_config: kitty,
         })
     }
 
@@ -471,6 +519,11 @@ impl TerminalSession {
         Counters::add(&self.counters.render_state_updates, 1);
         // Read metadata first, then materialize ONLY the rows this frame needs.
         let meta = state.snapshot_meta()?;
+        if meta.image_placements_rebuilt {
+            Counters::add(&self.counters.image_placement_list_rebuilds, 1);
+        } else {
+            Counters::add(&self.counters.image_placement_cache_hits, 1);
+        }
         let mut needed = vec![false; usize::from(meta.rows)];
         match meta.dirty {
             sys::GHOSTTY_RENDER_STATE_DIRTY_FULL => needed.fill(true),
@@ -513,6 +566,119 @@ impl TerminalSession {
             .lock()
             .expect("render-state mutex poisoned")
             .clean()
+    }
+
+    /// Current time on the terminal's single monotonic Kitty clock.
+    #[must_use]
+    pub fn kitty_clock_ms(&self) -> u64 {
+        u64::try_from(self.kitty_clock.elapsed().as_millis()).unwrap_or(u64::MAX)
+    }
+
+    /// The validated transport policy this session was created with.
+    #[must_use]
+    pub fn kitty_config(&self) -> &KittyConfig {
+        &self.kitty_config
+    }
+
+    /// Query the live policy from Ghostty: storage limit, file medium, shared
+    /// memory medium. Used by policy tests and the documented smoke gate.
+    pub fn kitty_policy_state(&self) -> Result<(u64, bool, bool), GhosttyError> {
+        let terminal = self.terminal.lock().expect("terminal mutex poisoned");
+        Ok((
+            terminal.kitty_storage_limit()?,
+            terminal.kitty_medium_flags()?.0,
+            terminal.kitty_medium_flags()?.1,
+        ))
+    }
+
+    /// Advance Kitty animation by at most one frame. Demand-driven: callers
+    /// schedule the returned deadline rather than polling. Returns the next
+    /// absolute time on [`Self::kitty_clock_ms`], or `None` when nothing plays.
+    pub fn tick_kitty_animation(&self, now_ms: u64) -> Result<Option<u64>, GhosttyError> {
+        let start = Instant::now();
+        let mut terminal = self.terminal.lock().expect("terminal mutex poisoned");
+        Counters::add(&self.counters.terminal_lock_acquisitions, 1);
+        Counters::add(&self.counters.kitty_animation_ticks, 1);
+        let before = terminal.kitty_storage_generation().unwrap_or(0);
+        let next = terminal.tick_kitty_animation(now_ms)?;
+        let after = terminal.kitty_storage_generation().unwrap_or(before);
+        let elapsed = Counters::micros(start);
+        Counters::add(
+            &self.counters.terminal_lock_hold_total_micros,
+            elapsed,
+        );
+        Counters::record_max(
+            &self.counters.terminal_lock_hold_max_micros,
+            elapsed,
+        );
+        drop(terminal);
+        if before != after {
+            Counters::add(&self.counters.kitty_animation_frames, 1);
+            self.notify_changed();
+        }
+        Ok(next)
+    }
+
+    /// Copy raw pixels for the requested `(image_id, generation)` pairs in one
+    /// terminal-lock critical section. Duplicate requests are deduplicated
+    /// before the lock. Generation races are normal and are simply skipped.
+    pub fn read_kitty_images(&self, requested: &[(u32, u64)]) -> Vec<KittyImagePixels> {
+        if requested.is_empty() {
+            return Vec::new();
+        }
+        // Deduplicate without holding the terminal lock. The request list is
+        // the renderer's missing-texture set, so it is normally tiny.
+        let mut unique: Vec<(u32, u64)> = Vec::with_capacity(requested.len());
+        for &item in requested {
+            if !unique.contains(&item) {
+                unique.push(item);
+            }
+        }
+        Counters::add(
+            &self.counters.image_cache_misses,
+            unique.len() as u64,
+        );
+        let start = Instant::now();
+        let mut copied = Vec::with_capacity(unique.len());
+        {
+            let terminal = self.terminal.lock().expect("terminal mutex poisoned");
+            Counters::add(&self.counters.terminal_lock_acquisitions, 1);
+            let graphics = match terminal.kitty_graphics() {
+                Ok(graphics) => graphics,
+                Err(_) => return copied,
+            };
+            for (image_id, generation) in unique {
+                match GhosttyTerminal::read_kitty_image_from(graphics, image_id, generation) {
+                    Ok(KittyImageRead::Pixels(pixels)) => {
+                        Counters::add(&self.counters.image_pixel_reads, 1);
+                        Counters::add(
+                            &self.counters.image_pixel_bytes_copied,
+                            pixels.pixels.len() as u64,
+                        );
+                        copied.push(pixels);
+                    }
+                    Ok(KittyImageRead::GenerationChanged) => {
+                        Counters::add(&self.counters.image_generation_races, 1);
+                    }
+                    Ok(KittyImageRead::Missing) => {}
+                    Err(_) => {}
+                }
+            }
+            let elapsed = Counters::micros(start);
+            Counters::add(
+                &self.counters.terminal_lock_hold_total_micros,
+                elapsed,
+            );
+            Counters::record_max(
+                &self.counters.terminal_lock_hold_max_micros,
+                elapsed,
+            );
+            Counters::record_max(
+                &self.counters.image_copy_lock_max_micros,
+                elapsed,
+            );
+        }
+        copied
     }
 
     /// Apply layout-derived geometry. This is called from prepaint, which
@@ -1058,6 +1224,18 @@ impl CountersHandle {
     }
     pub fn paint_micros(&self, micros: u64) {
         Counters::add(&self.0.paint_micros, micros);
+    }
+    pub fn image_texture_upload(&self) {
+        Counters::add(&self.0.image_texture_uploads, 1);
+    }
+    pub fn image_texture_eviction(&self) {
+        Counters::add(&self.0.image_texture_evictions, 1);
+    }
+    pub fn image_placement_list_rebuild(&self) {
+        Counters::add(&self.0.image_placement_list_rebuilds, 1);
+    }
+    pub fn image_placement_cache_hit(&self) {
+        Counters::add(&self.0.image_placement_cache_hits, 1);
     }
 }
 

@@ -141,6 +141,7 @@ pub fn run() {
             rows: 24,
             scrollback_lines: config.scrollback_lines,
             scrollback_bytes: config.scrollback_bytes,
+            ..SessionConfig::default()
         };
         let session = Arc::new(
             TerminalSession::new_with_config(

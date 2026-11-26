@@ -13,6 +13,9 @@ members = ["crates/ghostty-vt-sys"]
 [dependencies]
 ghostty-vt-sys = { path = "crates/ghostty-vt-sys" }
 serde = { version = "1", features = ["derive"] }
+# Already in the lockfile through GPUI. Pain only uses the PNG decoder, which
+# feeds Ghostty's process-global GhosttySysDecodePngFn.
+image = { version = "=0.25.10", default-features = false, features = ["png"] }
 
 [build-dependencies]
 # Only used on MSVC hosts to locate the Windows SDK's rc.exe for the icon.
@@ -28,6 +31,7 @@ windows = { version = "0.61.3", features = [
     "Win32_System_Com_StructuredStorage",
     "Win32_System_Console",
     "Win32_System_IO",
+    "Win32_System_LibraryLoader",
     "Win32_System_Pipes",
     "Win32_System_Registry",
     "Win32_System_Threading",

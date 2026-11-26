@@ -248,12 +248,46 @@ and preserve the user's locale/environment. Revisit `TERM` only after a capabili
 
 ## 12. Graphics protocols
 
-The current render state exposes image iterators and Kitty image placement metadata. Do **not** render those in MVP. They are useful proof that future extension is possible without changing terminal architecture. Until implemented:
+Kitty graphics is implemented end to end; Sixel is not.
 
-- cap/disable image storage where possible;
-- ignore or reject graphics behavior consistently;
-- do not bundle Wintty's newer ConPTY just to pass graphics sequences through;
-- do not claim Kitty/Sixel support.
+The render state's image-placement iterator is the renderer's **sole** source of
+placement geometry. Ghostty already resolves fixed placements, Unicode
+placeholders, relative-placement chains, scrolling, resize, clipping and source
+rectangles; Pain does not reimplement any of that.
+
+The pipeline is:
+
+- a process-global, bounded PNG decoder installed before the first terminal;
+- `GHOSTTY_RENDER_STATE_DATA_IMAGE_PLACEMENTS_GENERATION` as the placement-cache
+  key (never the storage generation, because scrolling moves placements without
+  changing storage);
+- one reusable `GhosttyRenderStateImageIterator`, rebuilt only when that
+  generation changes and sorted by `(layer, z)`;
+- an owned `ImagePlacement` list in `FrameMeta`, never attached to the row
+  cache;
+- a batched `TerminalSession::read_kitty_images()` that copies raw pixels under
+  one terminal lock and skips generation races;
+- a GPUI texture cache keyed by `(protocol, image_id, generation)` in
+  `src/terminal/images.rs`, with explicit `Window::drop_image()` eviction;
+- one demand-driven `tick_kitty_animation()` clock, scheduled by `TerminalView`
+  with epochs rather than a frame loop.
+
+Paint order is fixed:
+
+`Kitty BELOW_BACKGROUND -> terminal/cell backgrounds -> Kitty BELOW_TEXT ->
+shaped text -> Kitty ABOVE_TEXT -> cursor -> IME preedit -> scrollbar`.
+
+Source rectangles are projected, not cropped: the full image is placed behind
+the destination and `Window::paint_image` derives the atlas subregion from the
+difference between `image_bounds` and the clipped `bounds`. Terminal/device
+pixels are divided by the window scale; image pixels never are.
+
+Transport policy is explicit and finite: direct inline transfer is the portable
+default, the arbitrary-file medium is disabled by default, the temp-file medium
+requires an allowed directory, and shared memory is only enabled where the host
+namespace is meaningful. On Windows, a bundled, pinned OpenConsole
+`conpty.dll` is preferred because the in-box host strips unknown APCs; the
+`kernel32` fallback is logged as Kitty-graphics-degraded.
 
 ## 13. Unknown/custom sequences
 

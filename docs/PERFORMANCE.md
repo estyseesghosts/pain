@@ -108,6 +108,77 @@ A healthy output burst should show many PTY reads but far fewer GUI wakeups.
 - terminal prepaint time;
 - terminal paint time.
 
+### Kitty graphics
+
+Kitty work has its own generation-based model; it is never attached to the row
+dirty mask. `CountersSnapshot` reports:
+
+- `image_placement_list_rebuilds` / `image_placement_cache_hits` — placement
+  iterator calls only when `IMAGE_PLACEMENTS_GENERATION` changes;
+- `image_pixel_reads` / `image_pixel_bytes_copied` — raw copies under one
+  terminal lock, deduplicated by `(image_id, generation)`;
+- `image_cache_misses` / `image_generation_races` — missing textures and
+  generations superseded between the render-state snapshot and the pixel read;
+- `image_texture_uploads` / `image_texture_evictions` — GPUI atlas work;
+- `image_copy_lock_max_micros` — worst terminal-lock hold during a pixel copy;
+- `kitty_animation_ticks` / `kitty_animation_frames` — demand-driven animation
+  clock, not a frame loop.
+
+`tests/m6.rs` asserts these invariants:
+
+- static image + cursor blink: zero placement rebuilds, zero pixel reads,
+  zero texture uploads, zero row reshaping;
+- static image + heavy text flood: no texture re-upload unless the image
+  generation changes;
+- image-only animation frame: zero row materialization and zero `shape_line`
+  calls;
+- placement scroll: placement-list rebuild allowed, no extra pixel upload when
+  the image generation is unchanged;
+- font/DPI resize: Ghostty geometry changes, unchanged grid does not resize the
+  OS PTY;
+- image deletion/generation change: the old GPUI texture is evicted;
+- a long image session stays bounded by the configured storage cap.
+
+The `m6` tests print one `M6 <case>:` line per scenario; capture those lines
+from a release build with:
+
+```sh
+cargo test --release --test m6 -- --nocapture
+```
+
+Representative Windows GNU release results (one run; timings are wall-clock
+microseconds and vary with machine load):
+
+| Case | Key evidence |
+|---|---|
+| output flood | 8000 writes / 216000 bytes -> 1 scheduled wakeup, 55 render updates, max terminal lock 693 us |
+| static image + cursor | 1 placement rebuild, 1 cache hit, 0 pixel reads, 0 uploads, 0 rebuilt rows, 0 `shape_line` calls |
+| animation frame | 2 placement rebuilds, 1 tick / 1 frame, 0 rebuilt rows, 0 `shape_line` calls |
+| placement scroll | 1 rebuild + 1 hit, 2 pixel reads (8 bytes), 0 uploads, copy lock max 88 us |
+| DPI-only resize | 2 Ghostty geometry updates, 0 OS PTY grid resizes |
+| resize storm | 10 Ghostty geometry updates, 9 coalesced OS PTY resizes |
+| bounded images | 100 transmitted images under a 64-byte storage cap stay bounded; max terminal lock 726 us |
+
+WSL/Linux release results for the same matrix (same machine family, different
+scheduler and filesystem):
+
+| Case | Key evidence |
+|---|---|
+| output flood | 8000 writes / 216000 bytes -> 1 scheduled wakeup, 126 render updates, max terminal lock 278 us |
+| static image + cursor | 1 placement rebuild, 1 cache hit, 0 pixel reads, 0 uploads, 0 rebuilt rows |
+| animation frame | 2 placement rebuilds, 1 tick / 1 frame, 0 rebuilt rows, 0 `shape_line` calls |
+| placement scroll | 1 rebuild + 1 hit, 2 pixel reads (8 bytes), 0 uploads, copy lock max 1 us |
+| DPI-only resize | 2 Ghostty geometry updates, 0 OS PTY grid resizes |
+| resize storm | 10 Ghostty geometry updates, 9 coalesced OS PTY resizes |
+| bounded images | 100 transmitted images under a 64-byte storage cap stay bounded; max terminal lock 44 us |
+
+The WSLg GUI gate additionally ran `chafa --format kitty` through the real
+window; the gradient image was visible at the terminal origin, proving the
+Geometry -> Ghostty render state -> pixel copy -> GPUI texture -> paint path on
+Linux. The same fixed image, plus placeholders and animation, are covered
+deterministically by `tests/kitty.rs`.
+
+
 ### Resize
 
 - GPUI bounds changes observed;

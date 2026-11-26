@@ -8,11 +8,13 @@
 
 use std::ffi::{c_void, CStr};
 use std::fmt;
+use std::io::Cursor as IoCursor;
 use std::marker::PhantomData;
 use std::mem::MaybeUninit;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use ghostty_vt_sys as sys;
 pub use ghostty_vt_sys;
@@ -61,6 +63,221 @@ fn check(result: sys::GhosttyResult) -> Result<(), GhosttyError> {
     } else {
         Err(GhosttyError(result))
     }
+}
+
+/// Hard ceiling for one decoded PNG. This is deliberately higher than the
+/// default 10 MB Kitty storage limit because a bounded PNG may legitimately
+/// expand several-fold, and deliberately far below "unlimited": a malicious
+/// image must not be able to make the Rust decoder allocate without bound.
+const MAX_DECODED_IMAGE_BYTES: u64 = 64 * 1024 * 1024;
+/// Refuse absurd dimensions even before the byte check. Ghostty's own limit is
+/// lower; this only protects the decoder's intermediate allocations.
+const MAX_DECODED_IMAGE_DIMENSION: u32 = 16_384;
+
+/// Process-global Ghostty system callback installation. `ghostty_sys_set` is
+/// documented as not thread-safe, so this runs exactly once, before the first
+/// terminal is created. `OnceLock` also guarantees it can never be cleared or
+/// replaced while a terminal exists.
+static SYS_INIT: OnceLock<sys::GhosttyResult> = OnceLock::new();
+
+/// Install the PNG decoder before any terminal can be created. GUI sessions
+/// and headless tests both go through `GhosttyTerminal::new`, which calls this.
+fn ensure_sys_initialized() -> Result<(), GhosttyError> {
+    let result = *SYS_INIT.get_or_init(|| {
+        let decode: sys::GhosttySysDecodePngFn = decode_png_callback;
+        // The C API's input type for this option is the function pointer
+        // itself (cast to `const void*`), not a pointer to a function-pointer
+        // slot. Zig stores the value verbatim and later calls it.
+        unsafe {
+            sys::ghostty_sys_set(
+                sys::GHOSTTY_SYS_OPT_DECODE_PNG,
+                decode as *const () as *const c_void,
+            )
+        }
+    });
+    check(result)
+}
+
+/// Convert one decoded 8-bit image to tightly packed RGBA8.
+fn rgba_from_decoded(
+    width: u32,
+    height: u32,
+    color: image::ColorType,
+    bytes: &[u8],
+) -> Option<Vec<u8>> {
+    let pixels = usize::try_from(width).ok()?.checked_mul(height as usize)?;
+    let rgba_len = pixels.checked_mul(4)?;
+    let mut rgba = vec![0u8; rgba_len];
+    let take = |value: u16| -> u8 { (value >> 8) as u8 };
+    match color {
+        image::ColorType::L8 => {
+            if bytes.len() < pixels {
+                return None;
+            }
+            for (dst, src) in rgba.chunks_exact_mut(4).zip(bytes.iter()) {
+                dst.copy_from_slice(&[*src, *src, *src, 0xff]);
+            }
+        }
+        image::ColorType::La8 => {
+            if bytes.len() < pixels.checked_mul(2)? {
+                return None;
+            }
+            for (dst, src) in rgba.chunks_exact_mut(4).zip(bytes.chunks_exact(2)) {
+                dst.copy_from_slice(&[src[0], src[0], src[0], src[1]]);
+            }
+        }
+        image::ColorType::Rgb8 => {
+            if bytes.len() < pixels.checked_mul(3)? {
+                return None;
+            }
+            for (dst, src) in rgba.chunks_exact_mut(4).zip(bytes.chunks_exact(3)) {
+                dst.copy_from_slice(&[src[0], src[1], src[2], 0xff]);
+            }
+        }
+        image::ColorType::Rgba8 => {
+            if bytes.len() < rgba_len {
+                return None;
+            }
+            rgba.copy_from_slice(&bytes[..rgba_len]);
+        }
+        image::ColorType::L16 => {
+            if bytes.len() < pixels.checked_mul(2)? {
+                return None;
+            }
+            for (dst, src) in rgba
+                .chunks_exact_mut(4)
+                .zip(bytes.chunks_exact(2))
+            {
+                let value = u16::from_ne_bytes([src[0], src[1]]);
+                let v = take(value);
+                dst.copy_from_slice(&[v, v, v, 0xff]);
+            }
+        }
+        image::ColorType::La16 => {
+            if bytes.len() < pixels.checked_mul(4)? {
+                return None;
+            }
+            for (dst, src) in rgba
+                .chunks_exact_mut(4)
+                .zip(bytes.chunks_exact(4))
+            {
+                let value = u16::from_ne_bytes([src[0], src[1]]);
+                let v = take(value);
+                dst.copy_from_slice(&[v, v, v, take(u16::from_ne_bytes([src[2], src[3]]))]);
+            }
+        }
+        image::ColorType::Rgb16 => {
+            if bytes.len() < pixels.checked_mul(6)? {
+                return None;
+            }
+            for (dst, src) in rgba
+                .chunks_exact_mut(4)
+                .zip(bytes.chunks_exact(6))
+            {
+                let r = take(u16::from_ne_bytes([src[0], src[1]]));
+                let g = take(u16::from_ne_bytes([src[2], src[3]]));
+                let b = take(u16::from_ne_bytes([src[4], src[5]]));
+                dst.copy_from_slice(&[r, g, b, 0xff]);
+            }
+        }
+        image::ColorType::Rgba16 => {
+            if bytes.len() < pixels.checked_mul(8)? {
+                return None;
+            }
+            for (dst, src) in rgba
+                .chunks_exact_mut(4)
+                .zip(bytes.chunks_exact(8))
+            {
+                let r = take(u16::from_ne_bytes([src[0], src[1]]));
+                let g = take(u16::from_ne_bytes([src[2], src[3]]));
+                let b = take(u16::from_ne_bytes([src[4], src[5]]));
+                let a = take(u16::from_ne_bytes([src[6], src[7]]));
+                dst.copy_from_slice(&[r, g, b, a]);
+            }
+        }
+        _ => return None,
+    }
+    Some(rgba)
+}
+
+/// Decode a PNG and return the color type alongside the raw decoded bytes.
+fn decode_png_raw(data: &[u8]) -> Option<(u32, u32, image::ColorType, Vec<u8>)> {
+    use image::ImageDecoder;
+
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_DECODED_IMAGE_DIMENSION);
+    limits.max_image_height = Some(MAX_DECODED_IMAGE_DIMENSION);
+    limits.max_alloc = Some(MAX_DECODED_IMAGE_BYTES);
+    let decoder = image::codecs::png::PngDecoder::with_limits(IoCursor::new(data), limits).ok()?;
+    let (width, height) = decoder.dimensions();
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let pixels = u64::from(width).checked_mul(u64::from(height))?;
+    if pixels.checked_mul(4)? > MAX_DECODED_IMAGE_BYTES {
+        return None;
+    }
+    let total = decoder.total_bytes();
+    if total == 0 || total > MAX_DECODED_IMAGE_BYTES {
+        return None;
+    }
+    let color = decoder.color_type();
+    let mut decoded = vec![0u8; usize::try_from(total).ok()?];
+    decoder.read_image(&mut decoded).ok()?;
+    Some((width, height, color, decoded))
+}
+
+/// `GhosttySysDecodePngFn`. Returns false on every failure and never lets a
+/// panic cross the C boundary.
+unsafe extern "C" fn decode_png_callback(
+    _userdata: *mut c_void,
+    allocator: *const c_void,
+    data: *const u8,
+    data_len: usize,
+    out: *mut sys::GhosttySysImage,
+) -> bool {
+    if data.is_null() || out.is_null() || data_len == 0 {
+        return false;
+    }
+    // SAFETY: Ghostty guarantees `data` is readable for `data_len` bytes for
+    // the duration of the callback. Copy nothing yet; the slice is only read
+    // inside the guarded body below.
+    let input = unsafe { std::slice::from_raw_parts(data, data_len) };
+    catch_unwind(AssertUnwindSafe(|| {
+        let Some((width, height, color, decoded)) = decode_png_raw(input) else {
+            return false;
+        };
+        let Some(rgba) = rgba_from_decoded(width, height, color, &decoded) else {
+            return false;
+        };
+        let Some(len) = usize::try_from(width)
+            .ok()
+            .and_then(|w| w.checked_mul(usize::try_from(height).ok()?))
+            .and_then(|p| p.checked_mul(4))
+        else {
+            return false;
+        };
+        if len != rgba.len() {
+            return false;
+        }
+        // SAFETY: `allocator` is the allocator Ghostty supplied for this
+        // callback; only Ghostty's own alloc/free functions may touch it.
+        let buffer = unsafe { sys::ghostty_alloc(allocator, len) };
+        if buffer.is_null() {
+            return false;
+        }
+        // SAFETY: `ghostty_alloc` returned at least `len` writable bytes and
+        // `rgba` is exactly `len` bytes. Ownership transfers on `true`.
+        unsafe {
+            ptr::copy_nonoverlapping(rgba.as_ptr(), buffer, len);
+            (*out).width = width;
+            (*out).height = height;
+            (*out).data = buffer;
+            (*out).data_len = len;
+        }
+        true
+    }))
+    .unwrap_or(false)
 }
 
 /// The runtime version of the linked static library.
@@ -165,6 +382,13 @@ pub struct FrameMeta {
     pub colors: Colors,
     pub selections: Vec<Option<RowSelection>>,
     pub dirty_rows: Vec<u16>,
+    /// Generation of the render state's image placement list.
+    pub image_placements_generation: u64,
+    /// Already sorted by `(layer, z)`. Shared with the renderer instead of
+    /// being copied into rows.
+    pub image_placements: Arc<Vec<ImagePlacement>>,
+    /// True when the placement list was re-read during this snapshot.
+    pub image_placements_rebuilt: bool,
 }
 
 /// One coherent frame: metadata plus materialized cells for only the rows the
@@ -199,8 +423,160 @@ impl RenderFrame {
     }
 }
 
+/// One renderer-relevant image placement, copied out of Ghostty's render
+/// state. Coordinates are exactly Ghostty's: `viewport_col`/`viewport_row` may
+/// be negative, destination pixel sizes are device pixels, and source
+/// rectangles are image pixels.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ImagePlacement {
+    pub protocol: i32,
+    pub image_id: u32,
+    pub image_generation: u64,
+    pub layer: i32,
+    pub z: i32,
+    pub viewport_col: i32,
+    pub viewport_row: i32,
+    pub grid_cols: u32,
+    pub grid_rows: u32,
+    pub cell_offset_x: u32,
+    pub cell_offset_y: u32,
+    pub pixel_width: u32,
+    pub pixel_height: u32,
+    pub source_x: u32,
+    pub source_y: u32,
+    pub source_width: u32,
+    pub source_height: u32,
+    /// Kitty only: the placement ID, 0 when the program did not give one.
+    pub placement_id: u32,
+    /// Kitty only: the placement kind (`GHOSTTY_RENDER_STATE_KITTY_PLACEMENT_KIND_*`).
+    pub kind: i32,
+}
+
+/// Result of refreshing the render state's placement cache.
+#[derive(Clone, Debug)]
+pub struct ImagePlacementCache {
+    pub generation: u64,
+    pub placements: Arc<Vec<ImagePlacement>>,
+    /// True when the iterator was repopulated and re-read this update.
+    pub rebuilt: bool,
+}
+
+/// Bounded Kitty transport policy. Applied once, immediately after terminal
+/// creation. Direct inline transmission is always available; the other media
+/// are opt-in because terminal output is untrusted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KittyConfig {
+    /// Master switch. False sets the storage limit to zero, which disables the
+    /// protocol and deletes stored images.
+    pub enabled: bool,
+    /// Finite storage cap in bytes. Never `u64::MAX`.
+    pub storage_limit_bytes: u64,
+    /// Allow the temporary-file medium inside exactly this directory.
+    pub temp_file_directory: Option<std::path::PathBuf>,
+    /// Allow the POSIX shared-memory medium where the host namespace applies.
+    pub shared_memory: bool,
+    /// Advanced, unsafe option: allow reading arbitrary filesystem paths.
+    pub arbitrary_file: bool,
+    /// Optional override for the generic APC buffer cap. `None` keeps the
+    /// library's default rather than making the limit unlimited.
+    pub apc_max_bytes: Option<usize>,
+    /// Optional override for the Kitty APC buffer cap. `None` keeps the
+    /// library's default.
+    pub apc_max_bytes_kitty: Option<usize>,
+}
+
+impl Default for KittyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            storage_limit_bytes: 10_000_000,
+            temp_file_directory: None,
+            // POSIX shared memory only makes sense on a native Linux host. A
+            // WSL client's shm namespace is not a Windows host namespace.
+            shared_memory: cfg!(target_os = "linux"),
+            arbitrary_file: false,
+            apc_max_bytes: None,
+            apc_max_bytes_kitty: None,
+        }
+    }
+}
+
+impl KittyConfig {
+    /// Storage is capped even when the caller supplies a huge value.
+    pub const MAX_STORAGE_LIMIT: u64 = 512 * 1024 * 1024;
+
+    #[must_use]
+    pub fn validated(mut self) -> Self {
+        self.storage_limit_bytes = self.storage_limit_bytes.min(Self::MAX_STORAGE_LIMIT);
+        if !self.enabled {
+            self.storage_limit_bytes = 0;
+            self.temp_file_directory = None;
+            self.shared_memory = false;
+            self.arbitrary_file = false;
+        }
+        self
+    }
+
+    /// The policy actually applied by a session. Kept for tests and docs.
+    #[must_use]
+    pub fn is_graphics_enabled(&self) -> bool {
+        self.enabled && self.storage_limit_bytes > 0
+    }
+}
+
+
+
 /// Backwards-compatible name used by existing call sites.
 pub type RenderSnapshot = RenderFrame;
+
+/// Renderer-neutral copy of one Kitty image's raw decoded pixels. The pixel
+/// bytes are owned by Rust and never point into Ghostty's storage.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KittyImagePixels {
+    pub image_id: u32,
+    pub generation: u64,
+    pub width: u32,
+    pub height: u32,
+    /// `GHOSTTY_KITTY_IMAGE_FORMAT_*`.
+    pub format: i32,
+    pub pixels: Vec<u8>,
+}
+
+impl KittyImagePixels {
+    /// Bytes per pixel for a stored format. `None` for PNG (never stored) and
+    /// unknown values.
+    #[must_use]
+    pub fn bytes_per_pixel(format: i32) -> Option<u64> {
+        match format {
+            sys::GHOSTTY_KITTY_IMAGE_FORMAT_RGB => Some(3),
+            sys::GHOSTTY_KITTY_IMAGE_FORMAT_RGBA => Some(4),
+            sys::GHOSTTY_KITTY_IMAGE_FORMAT_GRAY_ALPHA => Some(2),
+            sys::GHOSTTY_KITTY_IMAGE_FORMAT_GRAY => Some(1),
+            _ => None,
+        }
+    }
+
+    /// Exact expected byte length with checked arithmetic.
+    #[must_use]
+    pub fn expected_len(width: u32, height: u32, format: i32) -> Option<usize> {
+        let bpp = Self::bytes_per_pixel(format)?;
+        u64::from(width)
+            .checked_mul(u64::from(height))?
+            .checked_mul(bpp)
+            .and_then(|len| usize::try_from(len).ok())
+    }
+}
+
+/// Outcome of one image lookup under the terminal lock.
+#[derive(Debug)]
+pub enum KittyImageRead {
+    Pixels(KittyImagePixels),
+    /// The terminal received new output between the placement snapshot and the
+    /// lookup. This is normal; the next frame re-arms with a wakeup.
+    GenerationChanged,
+    Missing,
+}
+
 
 /// Owns one `GhosttyTerminal` handle.
 pub struct GhosttyTerminal {
@@ -215,6 +591,9 @@ pub struct GhosttyTerminal {
 impl GhosttyTerminal {
     /// Create an 80x24-style terminal. `cols`/`rows` are the initial grid.
     pub fn new(cols: u16, rows: u16) -> Result<Self, GhosttyError> {
+        // The PNG decoder is process-global and must be installed before the
+        // first Ghostty terminal exists, including headless test terminals.
+        ensure_sys_initialized()?;
         let mut raw: sys::GhosttyTerminal = ptr::null_mut();
         // SAFETY: `raw` is a valid out-parameter and the allocator pointer is
         // NULL, which selects Ghostty's default allocator. On success the
@@ -265,6 +644,252 @@ impl GhosttyTerminal {
         self.cols = cols;
         self.rows = rows;
         Ok(())
+    }
+
+    /// Apply the bounded Kitty transport policy immediately after creation.
+    /// Direct transmission stays available; file/shared-memory media are only
+    /// turned on by explicit configuration.
+    pub fn apply_kitty_config(&mut self, config: &KittyConfig) -> Result<(), GhosttyError> {
+        let config = config.clone().validated();
+        let set = |terminal: sys::GhosttyTerminal, option: i32, value: *const c_void| unsafe {
+            check(sys::ghostty_terminal_set(terminal, option, value))
+        };
+        set(
+            self.as_raw(),
+            sys::GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_STORAGE_LIMIT,
+            (&config.storage_limit_bytes as *const u64).cast(),
+        )?;
+        set(
+            self.as_raw(),
+            sys::GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_MEDIUM_FILE,
+            (&config.arbitrary_file as *const bool).cast(),
+        )?;
+        if let Some(directory) = &config.temp_file_directory {
+            let text = directory.to_string_lossy();
+            if text.as_bytes().contains(&0) {
+                return Err(GhosttyError(sys::GHOSTTY_REJECTED));
+            }
+            let value = sys::GhosttyString {
+                ptr: text.as_bytes().as_ptr(),
+                len: text.len(),
+            };
+            // SAFETY: the documented input type is `GhosttyString*`; the bytes
+            // stay alive until the call returns and Ghostty copies the path.
+            unsafe {
+                check(sys::ghostty_terminal_set(
+                    self.as_raw(),
+                    sys::GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_MEDIUM_TEMP_FILE,
+                    (&value as *const sys::GhosttyString).cast(),
+                ))?;
+            }
+        } else {
+            // NULL is documented to disable the temporary-file medium.
+            set(
+                self.as_raw(),
+                sys::GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_MEDIUM_TEMP_FILE,
+                ptr::null(),
+            )?;
+        }
+        set(
+            self.as_raw(),
+            sys::GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_MEDIUM_SHARED_MEM,
+            (&config.shared_memory as *const bool).cast(),
+        )?;
+        if let Some(limit) = config.apc_max_bytes {
+            set(
+                self.as_raw(),
+                sys::GHOSTTY_TERMINAL_OPT_APC_MAX_BYTES,
+                (&limit as *const usize).cast(),
+            )?;
+        }
+        if let Some(limit) = config.apc_max_bytes_kitty {
+            set(
+                self.as_raw(),
+                sys::GHOSTTY_TERMINAL_OPT_APC_MAX_BYTES_KITTY,
+                (&limit as *const usize).cast(),
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Borrowed Kitty storage for the active screen. Valid only until the next
+    /// mutating terminal call; never retain it beyond the lock.
+    pub fn kitty_graphics(&self) -> Result<sys::GhosttyKittyGraphics, GhosttyError> {
+        let mut graphics: sys::GhosttyKittyGraphics = ptr::null_mut();
+        // SAFETY: the documented output type is `GhosttyKittyGraphics*` and
+        // the terminal handle is valid for this call.
+        check(unsafe {
+            sys::ghostty_terminal_get(
+                self.as_raw(),
+                sys::GHOSTTY_TERMINAL_DATA_KITTY_GRAPHICS,
+                (&mut graphics as *mut sys::GhosttyKittyGraphics).cast(),
+            )
+        })?;
+        Ok(graphics)
+    }
+
+    /// Kitty storage generation, for tests and animation frame accounting.
+    pub fn kitty_storage_generation(&self) -> Result<u64, GhosttyError> {
+        let graphics = self.kitty_graphics()?;
+        let mut generation = 0u64;
+        // SAFETY: the documented output type is `uint64_t*`.
+        check(unsafe {
+            sys::ghostty_kitty_graphics_get(
+                graphics,
+                sys::GHOSTTY_KITTY_GRAPHICS_DATA_GENERATION,
+                (&mut generation as *mut u64).cast(),
+            )
+        })?;
+        Ok(generation)
+    }
+
+    /// Read the effective storage limit for policy assertions.
+    pub fn kitty_storage_limit(&self) -> Result<u64, GhosttyError> {
+        let mut limit = 0u64;
+        check(unsafe {
+            sys::ghostty_terminal_get(
+                self.as_raw(),
+                sys::GHOSTTY_TERMINAL_DATA_KITTY_IMAGE_STORAGE_LIMIT,
+                (&mut limit as *mut u64).cast(),
+            )
+        })?;
+        Ok(limit)
+    }
+
+    /// Direct-transmission is always supported when storage is nonzero.
+    pub fn kitty_medium_flags(&self) -> Result<(bool, bool), GhosttyError> {
+        let mut file = false;
+        let mut shared = false;
+        unsafe {
+            check(sys::ghostty_terminal_get(
+                self.as_raw(),
+                sys::GHOSTTY_TERMINAL_DATA_KITTY_IMAGE_MEDIUM_FILE,
+                (&mut file as *mut bool).cast(),
+            ))?;
+            check(sys::ghostty_terminal_get(
+                self.as_raw(),
+                sys::GHOSTTY_TERMINAL_DATA_KITTY_IMAGE_MEDIUM_SHARED_MEM,
+                (&mut shared as *mut bool).cast(),
+            ))?;
+        }
+        Ok((file, shared))
+    }
+
+    /// Advance playing Kitty animations once and return the next absolute
+    /// frame time. Uses the caller's monotonic clock. Returns `None` when
+    /// nothing is playing.
+    pub fn tick_kitty_animation(
+        &mut self,
+        now_ms: u64,
+    ) -> Result<Option<u64>, GhosttyError> {
+        let graphics = self.kitty_graphics()?;
+        let mut next = 0u64;
+        let result = unsafe {
+            sys::ghostty_kitty_graphics_animation_tick(
+                graphics,
+                now_ms,
+                (&mut next as *mut u64).cast(),
+            )
+        };
+        match result {
+            sys::GHOSTTY_SUCCESS => Ok(Some(next)),
+            sys::GHOSTTY_NO_VALUE => Ok(None),
+            other => Err(GhosttyError(other)),
+        }
+    }
+
+    /// Copy one image's raw pixels out of the active Kitty storage. The caller
+    /// must hold the terminal lock; this is the only place Ghostty image
+    /// pointers are touched.
+    pub fn read_kitty_image(
+        &self,
+        image_id: u32,
+        expected_generation: u64,
+    ) -> Result<KittyImageRead, GhosttyError> {
+        let graphics = self.kitty_graphics()?;
+        Self::read_kitty_image_from(graphics, image_id, expected_generation)
+    }
+
+    /// Batched variant: one storage handle, many image lookups.
+    pub fn read_kitty_image_from(
+        graphics: sys::GhosttyKittyGraphics,
+        image_id: u32,
+        expected_generation: u64,
+    ) -> Result<KittyImageRead, GhosttyError> {
+        if graphics.is_null() {
+            return Ok(KittyImageRead::Missing);
+        }
+        // SAFETY: borrowed handle valid for this call.
+        let image = unsafe { sys::ghostty_kitty_graphics_image(graphics, image_id) };
+        if image.is_null() {
+            return Ok(KittyImageRead::Missing);
+        }
+        let mut width = 0u32;
+        let mut height = 0u32;
+        let mut format = 0i32;
+        let mut generation = 0u64;
+        let mut expected_len = 0usize;
+        macro_rules! query {
+            ($key:expr, $value:expr, $ty:ty) => {
+                if unsafe {
+                    sys::ghostty_kitty_graphics_image_get(
+                        image,
+                        $key,
+                        (&mut $value as *mut $ty).cast(),
+                    )
+                } != sys::GHOSTTY_SUCCESS
+                {
+                    return Ok(KittyImageRead::Missing);
+                }
+            };
+        }
+        query!(sys::GHOSTTY_KITTY_GRAPHICS_IMAGE_DATA_GENERATION, generation, u64);
+        if generation != expected_generation {
+            return Ok(KittyImageRead::GenerationChanged);
+        }
+        query!(sys::GHOSTTY_KITTY_GRAPHICS_IMAGE_DATA_WIDTH, width, u32);
+        query!(sys::GHOSTTY_KITTY_GRAPHICS_IMAGE_DATA_HEIGHT, height, u32);
+        query!(sys::GHOSTTY_KITTY_GRAPHICS_IMAGE_DATA_FORMAT, format, i32);
+        query!(
+            sys::GHOSTTY_KITTY_GRAPHICS_IMAGE_DATA_EXPECTED_LEN,
+            expected_len,
+            usize
+        );
+        let Some(calculated) = KittyImagePixels::expected_len(width, height, format) else {
+            return Ok(KittyImageRead::Missing);
+        };
+        if calculated != expected_len {
+            return Ok(KittyImageRead::Missing);
+        }
+        let mut pixels = sys::GhosttyString {
+            ptr: ptr::null(),
+            len: 0,
+        };
+        // Pixel data can legitimately be unavailable while a chunked
+        // transmission is still arriving. Skip, never treat as an error.
+        if unsafe {
+            sys::ghostty_kitty_graphics_image_get(
+                image,
+                sys::GHOSTTY_KITTY_GRAPHICS_IMAGE_DATA_PIXELS,
+                (&mut pixels as *mut sys::GhosttyString).cast(),
+            )
+        } != sys::GHOSTTY_SUCCESS
+            || pixels.ptr.is_null()
+            || pixels.len != expected_len
+        {
+            return Ok(KittyImageRead::Missing);
+        }
+        // SAFETY: Ghostty reports `expected_len` readable bytes valid until the
+        // next terminal mutation. Copy before releasing the lock.
+        let copied = unsafe { std::slice::from_raw_parts(pixels.ptr.cast::<u8>(), expected_len) };
+        Ok(KittyImageRead::Pixels(KittyImagePixels {
+            image_id,
+            generation,
+            width,
+            height,
+            format,
+            pixels: copied.to_vec(),
+        }))
     }
 
     /// Apply a terminal palette. Ghostty generates the 240 non-base colours
@@ -1058,9 +1683,14 @@ impl Drop for SelectionGesture {
     }
 }
 
-/// Owns one `GhosttyRenderState` handle.
+/// Owns one `GhosttyRenderState` handle plus its reusable image-placement
+/// iterator and resolved placement cache.
 pub struct GhosttyRenderState {
     raw: Option<sys::GhosttyRenderState>,
+    image_iterator: Option<sys::GhosttyRenderStateImageIterator>,
+    image_placements_generation: u64,
+    image_placements: Arc<Vec<ImagePlacement>>,
+    image_placements_valid: bool,
 }
 
 impl GhosttyRenderState {
@@ -1069,7 +1699,19 @@ impl GhosttyRenderState {
         // SAFETY: `raw` is a valid out-parameter, NULL selects the default
         // allocator, and the handle is owned exclusively by this wrapper.
         check(unsafe { sys::ghostty_render_state_new(ptr::null(), &mut raw) })?;
-        Ok(Self { raw: Some(raw) })
+        let mut image_iterator: sys::GhosttyRenderStateImageIterator = ptr::null_mut();
+        // SAFETY: valid out-parameter; the iterator is reused for every update
+        // and freed exactly once by this wrapper.
+        check(unsafe {
+            sys::ghostty_render_state_image_iterator_new(ptr::null(), &mut image_iterator)
+        })?;
+        Ok(Self {
+            raw: Some(raw),
+            image_iterator: Some(image_iterator),
+            image_placements_generation: 0,
+            image_placements: Arc::new(Vec::new()),
+            image_placements_valid: false,
+        })
     }
 
     fn as_raw(&self) -> sys::GhosttyRenderState {
@@ -1139,6 +1781,182 @@ impl GhosttyRenderState {
         Ok(out)
     }
 
+    fn get_u64(&self, data: i32) -> Result<u64, GhosttyError> {
+        let mut out = 0u64;
+        // SAFETY: the documented output type for the generation keys is
+        // `uint64_t*` and the render-state handle is valid.
+        check(unsafe {
+            sys::ghostty_render_state_get(self.as_raw(), data, &mut out as *mut u64 as *mut c_void)
+        })?;
+        Ok(out)
+    }
+
+    fn populate_image_iterator(
+        &self,
+        iterator: *mut sys::GhosttyRenderStateImageIterator,
+    ) -> Result<(), GhosttyError> {
+        // SAFETY: `iterator` is the reusable handle allocated by `new`, and the
+        // render state is borrowed immutably for this call.
+        check(unsafe {
+            sys::ghostty_render_state_get(
+                self.as_raw(),
+                sys::GHOSTTY_RENDER_STATE_DATA_IMAGE_ITERATOR,
+                iterator.cast(),
+            )
+        })
+    }
+
+    /// Refresh the placement cache only when Ghostty's placement generation
+    /// changed. The storage generation is deliberately not consulted: scrolling
+    /// moves placements without changing image storage.
+    pub fn refresh_image_placements(&mut self) -> Result<ImagePlacementCache, GhosttyError> {
+        let generation =
+            self.get_u64(sys::GHOSTTY_RENDER_STATE_DATA_IMAGE_PLACEMENTS_GENERATION)?;
+        if self.image_placements_valid && generation == self.image_placements_generation {
+            return Ok(ImagePlacementCache {
+                generation,
+                placements: Arc::clone(&self.image_placements),
+                rebuilt: false,
+            });
+        }
+        let mut iterator = self
+            .image_iterator
+            .expect("owned image iterator handle is still present");
+        self.populate_image_iterator(&mut iterator)?;
+        let mut placements = Vec::new();
+        // SAFETY: the iterator was just populated from this render state; the
+        // loop follows Ghostty's own cursor API and never outlives the state.
+        while unsafe { sys::ghostty_render_state_image_iterator_next(iterator) } {
+            let mut protocol = 0i32;
+            let mut image_id = 0u32;
+            let mut image_generation = 0u64;
+            let mut layer = 0i32;
+            let mut z = 0i32;
+            let mut viewport_col = 0i32;
+            let mut viewport_row = 0i32;
+            let mut grid_cols = 0u32;
+            let mut grid_rows = 0u32;
+            let mut cell_offset_x = 0u32;
+            let mut cell_offset_y = 0u32;
+            let mut pixel_width = 0u32;
+            let mut pixel_height = 0u32;
+            let mut source_x = 0u32;
+            let mut source_y = 0u32;
+            let mut source_width = 0u32;
+            let mut source_height = 0u32;
+            let mut placement_id = 0u32;
+            let mut kind = 0i32;
+            macro_rules! read {
+                ($key:expr, $value:expr, $ty:ty) => {
+                    if unsafe {
+                        sys::ghostty_render_state_image_get(
+                            iterator,
+                            $key,
+                            (&mut $value as *mut $ty).cast(),
+                        )
+                    } != sys::GHOSTTY_SUCCESS
+                    {
+                        // A value this build does not support must not poison
+                        // the whole frame; skip the placement instead.
+                        continue;
+                    }
+                };
+            }
+            // The macro's `continue` applies to the enclosing `while`; every
+            // field below is therefore required before a placement is kept.
+            read!(sys::GHOSTTY_RENDER_STATE_IMAGE_DATA_PROTOCOL, protocol, i32);
+            read!(sys::GHOSTTY_RENDER_STATE_IMAGE_DATA_IMAGE_ID, image_id, u32);
+            read!(
+                sys::GHOSTTY_RENDER_STATE_IMAGE_DATA_IMAGE_GENERATION,
+                image_generation,
+                u64
+            );
+            read!(sys::GHOSTTY_RENDER_STATE_IMAGE_DATA_LAYER, layer, i32);
+            read!(sys::GHOSTTY_RENDER_STATE_IMAGE_DATA_Z, z, i32);
+            read!(
+                sys::GHOSTTY_RENDER_STATE_IMAGE_DATA_VIEWPORT_COL,
+                viewport_col,
+                i32
+            );
+            read!(
+                sys::GHOSTTY_RENDER_STATE_IMAGE_DATA_VIEWPORT_ROW,
+                viewport_row,
+                i32
+            );
+            read!(sys::GHOSTTY_RENDER_STATE_IMAGE_DATA_GRID_COLS, grid_cols, u32);
+            read!(sys::GHOSTTY_RENDER_STATE_IMAGE_DATA_GRID_ROWS, grid_rows, u32);
+            read!(
+                sys::GHOSTTY_RENDER_STATE_IMAGE_DATA_CELL_OFFSET_X,
+                cell_offset_x,
+                u32
+            );
+            read!(
+                sys::GHOSTTY_RENDER_STATE_IMAGE_DATA_CELL_OFFSET_Y,
+                cell_offset_y,
+                u32
+            );
+            read!(
+                sys::GHOSTTY_RENDER_STATE_IMAGE_DATA_PIXEL_WIDTH,
+                pixel_width,
+                u32
+            );
+            read!(
+                sys::GHOSTTY_RENDER_STATE_IMAGE_DATA_PIXEL_HEIGHT,
+                pixel_height,
+                u32
+            );
+            read!(sys::GHOSTTY_RENDER_STATE_IMAGE_DATA_SOURCE_X, source_x, u32);
+            read!(sys::GHOSTTY_RENDER_STATE_IMAGE_DATA_SOURCE_Y, source_y, u32);
+            read!(
+                sys::GHOSTTY_RENDER_STATE_IMAGE_DATA_SOURCE_WIDTH,
+                source_width,
+                u32
+            );
+            read!(
+                sys::GHOSTTY_RENDER_STATE_IMAGE_DATA_SOURCE_HEIGHT,
+                source_height,
+                u32
+            );
+            read!(
+                sys::GHOSTTY_RENDER_STATE_IMAGE_DATA_KITTY_PLACEMENT_ID,
+                placement_id,
+                u32
+            );
+            read!(sys::GHOSTTY_RENDER_STATE_IMAGE_DATA_KITTY_KIND, kind, i32);
+            placements.push(ImagePlacement {
+                protocol,
+                image_id,
+                image_generation,
+                layer,
+                z,
+                viewport_col,
+                viewport_row,
+                grid_cols,
+                grid_rows,
+                cell_offset_x,
+                cell_offset_y,
+                pixel_width,
+                pixel_height,
+                source_x,
+                source_y,
+                source_width,
+                source_height,
+                placement_id,
+                kind,
+            });
+        }
+        // Ghostty explicitly says iterator order is not draw order.
+        placements.sort_by_key(|placement| (placement.layer, placement.z));
+        self.image_placements = Arc::new(placements);
+        self.image_placements_generation = generation;
+        self.image_placements_valid = true;
+        Ok(ImagePlacementCache {
+            generation,
+            placements: Arc::clone(&self.image_placements),
+            rebuilt: true,
+        })
+    }
+
     pub fn cursor(&self) -> Result<Cursor, GhosttyError> {
         let mut raw = sys::GhosttyRenderStateCursor::sized();
         // SAFETY: `sized()` sets the struct's size field as the C API requires,
@@ -1201,13 +2019,16 @@ impl GhosttyRenderState {
     }
 
     /// Read frame metadata without materializing any cell rows.
-    pub fn snapshot_meta(&self) -> Result<FrameMeta, GhosttyError> {
+    pub fn snapshot_meta(&mut self) -> Result<FrameMeta, GhosttyError> {
         let cols = self.get_u16(sys::GHOSTTY_RENDER_STATE_DATA_COLS)?;
         let rows = self.get_u16(sys::GHOSTTY_RENDER_STATE_DATA_ROWS)?;
         let dirty = self.get_i32(sys::GHOSTTY_RENDER_STATE_DATA_DIRTY)?;
         let cursor = self.cursor()?;
         let colors = self.colors()?;
         let dirty_rows = self.dirty_rows()?;
+        // Images have their own dirty model, driven by the placement
+        // generation, and are never attached to the row mask.
+        let images = self.refresh_image_placements()?;
 
         // Row-local selection is an FFI call per row, not per cell. Selections
         // are metadata: they are needed even on cursor-only frames.
@@ -1227,6 +2048,9 @@ impl GhosttyRenderState {
             colors,
             selections,
             dirty_rows,
+            image_placements_generation: images.generation,
+            image_placements: images.placements,
+            image_placements_rebuilt: images.rebuilt,
         })
     }
 
@@ -1262,7 +2086,7 @@ impl GhosttyRenderState {
     }
 
     /// Convenience full snapshot for headless tests and initial frames.
-    pub fn snapshot(&self) -> Result<RenderSnapshot, GhosttyError> {
+    pub fn snapshot(&mut self) -> Result<RenderSnapshot, GhosttyError> {
         let meta = self.snapshot_meta()?;
         let all = vec![true; usize::from(meta.rows)];
         let rows = self.materialize_rows(&all, &meta.selections)?;
@@ -1282,6 +2106,11 @@ unsafe impl Send for GhosttyRenderState {}
 
 impl Drop for GhosttyRenderState {
     fn drop(&mut self) {
+        if let Some(iterator) = self.image_iterator.take() {
+            // SAFETY: owned once; the render state it borrowed from is freed
+            // after this field is dropped (raw is still present here).
+            unsafe { sys::ghostty_render_state_image_iterator_free(iterator) };
+        }
         if let Some(raw) = self.raw.take() {
             // SAFETY: `take` makes this the single free of the owned handle.
             unsafe { sys::ghostty_render_state_free(raw) };
@@ -1949,5 +2778,30 @@ impl Drop for MouseEvent {
             // SAFETY: `take` makes this the single free of the owned handle.
             unsafe { sys::ghostty_mouse_event_free(raw) };
         }
+    }
+}
+
+#[cfg(test)]
+mod decoder_tests {
+    use super::*;
+
+    #[test]
+    fn malformed_png_is_rejected_by_the_bounded_decoder() {
+        let mut bad = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+        bad.extend_from_slice(&[0u8; 32]);
+        assert!(decode_png_raw(&bad).is_none());
+        assert!(decode_png_raw(&[]).is_none());
+        assert!(decode_png_raw(&[0xff; 128]).is_none());
+    }
+
+    #[test]
+    fn rgba_conversion_is_exact_and_checked() {
+        let rgba = rgba_from_decoded(1, 1, image::ColorType::Rgb8, &[0x10, 0x20, 0x30])
+            .expect("rgb");
+        assert_eq!(rgba, vec![0x10, 0x20, 0x30, 0xff]);
+        let rgba = rgba_from_decoded(1, 1, image::ColorType::Rgba8, &[0x10, 0x20, 0x30, 0x40])
+            .expect("rgba");
+        assert_eq!(rgba, vec![0x10, 0x20, 0x30, 0x40]);
+        assert!(rgba_from_decoded(2, 2, image::ColorType::Rgba8, &[0; 4]).is_none());
     }
 }
