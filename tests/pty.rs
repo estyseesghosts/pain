@@ -13,9 +13,9 @@ fn snapshot_text(session: &TerminalSession) -> String {
     let snapshot = session.render_snapshot().expect("render snapshot");
     session.mark_frame_complete().expect("frame complete");
     snapshot
-        .lines
+        .rows
         .iter()
-        .flat_map(|row| row.iter())
+        .flat_map(|(_, row)| row.iter())
         .map(|cell| cell.text.as_str())
         .collect::<String>()
 }

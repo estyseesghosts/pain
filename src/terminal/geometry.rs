@@ -82,6 +82,114 @@ impl CellMetrics {
     }
 }
 
+/// The one canonical terminal geometry value. Prepaint measures it from the
+/// terminal child's actual bounds and font metrics; rendering, hit-testing and
+/// resize all consume the same numbers. There is deliberately no second
+/// `MouseGeometry`/`ResizeGeometry`: copies drift during live drags.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct TerminalGeometry {
+    /// Origin of the terminal content inside the Silvestris `WindowFrame`.
+    pub origin: (f32, f32),
+    /// Content bounds (never full window bounds).
+    pub content_width: f32,
+    pub content_height: f32,
+    /// Logical pixels per cell.
+    pub cell_width: f32,
+    pub cell_height: f32,
+    pub cols: u16,
+    pub rows: u16,
+    /// Device-pixel scale at this layer, when the platform reports one.
+    pub scale: f32,
+}
+
+/// Input consumes the canonical geometry, not a parallel copy of its numbers.
+pub type InputGeometry = TerminalGeometry;
+
+impl TerminalGeometry {
+    #[must_use]
+    pub fn new(
+        origin: (f32, f32),
+        (content_width, content_height): (f32, f32),
+        metrics: &CellMetrics,
+        scale: f32,
+    ) -> Self {
+        let (cols, rows) = metrics.grid_for(content_width, content_height);
+        Self {
+            origin,
+            content_width,
+            content_height,
+            cell_width: metrics.cell_width,
+            cell_height: metrics.line_height,
+            cols,
+            rows,
+            scale: if scale.is_finite() && scale > 0.0 { scale } else { 1.0 },
+        }
+    }
+
+    #[must_use]
+    pub fn metrics(&self) -> CellMetrics {
+        CellMetrics::new(self.cell_width, self.cell_height)
+    }
+
+    #[must_use]
+    pub fn grid(&self) -> (u16, u16) {
+        (self.cols, self.rows)
+    }
+
+    /// Cell under a point in window coordinates, clamped to the last complete
+    /// cell. The remainder strips after the final column/row resolve to that
+    /// final cell instead of an out-of-range index.
+    #[must_use]
+    pub fn cell_at(&self, position: (f32, f32)) -> (u16, u16) {
+        let clamp = |value: f32, origin: f32, cell: f32, last: u16| -> u16 {
+            if !value.is_finite() {
+                return 0;
+            }
+            let raw = ((value - origin) / cell.max(f32::MIN_POSITIVE)).floor();
+            if raw <= 0.0 {
+                0
+            } else if raw >= f32::from(last) {
+                last
+            } else {
+                raw as u16
+            }
+        };
+        (
+            clamp(
+                position.0,
+                self.origin.0,
+                self.cell_width,
+                self.cols.saturating_sub(1),
+            ),
+            clamp(
+                position.1,
+                self.origin.1,
+                self.cell_height,
+                self.rows.saturating_sub(1),
+            ),
+        )
+    }
+
+    #[must_use]
+    pub fn cell_origin(&self, col: u16, row: u16) -> (f32, f32) {
+        self.metrics().cell_origin(self.origin, col, row)
+    }
+
+    #[must_use]
+    pub fn span_bounds(&self, col: u16, row: u16, cells: u16) -> (f32, f32, f32, f32) {
+        self.metrics().span_bounds(self.origin, col, row, cells)
+    }
+
+    /// Pixel size of the content area, used by Ghostty's mouse encoder.
+    #[must_use]
+    pub fn content_size_px(&self) -> (u32, u32) {
+        (
+            (f32::from(self.cols) * self.cell_width).max(1.0) as u32,
+            (f32::from(self.rows) * self.cell_height).max(1.0) as u32,
+        )
+    }
+}
+
 /// Everything that forces two adjacent cells into different text runs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StyleKey {
@@ -493,6 +601,51 @@ mod tests {
         assert!(cache.rows_to_rebuild(3, 0, &[]).is_empty());
         // Full dirty forces a complete rebuild.
         assert_eq!(cache.rows_to_rebuild(4, 2, &[1]).len(), 24);
+    }
+
+    #[test]
+    fn canonical_geometry_clamps_partial_edge_strips_to_last_cell() {
+        let metrics = CellMetrics::new(9.5, 19.0);
+        let g = TerminalGeometry::new((10.0, 20.0), (96.0, 60.0), &metrics, 1.25);
+        assert_eq!(g.grid(), (10, 3));
+        assert_eq!(g.scale, 1.25);
+        // Left/top outside, and the exact origin, both resolve to cell zero.
+        assert_eq!(g.cell_at((-50.0, -50.0)), (0, 0));
+        assert_eq!(g.cell_at((10.0, 20.0)), (0, 0));
+        // The last complete cells start at 10+9*9.5 and 20+2*19.
+        assert_eq!(g.cell_at((10.0 + 9.0 * 9.5, 20.0 + 2.0 * 19.0)), (9, 2));
+        // Remainder strips after the last complete cell must clamp, not spill.
+        assert_eq!(g.cell_at((10.0 + 96.0, 20.0 + 60.0)), (9, 2));
+        assert_eq!(g.cell_at((10000.0, 10000.0)), (9, 2));
+        assert_eq!(g.cell_at((f32::NAN, f32::INFINITY)), (0, 0));
+    }
+
+    #[test]
+    fn geometry_tracks_horizontal_vertical_and_same_grid_changes() {
+        let metrics = CellMetrics::new(10.0, 20.0);
+        // Pure horizontal drag: rows stay fixed, columns cross boundaries.
+        let a = TerminalGeometry::new((0.0, 0.0), (800.0, 240.0), &metrics, 1.0);
+        let b = TerminalGeometry::new((7.0, 0.0), (825.0, 240.0), &metrics, 1.0);
+        assert_eq!(a.grid(), (80, 12));
+        assert_eq!(b.grid(), (82, 12));
+        assert_eq!(a.cell_at((795.0, 5.0)), (79, 0));
+        assert_eq!(b.cell_at((795.0, 5.0)), (78, 0));
+        // Pure vertical resize.
+        let c = TerminalGeometry::new((7.0, 0.0), (825.0, 300.0), &metrics, 1.0);
+        assert_eq!(c.grid(), (82, 15));
+        // Pixel-only resize inside the same grid keeps cols/rows and cell_at.
+        let d = TerminalGeometry::new((7.0, 0.0), (824.0, 319.0), &metrics, 1.0);
+        assert_eq!(c.grid(), d.grid());
+        assert_eq!(c.cell_at((800.0, 290.0)), d.cell_at((800.0, 290.0)));
+        // Minimum-size window is a valid 1x1 grid with no negative indices.
+        let tiny = TerminalGeometry::new((0.0, 0.0), (1.0, 1.0), &metrics, 1.0);
+        assert_eq!(tiny.grid(), (1, 1));
+        assert_eq!(tiny.cell_at((500.0, 500.0)), (0, 0));
+        // Font change: same content bounds, different cell pixels and grid.
+        let big = CellMetrics::new(20.0, 40.0);
+        let e = TerminalGeometry::new((0.0, 0.0), (800.0, 240.0), &big, 1.0);
+        assert_eq!(e.grid(), (40, 6));
+        assert_ne!(a.cell_width, e.cell_width);
     }
 
     #[test]

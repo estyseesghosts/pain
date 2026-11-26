@@ -35,6 +35,8 @@ pub type GhosttyKeyEvent = *mut c_void;
 pub type GhosttyMouseEncoder = *mut c_void;
 pub type GhosttyMouseEvent = *mut c_void;
 pub type GhosttyFormatter = *mut c_void;
+pub type GhosttySelectionGesture = *mut c_void;
+pub type GhosttySelectionGestureEvent = *mut c_void;
 
 // `ghostty/vt/terminal.h`: options and data used by the MVP effects.
 pub const GHOSTTY_TERMINAL_OPT_USERDATA: i32 = 1;
@@ -482,6 +484,56 @@ pub struct GhosttySelection {
     pub rectangle: bool,
 }
 
+// `ghostty/vt/selection.h`: reusable gesture API. C enums are int-sized.
+pub const GHOSTTY_SELECTION_GESTURE_BEHAVIOR_CELL: i32 = 0;
+pub const GHOSTTY_SELECTION_GESTURE_BEHAVIOR_WORD: i32 = 1;
+pub const GHOSTTY_SELECTION_GESTURE_BEHAVIOR_LINE: i32 = 2;
+pub const GHOSTTY_SELECTION_GESTURE_BEHAVIOR_OUTPUT: i32 = 3;
+pub const GHOSTTY_SELECTION_GESTURE_EVENT_TYPE_PRESS: i32 = 0;
+pub const GHOSTTY_SELECTION_GESTURE_EVENT_TYPE_RELEASE: i32 = 1;
+pub const GHOSTTY_SELECTION_GESTURE_EVENT_TYPE_DRAG: i32 = 2;
+pub const GHOSTTY_SELECTION_GESTURE_EVENT_OPT_REF: i32 = 1;
+pub const GHOSTTY_SELECTION_GESTURE_EVENT_OPT_POSITION: i32 = 2;
+pub const GHOSTTY_SELECTION_GESTURE_EVENT_OPT_GEOMETRY: i32 = 9;
+pub const GHOSTTY_SELECTION_GESTURE_EVENT_OPT_BEHAVIORS: i32 = 7;
+
+/// Surface-space pointer position (`ghostty/vt/types.h`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct GhosttySurfacePosition {
+    pub x: f64,
+    pub y: f64,
+}
+
+/// Display geometry used by gesture drags (`ghostty/vt/selection.h`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GhosttySelectionGestureGeometry {
+    pub columns: u32,
+    pub cell_width: u32,
+    pub padding_left: u32,
+    pub screen_height: u32,
+}
+
+/// Single/double/triple click behaviors (`ghostty/vt/selection.h`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GhosttySelectionGestureBehaviors {
+    pub single_click: i32,
+    pub double_click: i32,
+    pub triple_click: i32,
+}
+
+impl Default for GhosttySelectionGestureBehaviors {
+    fn default() -> Self {
+        Self {
+            single_click: GHOSTTY_SELECTION_GESTURE_BEHAVIOR_CELL,
+            double_click: GHOSTTY_SELECTION_GESTURE_BEHAVIOR_WORD,
+            triple_click: GHOSTTY_SELECTION_GESTURE_BEHAVIOR_LINE,
+        }
+    }
+}
+
 /// `GhosttyMousePosition` from `ghostty/vt/mouse/event.h`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -678,6 +730,38 @@ unsafe extern "C" {
         point: GhosttyPoint,
         out_ref: *mut GhosttyGridRef,
     ) -> GhosttyResult;
+
+    // `ghostty/vt/selection.h`: allocate gestures once per session and reuse
+    // them. Calls are serialized with all other terminal access.
+    pub fn ghostty_selection_gesture_new(
+        allocator: *const c_void,
+        out_gesture: *mut GhosttySelectionGesture,
+    ) -> GhosttyResult;
+    pub fn ghostty_selection_gesture_free(
+        gesture: GhosttySelectionGesture,
+        terminal: GhosttyTerminal,
+    );
+    pub fn ghostty_selection_gesture_reset(
+        gesture: GhosttySelectionGesture,
+        terminal: GhosttyTerminal,
+    );
+    pub fn ghostty_selection_gesture_event_new(
+        allocator: *const c_void,
+        out_event: *mut GhosttySelectionGestureEvent,
+        event_type: i32,
+    ) -> GhosttyResult;
+    pub fn ghostty_selection_gesture_event_free(event: GhosttySelectionGestureEvent);
+    pub fn ghostty_selection_gesture_event_set(
+        event: GhosttySelectionGestureEvent,
+        option: i32,
+        value: *const c_void,
+    ) -> GhosttyResult;
+    pub fn ghostty_selection_gesture_event(
+        gesture: GhosttySelectionGesture,
+        terminal: GhosttyTerminal,
+        event: GhosttySelectionGestureEvent,
+        out_selection: *mut GhosttySelection,
+    ) -> GhosttyResult;
     pub fn ghostty_terminal_select_all(
         terminal: GhosttyTerminal,
         out_selection: *mut GhosttySelection,
@@ -845,7 +929,9 @@ unsafe extern "C" {
         out_len: *mut usize,
     ) -> GhosttyResult;
     pub fn ghostty_formatter_free(formatter: GhosttyFormatter);
-    pub fn ghostty_free(ptr: *mut c_void);
+    /// `ghostty_free(const GhosttyAllocator*, uint8_t*, size_t)`. Pass NULL for
+    /// the allocator when the buffer was allocated with the default one.
+    pub fn ghostty_free(allocator: *const c_void, ptr: *mut u8, len: usize);
 }
 
 #[cfg(test)]
@@ -869,6 +955,9 @@ mod tests {
         assert_eq!(size_of::<GhosttyPoint>(), 24);
         assert_eq!(size_of::<GhosttyGridRef>(), 16);
         assert_eq!(size_of::<GhosttySelection>(), 40);
+        assert_eq!(size_of::<GhosttySurfacePosition>(), 16);
+        assert_eq!(size_of::<GhosttySelectionGestureGeometry>(), 16);
+        assert_eq!(size_of::<GhosttySelectionGestureBehaviors>(), 12);
         assert_eq!(size_of::<GhosttyString>(), 16);
         assert_eq!(size_of::<GhosttyBuffer>(), 24);
         assert_eq!(size_of::<GhosttyCodepointBuffer>(), 24);

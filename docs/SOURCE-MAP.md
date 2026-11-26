@@ -62,6 +62,33 @@ symlinks (`PermissionDenied`), so that last install step fails there; a real
 Linux host creates the symlinks normally. The Rust static link does not need
 them.
 
+### GUI (`--features shell`) build recipes on this host
+
+The headless test recipe above is sufficient for `cargo test` (which does not
+enable `shell`). Building the actual GUI binary needs two extra workarounds on
+this machine:
+
+- Windows has no MSVC Windows SDK, so the GNU host (Rust
+  `1.98.1-x86_64-pc-windows-gnu`) is used with a Zig wrapper that injects
+  `-Dtarget=x86_64-windows-gnu`, lld and `--allow-multiple-definition`. GPUI
+  embeds its own Common-Controls manifest while MinGW's `gcc` driver also adds
+  `default-manifest.o` at link time; lld reports this as a duplicate `MANIFEST`
+  resource. A small GCC spec that removes `default-manifest.o` from the
+  `endfile` rule resolves it while keeping GPUI's manifest (which is the one
+  that enables Common Controls v6). The spec is passed with
+  `-C link-arg=-specs=<path>`. GPUI's `fxc.exe` requirement is release-only
+  (`gpui_windows/build.rs` compiles shaders only when `!debug_assertions`), so
+  the debug GUI binary links without a Windows SDK; the release GUI build does
+  need `GPUI_FXC_PATH`. The headless M6 release test omits `--features shell`
+  for this reason.
+- Linux/WSLg must run the build from an **ext4** working copy, not `/mnt/c`
+  (Zig symlink installation and build speed are unreliable on DrvFS). Under
+  WSLg the DirectX/Vulkan backend exits at startup (`Dropped Escape call`);
+  force software rendering with `LIBGL_ALWAYS_SOFTWARE=1`, `WGPU_BACKEND=gl`
+  and `MESA_LOADER_DRIVER_OVERRIDE=llvmpipe`. WSLg forwards the Wayland window
+  to the Windows desktop as `pain (Fedora44)`, so UI automation can find and
+  capture it from the Windows side.
+
 The FFI declarations in `crates/ghostty-vt-sys/src/lib.rs` are handwritten
 against the 1.0.2 headers; unit tests assert their `size_of` values against
 sizes measured from those headers with `zig cc`. Keep that test green when
@@ -193,6 +220,15 @@ checkout; no Chaus code is vendored. Silvestris theme ids are the public
 `ThemeId::{AQUA,GEIST}_{LIGHT,DARK}` constants from the pinned checkout.
 
 ## Implemented milestones M5/M6/M7 — 2026-11-25
+
+No upstream pin moved. The repair pass adds declarations from the same pinned
+`vt-1.0.2` headers: `ghostty_selection_gesture_*` and the reusable gesture
+events (`selection.h`), plus their frozen-size structs and ABI assertions in
+`crates/ghostty-vt-sys/src/lib.rs`. Key release uses the already-declared
+`ghostty_key_event_set_action(GHOSTTY_KEY_ACTION_RELEASE)` from `key/event.h`.
+`crates/ghostty-vt-sys/chkstk.S` now also exports `___chkstk_ms` as an alias of
+the local stack probe so a MinGW-hosted Windows build can resolve Rust std's
+large-stack-frame helper without pulling in libgcc's RSP-moving implementation.
 
 No upstream pin moved. The new scrollbar/viewport calls come from the same
 pinned `vt-1.0.2` header: `ghostty_terminal_scroll_viewport`,

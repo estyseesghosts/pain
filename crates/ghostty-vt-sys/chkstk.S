@@ -4,6 +4,8 @@
  * MinGW libgcc's `___chkstk` adjusts RSP and `___chkstk_ms` clobbers RCX, so
  * neither can be used here. Probe from the bottom of the frame upward. */
     .globl  __chkstk
+    .globl  ___chkstk_ms
+    .set    ___chkstk_ms, __chkstk
     .p2align 4, 0x90
 __chkstk:
     mov     %rsp, %r10

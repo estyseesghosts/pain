@@ -355,12 +355,80 @@ What these numbers prove:
   dirty state through `RowCache::rows_to_rebuild` returns an empty list, and the
   counters show `rows_rebuilt == 0` and `shape_line_calls == 0`. Cursor blink
   therefore reshapes nothing.
-- 1,000 resize requests with only nine distinct grid sizes produce nine Ghostty
-  resize calls and 991 suppressed duplicates; pixel-only motion never reaches
-  the PTY.
+- 1,000 resize requests with only nine distinct grid sizes produce ten Ghostty
+  geometry updates (one pixel-only plus nine grid changes), nine PTY resize
+  calls and 990 suppressed duplicates; pixel-only motion never reaches the PTY.
 - Terminal lock hold stays in the low hundreds of microseconds because it only
   covers `ghostty_terminal_vt_write` or render-state `begin_update`, never
   shaping or painting.
+
+## 16b. Repair-pass counters (latest-wins geometry/input work)
+
+The original `rows_rebuilt` number was too coarse: it could not distinguish a
+clean frame from a full-grid copy. `tests/m6.rs` and
+`CountersSnapshot::snapshot_counters()` now report:
+
+- `cells_materialized` / `rows_materialized` — cells and rows copied out of
+  Ghostty render state. A cursor-only frame must materialize **zero** of both;
+  a one-line update materializes only that row; a full redraw materializes all
+  visible rows. `dirty_rows_visited` is retained for comparison but is not a
+  cost measure.
+- `row_cache_copies` — times the GPUI element had to copy the Vec of shared row
+  handles because a previous frame still held it. Deep copies of shaped rows
+  are gone; each `CachedRow` is behind `Arc` and dirty rows are replaced in
+  place. Clean/blink frames copy zero row contents.
+- `mouse_events_offered` / `mouse_events_encoded` / `mouse_bytes_queued` — one
+  session operation decides routing under the terminal lock. An owned event is
+  reported even when Ghostty returns zero bytes (deduplicated motion), so
+  `events_encoded` is not inferred from a byte count. The production queue
+  receives the encoded `Vec<u8>` by move, never by clone.
+- `ghostty_geometry_updates` / `pty_grid_resize_requests` — independent
+  counters. Font/DPI changes increment only the former; a one-cell grid change
+  increments both. Layout-originated geometry never schedules a redundant
+  renderer wake.
+- `scroll_lock_acquisitions` — one per scroll gesture; the thumb drag reads
+  the resulting scrollbar state from the same operation.
+
+The measured Windows and Linux/WSLg release numbers are recorded in the table
+at the end of this section; the invariants above are asserted as counts in
+`tests/m6.rs`, not as wall-clock thresholds.
+
+Measured release counters (`cargo test --release --test m6 -- --nocapture`),
+80x24 synthetic-fixture session. On Windows `--features shell` is omitted for
+this headless test because GPUI's Windows build script needs `fxc.exe` from the
+Windows SDK, which this host does not have; M6 touches only `TerminalSession`
+and `RowCache`, so the extra feature is unnecessary. All numbers are from
+`TerminalSession::snapshot_counters()`:
+
+| Platform | Workload | Writes | Bytes | Wakeups sched / coalesced | Render updates | Dirty full / partial / clean | Cells materialized | Rows materialized | Rows rebuilt | Row-cache copies | Mouse offered / encoded / bytes | Ghostty geom updates | PTY grid reqs | Scroll locks | Max lock us |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Windows | Output flood | 8,000 | 216,000 | 1 / 7,999 | 57 | 57 / 0 / 0 | 109,440 | 1,368 | 0 | 0 | 0 / 0 / 0 | 0 | 0 | 0 | 5,797 |
+| Windows | Cursor-only frame | 2 | 15 | 1 / 1 | 2 | 1 / 0 / 1 | 1,920 | 24 | 0 | 0 | 0 / 0 / 0 | 0 | 0 | 0 | 310 |
+| Windows | Resize storm | 0 | 0 | 0 / 0 | 0 | 0 / 0 / 0 | 0 | 0 | 0 | 0 | 0 / 0 / 0 | 10 | 9 | 0 | 0 |
+| Linux (WSL ext4) | Output flood | 8,000 | 216,000 | 1 / 7,999 | 118 | 118 / 0 / 0 | 226,560 | 2,832 | 0 | 0 | 0 / 0 / 0 | 0 | 0 | 0 | 572 |
+| Linux (WSL ext4) | Cursor-only frame | 2 | 15 | 1 / 1 | 2 | 1 / 0 / 1 | 1,920 | 24 | 0 | 0 | 0 / 0 / 0 | 0 | 0 | 0 | 224 |
+| Linux (WSL ext4) | Resize storm | 0 | 0 | 0 / 0 | 0 | 0 / 0 / 0 | 0 | 0 | 0 | 0 | 0 / 0 / 0 | 10 | 9 | 0 | 0 |
+
+Linux renders more frames during the same flood (118 vs 57) because its
+producer thread is scheduled differently relative to the renderer, but wakeup
+coalescing (one wakeup for 8,000 writes), zero row rebuilds and zero row-cache
+copies hold on both platforms. The resize storm is identical: one pixel-only
+Ghostty update plus nine grid changes, nine PTY requests and 990 duplicates
+suppressed, with no renderer wake scheduled from layout.
+
+What these prove on the repair pass:
+
+- Output flood: 8,000 writes schedule **one** UI wakeup; 7,999 are coalesced.
+  Only 1,368 rows are materialized across 57 frames (24 visible rows per full
+  frame), and `rows_rebuilt` / `row_cache_copies` are **zero** — the row cache
+  reuses shaped rows in place and no whole-frame copy happens.
+- Cursor-only frame: `dirty_clean`, zero dirty rows, zero row rebuilds and zero
+  cache copies even though 24 rows were materialized for the preceding full
+  frame; the cursor blink frame itself reshapes nothing.
+- Resize storm: 1,000 bounds changes with nine distinct grids produce ten
+  Ghostty geometry updates (one pixel-only + nine grid) and nine PTY grid
+  requests; 990 duplicates are suppressed and no renderer wake is scheduled
+  from layout.
 
 Scrollback is bounded deliberately in `SessionConfig` (10,000 lines / 16 MiB by
 default, override with `--scrollback-lines` and `--scrollback-bytes`). Ghostty's

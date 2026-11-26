@@ -4,7 +4,9 @@
 
 use std::fmt;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread::JoinHandle;
 
 use crate::terminal::session::TerminalSession;
 
@@ -64,6 +66,136 @@ impl fmt::Display for PtyError {
 }
 
 impl std::error::Error for PtyError {}
+
+/// Point-in-time counters for [`PtyResizeMailbox`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PtyResizeCounters {
+    pub requested: u64,
+    pub coalesced: u64,
+    pub applied: u64,
+}
+
+/// A latest-value mailbox for OS PTY resizes. A drag from 80→200 columns may
+/// enqueue many intermediate sizes; only the newest survives. One worker
+/// thread applies it with the platform's `ResizePseudoConsole`/`TIOCSWINSZ`.
+/// Nothing here touches Ghostty geometry, which must stay synchronous with the
+/// frame.
+struct PtyResizeState {
+    pending: Mutex<Option<(u16, u16)>>,
+    wake: Condvar,
+    stopping: AtomicBool,
+}
+
+pub struct PtyResizeMailbox {
+    state: Arc<PtyResizeState>,
+    worker: Mutex<Option<JoinHandle<()>>>,
+    requested: Arc<AtomicU64>,
+    applied: Arc<AtomicU64>,
+}
+
+impl PtyResizeMailbox {
+    #[must_use]
+    pub fn new(apply: Arc<dyn Fn(u16, u16) + Send + Sync>) -> Self {
+        let state = Arc::new(PtyResizeState {
+            pending: Mutex::new(None),
+            wake: Condvar::new(),
+            stopping: AtomicBool::new(false),
+        });
+        let requested = Arc::new(AtomicU64::new(0));
+        let applied = Arc::new(AtomicU64::new(0));
+        let worker_state = Arc::clone(&state);
+        let worker_applied = Arc::clone(&applied);
+        let worker = std::thread::Builder::new()
+            .name("pain-pty-resize".into())
+            .spawn(move || {
+                let mut last_applied: Option<(u16, u16)> = None;
+                loop {
+                    let mut pending = worker_state
+                        .pending
+                        .lock()
+                        .expect("PTY resize pending mutex poisoned");
+                    while pending.is_none()
+                        && !worker_state.stopping.load(Ordering::Acquire)
+                    {
+                        pending = worker_state
+                            .wake
+                            .wait(pending)
+                            .expect("PTY resize condvar poisoned");
+                    }
+                    if worker_state.stopping.load(Ordering::Acquire) {
+                        break;
+                    }
+                    let size = pending.take().expect("pending size was checked");
+                    drop(pending);
+                    // Worker-side dedup: never apply the same grid twice.
+                    if last_applied == Some(size) {
+                        continue;
+                    }
+                    apply(size.0, size.1);
+                    last_applied = Some(size);
+                    worker_applied.fetch_add(1, Ordering::Relaxed);
+                }
+            })
+            .expect("spawn PTY resize worker");
+        Self {
+            state,
+            worker: Mutex::new(Some(worker)),
+            requested,
+            applied,
+        }
+    }
+
+    /// Update only the pending size and signal the worker. Never blocks on the
+    /// OS PTY call, so this is safe to invoke from the UI/session path.
+    pub fn request(&self, cols: u16, rows: u16) {
+        if self.state.stopping.load(Ordering::Acquire) {
+            return;
+        }
+        let size = (cols.max(1), rows.max(1));
+        self.requested.fetch_add(1, Ordering::Relaxed);
+        let mut pending = self.state.pending.lock().expect("PTY resize pending mutex poisoned");
+        if *pending == Some(size) {
+            return;
+        }
+        *pending = Some(size);
+        drop(pending);
+        self.state.wake.notify_one();
+    }
+
+    /// Stop accepting work, wake the worker, and join it. Idempotent.
+    pub fn shutdown(&self) {
+        // Hold `pending` while flipping `stopping`: the worker checks that flag
+        // under the same mutex before it waits. Setting it without the lock
+        // would allow a notify in the window between the worker's check and
+        // `Condvar::wait`, losing the wakeup and hanging `join()` forever.
+        {
+            let _pending = self
+                .state
+                .pending
+                .lock()
+                .expect("PTY resize pending mutex poisoned");
+            self.state.stopping.store(true, Ordering::Release);
+        }
+        self.state.wake.notify_all();
+        if let Some(worker) = self.worker.lock().expect("PTY resize worker mutex poisoned").take()
+        {
+            let _ = worker.join();
+        }
+    }
+
+    #[must_use]
+    pub fn counters(&self) -> PtyResizeCounters {
+        let requested = self.requested.load(Ordering::Relaxed);
+        let applied = self.applied.load(Ordering::Relaxed);
+        PtyResizeCounters {
+            requested,
+            // Every request is either applied by the worker or coalesced
+            // away because a newer grid superseded it before the OS call.
+            coalesced: requested.saturating_sub(applied),
+            applied,
+        }
+    }
+}
 
 /// Owns one live PTY/child and its worker threads. `shutdown` is the only
 /// blocking call and is always made off the GPUI foreground thread.
@@ -192,6 +324,41 @@ mod tests {
         );
         assert_eq!(shell_from_args(&["pain".into()]), None);
         assert_eq!(shell_from_args(&["pain".into(), "--shell".into()]), None);
+    }
+
+    #[test]
+    fn resize_mailbox_keeps_only_the_latest_grid() {
+        use std::time::{Duration, Instant};
+
+        let applied_grids = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&applied_grids);
+        // Gate the worker until every request is queued. Without this the
+        // worker can legitimately apply an intermediate drag size, making an
+        // otherwise-correct mailbox look like it failed to coalesce.
+        let release = Arc::new(AtomicBool::new(false));
+        let worker_release = Arc::clone(&release);
+        let mailbox = PtyResizeMailbox::new(Arc::new(move |cols, rows| {
+            while !worker_release.load(Ordering::Acquire) {
+                std::thread::yield_now();
+            }
+            seen.lock().expect("seen poisoned").push((cols, rows));
+        }));
+        for cols in 80..200u16 {
+            mailbox.request(cols, 24);
+        }
+        mailbox.request(200, 24);
+        release.store(true, Ordering::Release);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline && mailbox.counters().applied == 0 {
+            std::thread::yield_now();
+        }
+        mailbox.shutdown();
+        let grids = applied_grids.lock().expect("seen poisoned");
+        assert_eq!(grids.last(), Some(&(200, 24)), "child ends at latest grid");
+        assert!(grids.len() <= 2, "intermediate drag sizes are coalesced");
+        let counters = mailbox.counters();
+        assert_eq!(counters.requested, 121);
+        assert_eq!(counters.coalesced + counters.applied, 121);
     }
 
     #[test]

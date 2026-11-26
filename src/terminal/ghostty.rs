@@ -9,6 +9,7 @@
 use std::ffi::{c_void, CStr};
 use std::fmt;
 use std::marker::PhantomData;
+use std::mem::MaybeUninit;
 use std::ptr;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
@@ -154,18 +155,52 @@ pub struct Cursor {
     pub visual_style: i32,
 }
 
-/// A complete, owned copy of the visible terminal state.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RenderSnapshot {
+/// Frame metadata: cheap to read every frame, even when no cell is needed.
+#[derive(Clone, Debug)]
+pub struct FrameMeta {
     pub cols: u16,
     pub rows: u16,
     pub dirty: sys::GhosttyResult,
     pub cursor: Cursor,
     pub colors: Colors,
-    pub lines: Vec<Vec<Cell>>,
     pub selections: Vec<Option<RowSelection>>,
     pub dirty_rows: Vec<u16>,
 }
+
+/// One coherent frame: metadata plus materialized cells for only the rows the
+/// caller needs. Rows are `(viewport_row, cells)` in viewport order.
+#[derive(Clone, Debug)]
+pub struct RenderFrame {
+    pub meta: FrameMeta,
+    pub rows: Vec<(usize, Vec<Cell>)>,
+}
+
+impl std::ops::Deref for RenderFrame {
+    type Target = FrameMeta;
+
+    fn deref(&self) -> &Self::Target {
+        &self.meta
+    }
+}
+
+impl RenderFrame {
+    #[must_use]
+    pub fn line(&self, y: usize) -> &[Cell] {
+        self.rows
+            .iter()
+            .find(|(row, _)| *row == y)
+            .map(|(_, cells)| cells.as_slice())
+            .unwrap_or(&[])
+    }
+
+    #[must_use]
+    pub fn selection(&self, y: usize) -> Option<RowSelection> {
+        self.meta.selections.get(y).copied().flatten()
+    }
+}
+
+/// Backwards-compatible name used by existing call sites.
+pub type RenderSnapshot = RenderFrame;
 
 /// Owns one `GhosttyTerminal` handle.
 pub struct GhosttyTerminal {
@@ -582,8 +617,10 @@ impl GhosttyTerminal {
         // SAFETY: Ghostty allocated `out_len` readable bytes at `out_ptr`.
         let bytes = unsafe { std::slice::from_raw_parts(out_ptr, out_len) };
         let text = String::from_utf8_lossy(bytes).into_owned();
-        // SAFETY: `out_ptr` came from `format_alloc` with the default allocator.
-        unsafe { sys::ghostty_free(out_ptr.cast()) };
+        // SAFETY: `out_ptr` came from `format_alloc` with the default (NULL)
+        // allocator; `ghostty_free` needs that same allocator plus the exact
+        // allocation length to release it through Ghostty's own heap.
+        unsafe { sys::ghostty_free(ptr::null(), out_ptr, out_len) };
         Ok(text)
     }
 
@@ -833,6 +870,194 @@ impl Drop for GhosttyTerminal {
     }
 }
 
+/// One reusable Ghostty-owned selection gesture plus reusable press/drag/
+/// release events. Allocated once per session, never per click, and every call
+/// is serialized with other terminal access by `TerminalSession`.
+pub struct SelectionGesture {
+    gesture: Option<sys::GhosttySelectionGesture>,
+    press: Option<sys::GhosttySelectionGestureEvent>,
+    drag: Option<sys::GhosttySelectionGestureEvent>,
+    release: Option<sys::GhosttySelectionGestureEvent>,
+    /// Non-owning: used only to release tracked refs when this gesture drops.
+    terminal: sys::GhosttyTerminal,
+}
+
+impl SelectionGesture {
+    pub fn new(terminal: &GhosttyTerminal) -> Result<Self, GhosttyError> {
+        let mut raw = ptr::null_mut();
+        // SAFETY: valid out-parameter, NULL allocator selects the default, and
+        // the handle is exclusively owned by this wrapper.
+        check(unsafe { sys::ghostty_selection_gesture_new(ptr::null(), &mut raw) })?;
+        let new_event = |event_type: i32| -> Result<sys::GhosttySelectionGestureEvent, GhosttyError> {
+            let mut event = ptr::null_mut();
+            // SAFETY: valid out-parameter; the event type is fixed for life.
+            check(unsafe {
+                sys::ghostty_selection_gesture_event_new(ptr::null(), &mut event, event_type)
+            })?;
+            Ok(event)
+        };
+        Ok(Self {
+            gesture: Some(raw),
+            press: Some(new_event(sys::GHOSTTY_SELECTION_GESTURE_EVENT_TYPE_PRESS)?),
+            drag: Some(new_event(sys::GHOSTTY_SELECTION_GESTURE_EVENT_TYPE_DRAG)?),
+            release: Some(new_event(sys::GHOSTTY_SELECTION_GESTURE_EVENT_TYPE_RELEASE)?),
+            terminal: terminal.as_raw(),
+        })
+    }
+
+    fn grid_ref(&self, terminal: &GhosttyTerminal, x: u16, y: u16) -> Result<sys::GhosttyGridRef, GhosttyError> {
+        let mut reference = sys::GhosttyGridRef::default();
+        // SAFETY: viewport points and out-parameters are documented types; the
+        // returned untracked ref is consumed by the gesture call below.
+        check(unsafe {
+            sys::ghostty_terminal_grid_ref(
+                terminal.as_raw(),
+                sys::GhosttyPoint::viewport(x, u32::from(y)),
+                &mut reference,
+            )
+        })?;
+        Ok(reference)
+    }
+
+    fn apply(
+        &self,
+        terminal: &GhosttyTerminal,
+        event: sys::GhosttySelectionGestureEvent,
+        reference: Option<sys::GhosttyGridRef>,
+    ) -> Result<(), GhosttyError> {
+        let reference = reference.ok_or(GhosttyError(sys::GHOSTTY_INVALID_VALUE))?;
+        // SAFETY: event and gesture handles are valid and owned by this
+        // wrapper; the grid ref is valid until the next terminal mutation.
+        check(unsafe {
+            sys::ghostty_selection_gesture_event_set(
+                event,
+                sys::GHOSTTY_SELECTION_GESTURE_EVENT_OPT_REF,
+                (&reference as *const sys::GhosttyGridRef).cast(),
+            )
+        })?;
+        let mut selection = MaybeUninit::<sys::GhosttySelection>::uninit();
+        // SAFETY: the output pointer has the documented GhosttySelection type.
+        let result = unsafe {
+            sys::ghostty_selection_gesture_event(
+                self.gesture.expect("gesture handle present"),
+                terminal.as_raw(),
+                event,
+                selection.as_mut_ptr(),
+            )
+        };
+        if result == sys::GHOSTTY_NO_VALUE {
+            return Ok(());
+        }
+        check(result)?;
+        // SAFETY: SUCCESS means Ghostty initialized the selection snapshot.
+        let selection = unsafe { selection.assume_init() };
+        // SAFETY: the terminal copies the selection immediately and converts
+        // its untracked refs into tracked state before this call returns.
+        check(unsafe {
+            sys::ghostty_terminal_set(
+                terminal.as_raw(),
+                sys::GHOSTTY_TERMINAL_OPT_SELECTION,
+                (&selection as *const sys::GhosttySelection).cast(),
+            )
+        })
+    }
+
+    /// Press: cell/word/line behavior is configured once here.
+    pub fn press(
+        &self,
+        terminal: &GhosttyTerminal,
+        x: u16,
+        y: u16,
+    ) -> Result<(), GhosttyError> {
+        let reference = self.grid_ref(terminal, x, y)?;
+        let behaviors = sys::GhosttySelectionGestureBehaviors::default();
+        // SAFETY: the event copies the behavior table into event-owned storage.
+        check(unsafe {
+            sys::ghostty_selection_gesture_event_set(
+                self.press.expect("press event present"),
+                sys::GHOSTTY_SELECTION_GESTURE_EVENT_OPT_BEHAVIORS,
+                (&behaviors as *const sys::GhosttySelectionGestureBehaviors).cast(),
+            )
+        })?;
+        self.apply(terminal, self.press.expect("press event present"), Some(reference))
+    }
+
+    /// Drag: Ghostty decides word/line granularity and keeps ownership of the
+    /// selection from press through release.
+    pub fn drag(
+        &self,
+        terminal: &GhosttyTerminal,
+        x: u16,
+        y: u16,
+        geometry: sys::GhosttySelectionGestureGeometry,
+    ) -> Result<(), GhosttyError> {
+        let reference = self.grid_ref(terminal, x, y)?;
+        let event = self.drag.expect("drag event present");
+        // SAFETY: geometry is copied into event-owned storage.
+        check(unsafe {
+            sys::ghostty_selection_gesture_event_set(
+                event,
+                sys::GHOSTTY_SELECTION_GESTURE_EVENT_OPT_GEOMETRY,
+                (&geometry as *const sys::GhosttySelectionGestureGeometry).cast(),
+            )
+        })?;
+        self.apply(terminal, event, Some(reference))
+    }
+
+    pub fn release(&self, terminal: &GhosttyTerminal) -> Result<(), GhosttyError> {
+        let event = self.release.expect("release event present");
+        let result = unsafe {
+            sys::ghostty_selection_gesture_event(
+                self.gesture.expect("gesture handle present"),
+                terminal.as_raw(),
+                event,
+                ptr::null_mut(),
+            )
+        };
+        if result == sys::GHOSTTY_NO_VALUE {
+            return Ok(());
+        }
+        check(result)
+    }
+
+    pub fn reset(&self) {
+        // SAFETY: handles are valid; terminal-backed refs are released.
+        unsafe {
+            sys::ghostty_selection_gesture_reset(
+                self.gesture.expect("gesture handle present"),
+                self.terminal,
+            )
+        }
+    }
+}
+
+// SAFETY: the gesture is only touched while the session's terminal mutex is
+// held, so it is never used concurrently.
+unsafe impl Send for SelectionGesture {}
+
+impl Drop for SelectionGesture {
+    fn drop(&mut self) {
+        // SAFETY: `take` makes this the single free of each owned handle. The
+        // gesture is told about the terminal so tracked refs are released.
+        unsafe {
+            if let Some(event) = self.press.take() {
+                sys::ghostty_selection_gesture_event_free(event);
+            }
+            if let Some(event) = self.drag.take() {
+                sys::ghostty_selection_gesture_event_free(event);
+            }
+            if let Some(event) = self.release.take() {
+                sys::ghostty_selection_gesture_event_free(event);
+            }
+            if let Some(gesture) = self.gesture.take() {
+                // TerminalSession drops the gesture before the terminal, so
+                // this non-owning handle is still alive here.
+                sys::ghostty_selection_gesture_free(gesture, self.terminal);
+            }
+        }
+    }
+}
+
 /// Owns one `GhosttyRenderState` handle.
 pub struct GhosttyRenderState {
     raw: Option<sys::GhosttyRenderState>,
@@ -975,25 +1200,53 @@ impl GhosttyRenderState {
         })
     }
 
-    /// Copy the entire visible grid into Rust-owned values. Do not call
-    /// `clean` until the returned snapshot has been consumed successfully.
-    pub fn snapshot(&self) -> Result<RenderSnapshot, GhosttyError> {
+    /// Read frame metadata without materializing any cell rows.
+    pub fn snapshot_meta(&self) -> Result<FrameMeta, GhosttyError> {
         let cols = self.get_u16(sys::GHOSTTY_RENDER_STATE_DATA_COLS)?;
         let rows = self.get_u16(sys::GHOSTTY_RENDER_STATE_DATA_ROWS)?;
         let dirty = self.get_i32(sys::GHOSTTY_RENDER_STATE_DATA_DIRTY)?;
         let cursor = self.cursor()?;
         let colors = self.colors()?;
-
-        let mut lines = vec![Vec::new(); usize::from(rows)];
-        let mut selections = vec![None; usize::from(rows)];
         let dirty_rows = self.dirty_rows()?;
+
+        // Row-local selection is an FFI call per row, not per cell. Selections
+        // are metadata: they are needed even on cursor-only frames.
+        let mut selections = vec![None; usize::from(rows)];
+        let mut row_iter = RowIterator::new(self)?;
+        while row_iter.next() {
+            let y = row_iter.viewport_y()?;
+            if let Some(slot) = selections.get_mut(usize::from(y)) {
+                *slot = row_iter.selection()?;
+            }
+        }
+        Ok(FrameMeta {
+            cols,
+            rows,
+            dirty,
+            cursor,
+            colors,
+            selections,
+            dirty_rows,
+        })
+    }
+
+    /// Materialize only rows whose index is true in `needed`. The caller owns
+    /// the mask, so no `HashSet` or full-width `Vec<Vec<Cell>>` is allocated
+    /// for rows the renderer will not use.
+    pub fn materialize_rows(
+        &self,
+        needed: &[bool],
+        selections: &[Option<RowSelection>],
+    ) -> Result<Vec<(usize, Vec<Cell>)>, GhosttyError> {
+        let mut rows = Vec::new();
         let mut row_iter = RowIterator::new(self)?;
         let mut cells = RowCells::new()?;
         while row_iter.next() {
-            let y = row_iter.viewport_y()?;
-            // Query selection once per row: the per-cell API exists but costs
-            // one FFI call per cell, which the render policy avoids.
-            let selection = row_iter.selection()?;
+            let y = usize::from(row_iter.viewport_y()?);
+            if !needed.get(y).copied().unwrap_or(false) {
+                continue;
+            }
+            let selection = selections.get(y).copied().flatten();
             cells.bind(&mut row_iter)?;
             let mut line = Vec::new();
             while cells.next() {
@@ -1003,23 +1256,17 @@ impl GhosttyRenderState {
                 }
                 line.push(cell);
             }
-            if let Some(slot) = lines.get_mut(usize::from(y)) {
-                *slot = line;
-            }
-            if let Some(slot) = selections.get_mut(usize::from(y)) {
-                *slot = selection;
-            }
+            rows.push((y, line));
         }
-        Ok(RenderSnapshot {
-            cols,
-            rows,
-            dirty,
-            cursor,
-            colors,
-            lines,
-            selections,
-            dirty_rows,
-        })
+        Ok(rows)
+    }
+
+    /// Convenience full snapshot for headless tests and initial frames.
+    pub fn snapshot(&self) -> Result<RenderSnapshot, GhosttyError> {
+        let meta = self.snapshot_meta()?;
+        let all = vec![true; usize::from(meta.rows)];
+        let rows = self.materialize_rows(&all, &meta.selections)?;
+        Ok(RenderFrame { meta, rows })
     }
 }
 
@@ -1428,6 +1675,12 @@ impl KeyEvent {
     /// distinguishes them, so preserve the platform's `is_held` flag.
     pub fn repeat(&mut self, key: i32, mods: u16) -> Result<(), GhosttyError> {
         self.set_action_key_mods(sys::GHOSTTY_KEY_ACTION_REPEAT, key, mods)
+    }
+
+    /// A physical key release, used when a TUI enables Kitty `report_events`.
+    /// Ghostty's encoder decides whether the current keyboard mode consumes it.
+    pub fn release(&mut self, key: i32, mods: u16) -> Result<(), GhosttyError> {
+        self.set_action_key_mods(sys::GHOSTTY_KEY_ACTION_RELEASE, key, mods)
     }
 
     fn set_action_key_mods(

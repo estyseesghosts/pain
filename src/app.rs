@@ -33,6 +33,44 @@ gpui::actions!(
     ]
 );
 
+/// Latest-value title mailbox. OSC 0/2 can produce A, B, C before the UI
+/// consumes any of them; a capacity-one channel that drops on send can lose C,
+/// so the mailbox keeps only the newest value and one coalesced notification.
+struct TitleMailbox {
+    latest: Mutex<Option<String>>,
+    queued: AtomicBool,
+    wake: async_channel::Sender<()>,
+}
+
+impl TitleMailbox {
+    fn new(wake: async_channel::Sender<()>) -> Self {
+        Self {
+            latest: Mutex::new(None),
+            queued: AtomicBool::new(false),
+            wake,
+        }
+    }
+
+    fn post(&self, title: String) {
+        // Both operations happen under one lock so a post racing a consume
+        // cannot be lost when the queued flag is cleared.
+        let mut latest = self.latest.lock().expect("title mailbox poisoned");
+        *latest = Some(title);
+        if !self.queued.swap(true, Ordering::AcqRel) {
+            let _ = self.wake.try_send(());
+        }
+    }
+
+    fn take(&self) -> Option<String> {
+        let mut latest = self.latest.lock().expect("title mailbox poisoned");
+        let value = latest.take();
+        if value.is_some() {
+            self.queued.store(false, Ordering::Release);
+        }
+        value
+    }
+}
+
 /// Start the one-window app with a live shell by default.
 pub fn run() {
     let argv: Vec<String> = std::env::args().collect();
@@ -117,10 +155,12 @@ pub fn run() {
         preferences::apply(cx);
         // Terminal replies and OSC title changes are effect callbacks. They
         // never block on OS I/O or re-enter the terminal lock's writer path.
-        let (title_tx, title_rx) = async_channel::bounded::<String>(1);
+        let (title_tx, title_rx) = async_channel::bounded::<()>(1);
+        let titles = Arc::new(TitleMailbox::new(title_tx));
+        let title_sink = Arc::clone(&titles);
         session
             .install_callbacks(Box::new(move |title| {
-                let _ = title_tx.try_send(title);
+                title_sink.post(title);
             }))
             .expect("install terminal effect callbacks");
 
@@ -211,6 +251,63 @@ pub fn run() {
             gpui::KeyBinding::new("ctrl-,", OpenPreferences, None),
         ]);
 
+        // Early raw-keystroke ownership check. Windows marks many Ctrl keys as
+        // `prefer_character_input`, which normally skips bindings and sends the
+        // keystroke to the native text input path. The interceptor runs before
+        // that decision, uses the SAME pure `app_command` allowlist as the
+        // view's ownership check, and claims the key without calling back into
+        // a window that GPUI has already leased for key dispatch. The actual
+        // command is dispatched on the focused view after this dispatch ends.
+        cx.intercept_keystrokes(
+            move |event: &gpui::KeystrokeEvent, window, cx| {
+                let Some(focus) = cx.try_global::<crate::terminal::render::TerminalFocusGlobal>()
+                else {
+                    return;
+                };
+                if !focus.0.is_focused(window) {
+                    return;
+                }
+                let m = event.keystroke.modifiers;
+                let mods = crate::terminal::input::Modifiers::new(
+                    m.shift, m.control, m.alt, m.platform,
+                );
+                let Some(command) = crate::terminal::input::app_command(
+                    &event.keystroke.key,
+                    event.keystroke.key_char.as_deref(),
+                    mods,
+                ) else {
+                    return;
+                };
+                cx.stop_propagation();
+                let handle = window.window_handle();
+                cx.defer(move |cx| {
+                    let action: Box<dyn gpui::Action> = match command {
+                        crate::terminal::input::AppCommand::IncreaseFont => {
+                            Box::new(IncreaseFont)
+                        }
+                        crate::terminal::input::AppCommand::DecreaseFont => {
+                            Box::new(DecreaseFont)
+                        }
+                        crate::terminal::input::AppCommand::ResetFont => Box::new(ResetFont),
+                        crate::terminal::input::AppCommand::CopySelection => {
+                            Box::new(CopySelection)
+                        }
+                        crate::terminal::input::AppCommand::PasteClipboard => {
+                            Box::new(PasteClipboard)
+                        }
+                        crate::terminal::input::AppCommand::SelectAll => {
+                            Box::new(SelectAllTerminal)
+                        }
+                        crate::terminal::input::AppCommand::OpenPreferences => {
+                            Box::new(OpenPreferences)
+                        }
+                    };
+                    let _ = handle.update(cx, |_, window, cx| window.dispatch_action(action, cx));
+                });
+            },
+        )
+        .detach();
+
         let window_handle = view;
         cx.spawn(async move |cx: &mut gpui::AsyncApp| {
             while wake_rx.recv().await.is_ok() {
@@ -225,7 +322,10 @@ pub fn run() {
         let title_window = view;
         let title_session = Arc::clone(&session);
         cx.spawn(async move |cx: &mut gpui::AsyncApp| {
-            while let Ok(new_title) = title_rx.recv().await {
+            while title_rx.recv().await.is_ok() {
+                let Some(new_title) = titles.take() else {
+                    continue;
+                };
                 title_session.record_title_change();
                 let display = if new_title.is_empty() {
                     "pain".to_owned()
@@ -337,6 +437,23 @@ mod tests {
             label: id.to_owned(),
             command: ShellCommand::new(program),
         }
+    }
+
+    #[test]
+    fn title_mailbox_is_latest_wins_and_notifies_once() {
+        let (tx, rx) = async_channel::bounded::<()>(1);
+        let mailbox = TitleMailbox::new(tx);
+        assert!(mailbox.take().is_none());
+        mailbox.post("A".into());
+        mailbox.post("B".into());
+        mailbox.post("C".into());
+        assert_eq!(rx.len(), 1, "coalesce notifications, do not queue titles");
+        assert_eq!(mailbox.take().as_deref(), Some("C"));
+        assert!(!mailbox.queued.load(Ordering::Acquire));
+        assert!(mailbox.take().is_none());
+        mailbox.post("D".into());
+        assert_eq!(rx.len(), 1, "a later post re-arms the consumer");
+        assert_eq!(mailbox.take().as_deref(), Some("D"));
     }
 
     #[test]

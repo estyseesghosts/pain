@@ -118,7 +118,7 @@ fn selected_palette_reaches_ghostty_render_state() {
     let session = TerminalSession::new(80, 24, Box::new(NoopWakeup)).expect("session");
     let mocha = resolve(PaletteChoice::CatppuccinMocha, true).expect("mocha palette");
     session.set_colors(Some(&mocha)).expect("apply mocha");
-    let colors = session.render_snapshot().expect("snapshot").colors;
+    let colors = session.render_snapshot().expect("snapshot").colors.clone();
     assert_eq!(colors.background, (0x1e, 0x1e, 0x2e));
     assert_eq!(colors.palette[1], (0xf3, 0x8b, 0xa8));
 
@@ -126,14 +126,14 @@ fn selected_palette_reaches_ghostty_render_state() {
     session
         .set_colors(Some(&light))
         .expect("apply light palette");
-    let colors = session.render_snapshot().expect("snapshot").colors;
+    let colors = session.render_snapshot().expect("snapshot").colors.clone();
     assert_eq!(colors.background, (0xff, 0xff, 0xff));
     assert_eq!(colors.foreground, (0x1a, 0x1a, 0x1a));
 
     // Reset restores Ghostty's built-in palette without leaking the previous
     // default colours into the render state.
     session.set_colors(None).expect("reset palette");
-    let reset = session.render_snapshot().expect("snapshot").colors;
+    let reset = session.render_snapshot().expect("snapshot").colors.clone();
     assert_eq!(reset.background, (0, 0, 0));
     assert_eq!(reset.foreground, (0xff, 0xff, 0xff));
 }
@@ -216,7 +216,8 @@ fn clipboard_paste_uses_bracketed_mode() {
 }
 
 fn line_text(snapshot: &RenderSnapshot, y: usize) -> String {
-    snapshot.lines[y]
+    snapshot
+        .line(y)
         .iter()
         .map(|cell| cell.text.as_str())
         .collect()
@@ -235,7 +236,7 @@ fn create_feed_render_and_inspect_styled_cells() {
     let snapshot = state.snapshot().expect("snapshot read");
 
     assert_eq!(snapshot.cols, 80);
-    assert_eq!(snapshot.rows, 24);
+    assert_eq!(snapshot.meta.rows, 24);
     assert_ne!(
         snapshot.dirty,
         ghostty_vt_sys::GHOSTTY_RENDER_STATE_DIRTY_FALSE
@@ -243,13 +244,13 @@ fn create_feed_render_and_inspect_styled_cells() {
     assert_eq!(line_text(&snapshot, 0), "Hi Green");
     assert_eq!(line_text(&snapshot, 1), "Bye");
 
-    let green = &snapshot.lines[0][3];
+    let green = &snapshot.line(0)[3];
     assert_eq!(green.text, "G");
     assert!(green.has_styling);
     assert_eq!(green.style.foreground, Some(ColorSpec::Palette(2)));
     assert!(green.style.is_bold());
-    assert_eq!(snapshot.lines[0][2].text, " ");
-    assert!(snapshot.lines[0][2].style.foreground.is_none());
+    assert_eq!(snapshot.line(0)[2].text, " ");
+    assert!(snapshot.line(0)[2].style.foreground.is_none());
 
     assert!(snapshot.cursor.has_value);
     assert!(snapshot.cursor.visible);
@@ -274,7 +275,7 @@ fn true_color_and_bold_survive_the_render_bridge() {
     state.update(&terminal).expect("render state updated");
     let snapshot = state.snapshot().expect("snapshot read");
 
-    let cell = &snapshot.lines[0][0];
+    let cell = &snapshot.line(0)[0];
     assert_eq!(cell.text, "R");
     assert!(cell.style.is_bold());
     assert_eq!(cell.style.foreground, Some(ColorSpec::Rgb(255, 16, 32)));
@@ -302,7 +303,7 @@ fn resize_updates_grid_dimensions() {
     let mut state = GhosttyRenderState::new().unwrap();
     state.update(&terminal).unwrap();
     let snapshot = state.snapshot().unwrap();
-    assert_eq!((snapshot.cols, snapshot.rows), (40, 10));
+    assert_eq!((snapshot.cols, snapshot.meta.rows), (40, 10));
 }
 
 #[test]

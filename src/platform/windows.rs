@@ -31,7 +31,7 @@ use windows::Win32::System::Threading::{
 };
 use windows::Win32::System::IO::CancelSynchronousIo;
 
-use super::{terminal_environment, PlatformPty, PtyConfig, PtyError};
+use super::{terminal_environment, PlatformPty, PtyConfig, PtyError, PtyResizeMailbox};
 use crate::terminal::session::TerminalSession;
 
 static NEXT_PIPE_ID: AtomicU32 = AtomicU32::new(0);
@@ -198,7 +198,9 @@ pub struct WindowsPty {
     reader_thread: Arc<Mutex<Option<OwnedHandle>>>,
     stop: Arc<AtomicBool>,
     session: Arc<TerminalSession>,
-    size: Mutex<(u16, u16)>,
+    size: Arc<Mutex<(u16, u16)>>,
+    /// Latest-value mailbox; the UI only updates the pending grid.
+    resize_mailbox: Arc<PtyResizeMailbox>,
     threads: Mutex<Option<Threads>>,
 }
 
@@ -383,6 +385,24 @@ impl WindowsPty {
             Arc::clone(&reader_thread),
             Arc::clone(&stop),
         );
+        let size = Arc::new(Mutex::new((config.cols.max(1), config.rows.max(1))));
+        let resize_size = Arc::clone(&size);
+        let resize_conpty = Arc::clone(&conpty);
+        let resize_mailbox = Arc::new(PtyResizeMailbox::new(Arc::new(move |cols, rows| {
+            let coord = COORD {
+                X: cols as i16,
+                Y: rows as i16,
+            };
+            // SAFETY: the ConPTY handle stays alive until shutdown joins this
+            // worker, and the COORD is POD.
+            match unsafe { ResizePseudoConsole(resize_conpty.raw, coord) } {
+                Ok(()) => *resize_size.lock().expect("PTY size mutex poisoned") = (cols, rows),
+                Err(error) => crate::log::error(
+                    "resize",
+                    &format!("ResizePseudoConsole failed: {}", error.message()),
+                ),
+            }
+        })));
         Ok(Self {
             conpty,
             _input_read: input_read,
@@ -391,7 +411,8 @@ impl WindowsPty {
             reader_thread,
             stop,
             session,
-            size: Mutex::new((config.cols.max(1), config.rows.max(1))),
+            size,
+            resize_mailbox,
             threads: Mutex::new(Some(threads)),
         })
     }
@@ -524,23 +545,9 @@ fn start_threads(
 
 impl PlatformPty for WindowsPty {
     fn resize(&self, cols: u16, rows: u16) -> Result<(), PtyError> {
-        let next = (cols.max(1), rows.max(1));
-        let mut current = self.size.lock().expect("PTY size mutex poisoned");
-        if *current == next {
-            return Ok(());
-        }
-        let coord = COORD {
-            X: next.0 as i16,
-            Y: next.1 as i16,
-        };
-        // SAFETY: the ConPTY handle is alive and the COORD is POD. A failed
-        // resize leaves the old size valid for a later distinct size.
-        unsafe {
-            ResizePseudoConsole(self.conpty.raw, coord).map_err(|error| {
-                PtyError::new("ResizePseudoConsole", error.message().to_string())
-            })?
-        }
-        *current = next;
+        // Never call ResizePseudoConsole on the GPUI/session thread: only the
+        // latest requested grid is kept by the worker.
+        self.resize_mailbox.request(cols, rows);
         Ok(())
     }
 
@@ -550,6 +557,9 @@ impl PlatformPty for WindowsPty {
 
     fn shutdown(self: Box<Self>) {
         self.stop.store(true, Ordering::Release);
+        // Stop accepting resizes, wake the worker and join before the ConPTY
+        // handle can be dropped. This never blocks indefinitely.
+        self.resize_mailbox.shutdown();
         self.session.close_writer();
         if let Some(handle) = self
             .reader_thread

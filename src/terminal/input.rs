@@ -239,6 +239,41 @@ pub fn key_for_keystroke(
     })
 }
 
+/// IME ownership policy: marked text is local until committed. Windows calls
+/// `replace_text_in_range` with a completion result and with an empty string
+/// when a composition is cancelled; neither an empty string nor a marked
+/// reading may be forwarded as terminal input.
+#[must_use]
+pub fn should_commit_text(marked: bool, text: &str) -> bool {
+    !marked && !text.is_empty()
+}
+
+/// Pure policy for a key release. It uses the same key/modifier translation as
+/// key down so a Kitty `report_events` TUI sees press → repeat → release for
+/// exactly the keys the encoder was given. The caller must still check command
+/// and IME ownership before encoding a release.
+#[must_use]
+pub fn key_release_for_keystroke(
+    name: &str,
+    key_char: Option<&str>,
+    mods: Modifiers,
+) -> Option<EncodedKey> {
+    // KeyUpEvent has no `prefer_character_input` flag. When Ctrl+Alt produced a
+    // different character (AltGr/dead key), the press belonged to the text
+    // handler, so inventing a release would leak composed text to the child.
+    if mods.alt
+        && mods.control
+        && key_char.is_some()
+        && key_char != Some(name)
+        && key_char != Some(name.to_ascii_lowercase().as_str())
+    {
+        return None;
+    }
+    let mut encoded = key_for_keystroke(name, key_char, mods, false, false)?;
+    encoded.repeat = false;
+    Some(encoded)
+}
+
 /// An app command owned by the shell rather than the PTY.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AppCommand {
@@ -298,7 +333,14 @@ pub fn app_command(name: &str, key_char: Option<&str>, mods: Modifiers) -> Optio
 /// bindings for the terminal: Ctrl+Shift+C/V and Shift+Insert.
 #[must_use]
 pub fn is_app_shortcut(name: &str, mods: Modifiers) -> bool {
-    app_command(name, None, mods).is_some()
+    is_app_shortcut_with_char(name, None, mods)
+}
+
+/// Same allowlist as `is_app_shortcut`, but uses the produced character too so
+/// Windows' `prefer_character_input` keystrokes are owned identically.
+#[must_use]
+pub fn is_app_shortcut_with_char(name: &str, key_char: Option<&str>, mods: Modifiers) -> bool {
+    app_command(name, key_char, mods).is_some()
 }
 
 /// True when the user is asking for local selection instead of terminal mouse
@@ -655,6 +697,51 @@ mod tests {
             None
         );
         assert_eq!(app_command("c", None, ctrl), None);
+    }
+
+    #[test]
+    fn ime_marked_readings_are_never_committed() {
+        assert!(!should_commit_text(true, "かん"));
+        assert!(!should_commit_text(true, ""));
+        assert!(!should_commit_text(false, ""));
+        assert!(should_commit_text(false, "漢"));
+    }
+
+    #[test]
+    fn key_release_uses_the_same_translation_as_press() {
+        for (name, mods) in [
+            ("up", Modifiers::default()),
+            ("a", Modifiers::new(false, true, false, false)),
+            ("enter", Modifiers::new(true, false, false, false)),
+        ] {
+            let press = key_for_keystroke(name, None, mods, false, true).expect("press");
+            let release = key_release_for_keystroke(name, None, mods).expect("release");
+            assert_eq!(press.key, release.key);
+            assert_eq!(press.mods, release.mods);
+            assert_eq!(press.unshifted_codepoint, release.unshifted_codepoint);
+            assert!(press.repeat && !release.repeat);
+        }
+        // AltGr and plain printable text belong to the text handler, so no
+        // synthetic release may be produced for them.
+        assert!(key_release_for_keystroke(
+            "2",
+            Some("²"),
+            Modifiers::new(false, true, true, false)
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn shortcut_allowlist_has_one_source_of_truth() {
+        let ctrl_shift = Modifiers::new(true, true, false, false);
+        assert!(is_app_shortcut("c", ctrl_shift));
+        assert!(is_app_shortcut_with_char("c", Some("C"), ctrl_shift));
+        assert!(!is_app_shortcut_with_char(
+            "c",
+            None,
+            Modifiers::new(false, true, true, false)
+        )); // AltGr
+        assert!(!is_app_shortcut("c", Modifiers::new(false, true, false, false)));
     }
 
     #[test]

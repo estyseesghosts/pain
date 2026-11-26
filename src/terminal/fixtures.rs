@@ -104,13 +104,13 @@ mod tests {
             state.update(&terminal).expect("update");
             let snapshot = state.snapshot().expect("snapshot");
             assert_eq!(
-                (snapshot.cols, snapshot.rows),
+                (snapshot.cols, snapshot.meta.rows),
                 (80, 24),
                 "{}",
                 fixture.name()
             );
             assert!(
-                snapshot.lines[0].iter().any(|c| !c.text.is_empty()),
+                snapshot.line(0).iter().any(|c| !c.text.is_empty()),
                 "{}",
                 fixture.name()
             );
@@ -131,8 +131,8 @@ mod tests {
                 end_x: 7
             })
         );
-        assert!(snapshot.lines[0][3].selected);
-        assert!(!snapshot.lines[0][9].selected);
+        assert!(snapshot.line(0)[3].selected);
+        assert!(!snapshot.line(0)[9].selected);
     }
 
     #[test]

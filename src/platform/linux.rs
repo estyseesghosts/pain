@@ -11,7 +11,7 @@ use std::thread::{self, JoinHandle};
 
 use libc::{c_int, pid_t};
 
-use super::{terminal_environment, PlatformPty, PtyConfig, PtyError};
+use super::{terminal_environment, PlatformPty, PtyConfig, PtyError, PtyResizeMailbox};
 use crate::terminal::session::TerminalSession;
 
 /// `TIOCSWINSZ` payload derived from the terminal grid. Pixel dimensions are
@@ -130,7 +130,9 @@ pub struct LinuxPty {
     child: pid_t,
     stop: Arc<AtomicBool>,
     session: Arc<TerminalSession>,
-    size: Mutex<GridSize>,
+    size: Arc<Mutex<GridSize>>,
+    /// Latest-value mailbox; the UI only updates the pending grid.
+    resize_mailbox: Arc<PtyResizeMailbox>,
     threads: Mutex<Option<Threads>>,
 }
 
@@ -228,12 +230,35 @@ impl LinuxPty {
         let stop = Arc::new(AtomicBool::new(false));
         let threads = start_threads(&session, Arc::clone(&master), Arc::clone(&stop), child.id());
 
+        let size = Arc::new(Mutex::new(initial));
+        let resize_master = Arc::clone(&master);
+        let resize_size = Arc::clone(&size);
+        let resize_mailbox = Arc::new(PtyResizeMailbox::new(Arc::new(move |cols, rows| {
+            let next = GridSize {
+                cols: cols.max(1),
+                rows: rows.max(1),
+            };
+            // SAFETY: the winsize value is POD and the master fd is alive until
+            // shutdown joins this worker.
+            let result = unsafe {
+                libc::ioctl(resize_master.raw(), libc::TIOCSWINSZ, &winsize_for(next))
+            };
+            if result != 0 {
+                crate::log::error(
+                    "resize",
+                    &format!("TIOCSWINSZ failed: {}", io::Error::last_os_error()),
+                );
+                return;
+            }
+            *resize_size.lock().expect("PTY size mutex poisoned") = next;
+        })));
         Ok(Self {
             master,
             child: child.id() as pid_t,
             stop,
             session,
-            size: Mutex::new(initial),
+            size,
+            resize_mailbox,
             threads: Mutex::new(Some(threads)),
         })
     }
@@ -307,24 +332,8 @@ fn start_threads(
 
 impl PlatformPty for LinuxPty {
     fn resize(&self, cols: u16, rows: u16) -> Result<(), PtyError> {
-        let next = GridSize {
-            cols: cols.max(1),
-            rows: rows.max(1),
-        };
-        let mut current = self.size.lock().expect("PTY size mutex poisoned");
-        if *current == next {
-            return Ok(());
-        }
-        // SAFETY: the winsize value is POD and the master fd is alive.
-        let result =
-            unsafe { libc::ioctl(self.master.raw(), libc::TIOCSWINSZ, &winsize_for(next)) };
-        if result != 0 {
-            return Err(PtyError::new(
-                "TIOCSWINSZ",
-                io::Error::last_os_error().to_string(),
-            ));
-        }
-        *current = next;
+        // TIOCSWINSZ runs on the coalescing worker, never on the UI thread.
+        self.resize_mailbox.request(cols, rows);
         Ok(())
     }
 
@@ -334,6 +343,9 @@ impl PlatformPty for LinuxPty {
 
     fn shutdown(self: Box<Self>) {
         self.stop.store(true, Ordering::Release);
+        // Stop accepting resizes, wake the worker and join before the master
+        // fd can be dropped.
+        self.resize_mailbox.shutdown();
         self.session.close_writer();
         // Signal the child's process group (created by setsid), then escalate
         // if it does not exit promptly so the waiter cannot hang forever.

@@ -7,14 +7,15 @@
 
 use std::cell::{Cell, RefCell};
 use std::sync::Arc;
+use std::time::Duration;
 
 use gpui::{
     div, fill, hsla, point, prelude::*, px, relative, rgba, size, App, Bounds, ClipboardItem,
     Context, DispatchPhase, Element, ElementId, FocusHandle, Focusable, GlobalElementId, Hsla,
-    InputHandler, InspectorElementId, InteractiveElement, KeyContext, KeyDownEvent, LayoutId,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, Render,
-    Rgba, ScrollDelta, ScrollEvent, ShapedLine, SharedString, StrikethroughStyle, Style, TextAlign,
-    TextRun, UTF16Selection, UnderlineStyle, Window,
+    InputHandler, InspectorElementId, InteractiveElement, KeyContext, KeyDownEvent, KeyUpEvent,
+    LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point,
+    Render, Rgba, ScrollDelta, ScrollEvent, ShapedLine, SharedString, StrikethroughStyle,
+    Subscription, Style, TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window,
 };
 use silvestris::ActiveTheme;
 
@@ -24,21 +25,26 @@ use crate::app::{
 };
 use crate::terminal::geometry::{
     adjust_font_size, background_runs, batch_row, line_height_for, selection_span, BgRun,
-    CellMetrics, RowCache, TextRun as CellRun, FONT_SIZE_STEP,
+    CellMetrics, InputGeometry, RowCache, TerminalGeometry, TextRun as CellRun, FONT_SIZE_STEP,
 };
 use crate::terminal::ghostty::{Cursor, KeyEvent};
 use crate::terminal::input::{
-    font_command, is_app_shortcut, key_for_keystroke, mouse_escape, FontCommand,
+    is_app_shortcut_with_char, key_for_keystroke, key_release_for_keystroke, mouse_escape,
     Modifiers as InputModifiers, MouseAction, MouseButton as PtyButton,
 };
 use crate::terminal::selection::{
-    accumulate_wheel, line_bounds, scrollbar_geometry, scrollbar_row_at, wheel_button,
-    ScrollbarGeometry, SelectionGesture,
+    accumulate_wheel, scrollbar_geometry, scrollbar_row_at, wheel_button, ScrollbarGeometry,
 };
-use crate::terminal::session::{CountersHandle, TerminalSession};
+use crate::terminal::session::{
+    CountersHandle, MouseInput, MouseRoute, TerminalSession,
+};
 
-/// A shaped row kept between frames. Clean rows are reused verbatim.
-#[derive(Clone)]
+/// Ghostty exposes whether a cursor blinks but not a period; 530 ms matches
+/// conventional terminal timing without a continuous frame loop.
+const CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(530);
+
+/// A shaped row kept between frames. Clean rows are shared, never cloned.
+#[derive(Default)]
 struct CachedRow {
     quads: Vec<PaintQuad>,
     lines: Vec<(Point<Pixels>, ShapedLine)>,
@@ -47,24 +53,73 @@ struct CachedRow {
 #[derive(Default)]
 struct FrameCache {
     generation: u64,
-    cell_metrics: Option<(f32, f32)>,
-    origin: (f32, f32),
-    rows: Vec<CachedRow>,
+    /// The exact geometry this frame was built for. The grid is stored
+    /// explicitly and never inferred from `rows.len()`.
+    geometry: InputGeometry,
+    cols: u16,
+    rows: u16,
+    /// Canonical owner of shaped rows. Prepaint replaces only dirty entries;
+    /// prepaint/paint share this handle through `Arc` rather than deep copies.
+    shaped_rows: Arc<Vec<Arc<CachedRow>>>,
+    preedit_text: String,
     cursor: Option<PaintQuad>,
     line_height: Pixels,
     background: Hsla,
     row_cache: RowCache,
 }
 
-/// Geometry captured in prepaint so input handlers can map window points to
-/// terminal cells without re-measuring the font on every pointer event.
-#[derive(Clone, Copy, Default)]
-struct InputGeometry {
-    origin: (f32, f32),
-    cell_width: f32,
-    line_height: f32,
-    screen_width: u16,
-    screen_height: u16,
+/// Global focus token used by the early raw-keystroke ownership check. The
+/// interceptor never calls into a leased window; it only reads this handle.
+pub struct TerminalFocusGlobal(pub FocusHandle);
+
+impl gpui::Global for TerminalFocusGlobal {}
+
+/// Local IME composition. Ghostty owns the terminal document; this is only
+/// the uncommitted reading used for the candidate window and never a PTY write.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct PreeditState {
+    text: String,
+    /// UTF-16 selection inside `text`, as reported by the platform.
+    selected: Option<(usize, usize)>,
+}
+
+/// Lightweight cursor blinking state, separate from Ghostty's semantic
+/// `cursor.blinking` mode flag. Epochs make stale timers harmless.
+#[derive(Default)]
+struct CursorBlink {
+    on: bool,
+    epoch: u64,
+    /// Mirrors Ghostty's semantic flag from the latest snapshot.
+    blinking: bool,
+}
+
+impl CursorBlink {
+    fn restart(&mut self) -> u64 {
+        self.on = true;
+        self.epoch = self.epoch.wrapping_add(1);
+        self.epoch
+    }
+
+    fn stop(&mut self) {
+        self.on = true;
+        self.epoch = self.epoch.wrapping_add(1);
+    }
+
+    fn tick(&mut self, epoch: u64) -> bool {
+        if epoch != self.epoch {
+            return false;
+        }
+        self.on = !self.on;
+        true
+    }
+}
+
+/// Explicit pointer capture. Scrollbar dragging is a UI-domain gesture and
+/// must never be represented by a fake terminal mouse-button bit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PointerCapture {
+    None,
+    Scrollbar,
 }
 
 /// Application/domain view owning one session. Silvestris owns the window
@@ -80,12 +135,29 @@ pub struct TerminalView {
     selection_anchor: RefCell<Option<(u16, u16)>>,
     /// Fractional wheel rows carried between trackpad events.
     scroll_remainder: f64,
-    /// Ghostty-derived scrollbar thumb, recomputed once in prepaint.
+    /// Ghostty-derived scrollbar thumb and the state behind it, both
+    /// recomputed once in prepaint or from a scroll operation's result.
     scrollbar: RefCell<Option<ScrollbarGeometry>>,
-    scrollbar_drag: bool,
+    scroll_state: RefCell<Option<crate::terminal::ghostty::ghostty_vt_sys::GhosttyTerminalScrollbar>>,
+    /// Explicit capture state for the scrollbar thumb.
+    capture: PointerCapture,
+    /// Kept alive so focus loss / deactivation can always cancel a drag.
+    subscriptions: Vec<Subscription>,
     /// Which pointer buttons are held, as bits from `PtyButton::bit`. Ghostty
     /// needs this to keep reporting drags that leave the terminal surface.
     held_mouse: Cell<u8>,
+    /// Keys whose press was encoded into Ghostty. Only these may produce a
+    /// matching release; app/IME/text-owned keys never do.
+    held_keys: RefCell<Vec<(String, crate::terminal::input::EncodedKey)>>,
+    /// Last cell visited by a local selection drag. Ghostty's gesture API must
+    /// not be fed a second drag event for the same cell.
+    last_drag_cell: Cell<Option<(u16, u16)>>,
+    /// Temporal cursor visibility; never changes Ghostty's terminal modes.
+    blink: RefCell<CursorBlink>,
+    /// Uncommitted native text composition, local to this view.
+    preedit: RefCell<PreeditState>,
+    /// Cursor cell from the latest snapshot, used to place IME candidates.
+    cursor_cell: Cell<(u16, u16)>,
 }
 
 impl TerminalView {
@@ -93,9 +165,10 @@ impl TerminalView {
     pub fn new(session: Arc<TerminalSession>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let counters = session.counters();
         let focus = cx.focus_handle();
+        cx.set_global(TerminalFocusGlobal(focus.clone()));
         let font_size = cx.theme().type_.size_mono;
         window.focus(&focus, cx);
-        Self {
+        let mut view = Self {
             session,
             counters,
             focus,
@@ -105,9 +178,123 @@ impl TerminalView {
             selection_anchor: RefCell::new(None),
             scroll_remainder: 0.0,
             scrollbar: RefCell::new(None),
-            scrollbar_drag: false,
+            scroll_state: RefCell::new(None),
+            capture: PointerCapture::None,
+            subscriptions: Vec::new(),
             held_mouse: Cell::new(0),
+            held_keys: RefCell::new(Vec::new()),
+            last_drag_cell: Cell::new(None),
+            blink: RefCell::new(CursorBlink::default()),
+            preedit: RefCell::new(PreeditState::default()),
+            cursor_cell: Cell::new((0, 0)),
+        };
+        // A lost OS release must never strand a scrollbar drag or a held
+        // terminal button. Both focus loss and window deactivation cancel it.
+        view.subscriptions.push(cx.on_focus_lost(window, |this, _, cx| {
+            this.cancel_pointer_capture(cx);
+        }));
+        view.subscriptions
+            .push(cx.observe_window_activation(window, |this, window, cx| {
+                if !window.is_window_active() {
+                    this.cancel_pointer_capture(cx);
+                    this.stop_blink(cx);
+                } else if this.focus.is_focused(window) {
+                    this.restart_blink(window, cx);
+                }
+            }));
+        view.subscriptions
+            .push(cx.on_focus_in(&view.focus, window, |this, window, cx| {
+                this.restart_blink(window, cx);
+            }));
+        view
+    }
+
+    /// Restart the epoch-based cursor timer. No timer runs for a
+    /// non-blinking cursor or an inactive window.
+    fn restart_blink(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let blinking = self.blink.borrow().blinking;
+        let epoch = self.blink.borrow_mut().restart();
+        cx.notify();
+        if !blinking || !window.is_window_active() {
+            return;
         }
+        cx.spawn_in(window, async move |this, cx| loop {
+            cx.background_executor().timer(CURSOR_BLINK_INTERVAL).await;
+            let keep = this
+                .update_in(cx, |this, window, cx| {
+                    if !window.is_window_active() {
+                        this.stop_blink(cx);
+                        return false;
+                    }
+                    let running = this.blink.borrow_mut().tick(epoch);
+                    if running {
+                        // Only cursor paint state changes; rows stay shared.
+                        cx.notify();
+                    }
+                    running
+                })
+                .unwrap_or(false);
+            if !keep {
+                break;
+            }
+        })
+        .detach();
+    }
+
+    fn stop_blink(&mut self, cx: &mut Context<Self>) {
+        self.blink.borrow_mut().stop();
+        cx.notify();
+    }
+
+    /// Composition callbacks only update local preedit; no PTY write here.
+    fn set_preedit(&mut self, text: &str, selected: Option<(usize, usize)>, cx: &mut Context<Self>) {
+        *self.preedit.borrow_mut() = PreeditState {
+            text: text.to_owned(),
+            selected,
+        };
+        cx.notify();
+    }
+
+    fn clear_preedit(&mut self, cx: &mut Context<Self>) {
+        let was_active = !self.preedit.borrow().text.is_empty();
+        *self.preedit.borrow_mut() = PreeditState::default();
+        if was_active {
+            cx.notify();
+        }
+    }
+
+    fn marked_range(&self) -> Option<std::ops::Range<usize>> {
+        let preedit = self.preedit.borrow();
+        if preedit.text.is_empty() {
+            None
+        } else {
+            Some(0..preedit.text.encode_utf16().count())
+        }
+    }
+
+    /// Candidate window position: the terminal cursor cell from the canonical
+    /// geometry, never the window's top-left corner.
+    fn caret_bounds(&self) -> Option<Bounds<Pixels>> {
+        let geometry = *self.geometry.borrow();
+        if geometry.cols == 0 || geometry.rows == 0 {
+            return None;
+        }
+        let (col, row) = self.cursor_cell.get();
+        let (x, y, w, h) = geometry.span_bounds(col, row, 1);
+        Some(Bounds::new(
+            point(px(x), px(y)),
+            size(px(w.max(1.0)), px(h.max(1.0))),
+        ))
+    }
+
+    fn cancel_pointer_capture(&mut self, cx: &mut Context<Self>) {
+        self.capture = PointerCapture::None;
+        self.held_mouse.set(0);
+        self.held_keys.borrow_mut().clear();
+        self.last_drag_cell.set(None);
+        *self.selection_anchor.borrow_mut() = None;
+        self.session.cancel_selection_gesture();
+        cx.notify();
     }
 
     #[must_use]
@@ -142,42 +329,24 @@ impl TerminalView {
     }
 
     fn cell_at(&self, position: Point<Pixels>) -> (u16, u16) {
-        let geometry = *self.geometry.borrow();
-        let x = ((f32::from(position.x) - geometry.origin.0) / geometry.cell_width.max(1.0))
-            .max(0.0) as u16;
-        let y = ((f32::from(position.y) - geometry.origin.1) / geometry.line_height.max(1.0))
-            .max(0.0) as u16;
-        (x, y)
+        self.geometry
+            .borrow()
+            .cell_at((f32::from(position.x), f32::from(position.y)))
     }
 
     /// Control keys are encoded by Ghostty against the terminal's current
-    /// modes. Plain printable text propagates to GPUI's native text handler,
-    /// which owns it on every platform; font shortcuts are consumed here.
-    fn on_key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+    /// modes. Plain printable text propagates to GPUI's native text handler.
+    /// App shortcuts (including font keys) are claimed by the raw interceptor
+    /// and dispatched as actions, so this listener must not apply them again.
+    fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        self.restart_blink(window, cx);
         let name = event.keystroke.key.as_str();
-        // Handle the font commands here as well as via global actions: a
-        // terminal-focused view consumes most keystrokes, so relying only on
-        // the global action made Ctrl+=/- unreliable under WSLg.
-        if let Some(command) = font_command(
-            name,
-            event.keystroke.key_char.as_deref(),
-            event.keystroke.modifiers.control,
-        ) {
-            let step = crate::terminal::geometry::FONT_SIZE_STEP;
-            match command {
-                FontCommand::Increase => self.adjust_font(step, cx),
-                FontCommand::Decrease => self.adjust_font(-step, cx),
-                FontCommand::Reset => self.set_font_size(cx.theme().type_.size_mono, cx),
-            }
-            cx.stop_propagation();
-            return;
-        }
         let m = event.keystroke.modifiers;
         let mods = InputModifiers::new(m.shift, m.control, m.alt, m.platform);
         // GPUI dispatches these bindings before this listener. Let the action
         // own the key entirely; encoding it too would send a stray sequence
         // to the PTY after a clipboard copy or paste.
-        if is_app_shortcut(name, mods) {
+        if is_app_shortcut_with_char(name, event.keystroke.key_char.as_deref(), mods) {
             return;
         }
         // The pure policy decides whether this key belongs to Ghostty's
@@ -203,8 +372,44 @@ impl TerminalView {
             }
             let _ = key_event.set_unshifted_codepoint(encoded.unshifted_codepoint);
             let _ = self.session.encode_key(&key_event);
+            self.held_keys
+                .borrow_mut()
+                .push((name.to_owned(), encoded.clone()));
         }
         cx.stop_propagation();
+    }
+
+    /// Kitty `report_events` releases. Only a key whose press was encoded is
+    /// released; the release's own modifiers are preserved.
+    fn on_key_up(&mut self, event: &KeyUpEvent, _window: &mut Window, _cx: &mut Context<Self>) {
+        let name = event.keystroke.key.as_str();
+        let index = self
+            .held_keys
+            .borrow()
+            .iter()
+            .position(|(held_name, _)| held_name == name);
+        let Some(index) = index else {
+            return;
+        };
+        let (_, press) = self.held_keys.borrow_mut().remove(index);
+        let m = event.keystroke.modifiers;
+        let release_mods = InputModifiers::new(m.shift, m.control, m.alt, m.platform);
+        let Some(encoded) = key_release_for_keystroke(
+            name,
+            event.keystroke.key_char.as_deref(),
+            release_mods,
+        ) else {
+            return;
+        };
+        let Ok(mut key_event) = KeyEvent::new() else {
+            return;
+        };
+        let _ = key_event.release(encoded.key, release_mods.ghostty_bits());
+        if let Some(text) = &press.text {
+            let _ = key_event.set_utf8(text);
+        }
+        let _ = key_event.set_unshifted_codepoint(press.unshifted_codepoint);
+        let _ = self.session.encode_key(&key_event);
     }
 
     // Action listeners live on this focused element, matching Chaus. A global
@@ -275,76 +480,60 @@ impl TerminalView {
         let up_pixels = match event.delta {
             ScrollDelta::Pixels(delta) => f64::from(delta.y),
             ScrollDelta::Lines(delta) => {
-                f64::from(delta.y) * f64::from(self.geometry.borrow().line_height)
+                f64::from(delta.y) * f64::from(self.geometry.borrow().cell_height)
             }
         };
         if up_pixels == 0.0 {
             return;
         }
-        let line_height = self.geometry.borrow().line_height;
+        let line_height = self.geometry.borrow().cell_height;
         let (rows, remainder) = accumulate_wheel(self.scroll_remainder, up_pixels, line_height);
         self.scroll_remainder = remainder;
         if rows == 0 {
             return;
         }
-        let tracking = self.session.mouse_tracking_enabled().unwrap_or(false);
-        if tracking && !event.modifiers.platform {
-            // One terminal mouse wheel report per whole row.
+        if !event.modifiers.platform {
+            // One terminal mouse wheel report per whole row. The session owns
+            // the tracking decision under the terminal lock.
             let button = wheel_button(rows < 0);
-            let (px, py, w, h, mods) = {
-                let (x, _y, w, h, px, py, mods) = self.mouse_event(event.position, event.modifiers);
-                let _ = x;
-                (px, py, w, h, mods)
-            };
+            let (x, _y, w, h, px, py, mods) =
+                self.mouse_event(event.position, event.modifiers);
+            let mut reported = false;
             for _ in 0..rows.unsigned_abs() {
-                let _ = self.session.encode_mouse(
-                    MouseAction::Press.ghostty(),
-                    Some(button),
-                    mods.ghostty_bits(),
-                    px,
-                    py,
-                    self.held_mouse.get() != 0,
-                    u32::from(w),
-                    u32::from(h),
-                    self.geometry.borrow().cell_width.max(1.0) as u32,
-                    self.geometry.borrow().line_height.max(1.0) as u32,
-                );
+                let route = self.route_pointer(MouseInput {
+                    action: MouseAction::Press.ghostty(),
+                    button: Some(button),
+                    mods: mods.ghostty_bits(),
+                    x: px,
+                    y: py,
+                    any_button_pressed: self.held_mouse.get() != 0,
+                    surface_width: w,
+                    surface_height: h,
+                    cell_width: self.geometry.borrow().cell_width.max(1.0) as u32,
+                    cell_height: self.geometry.borrow().cell_height.max(1.0) as u32,
+                });
+                reported |= matches!(route, MouseRoute::Reported { .. });
+                let _ = x;
             }
-        } else {
-            // `accumulate_wheel` already returns Ghostty's delta convention:
-            // negative rows move up into history.
-            let _ = self.session.scroll(rows);
+            if reported {
+                cx.stop_propagation();
+                return;
+            }
         }
+        // `accumulate_wheel` already returns Ghostty's delta convention:
+        // negative rows move up into history.
+        let _ = self.session.scroll(rows);
         cx.stop_propagation();
-    }
-
-    /// Apply a click gesture to the visible row. Word/line bounds are derived
-    /// from Ghostty's rendered cells, so selection stays Ghostty-owned.
-    fn select_gesture(&self, x: u16, y: u16, click_count: usize) {
-        let Ok(snapshot) = self.session.render_snapshot() else {
-            return;
-        };
-        let Some(cells) = snapshot.lines.get(usize::from(y)) else {
-            return;
-        };
-        let (start, end) = match SelectionGesture::from_click_count(click_count) {
-            SelectionGesture::Character => (usize::from(x), usize::from(x)),
-            SelectionGesture::Word => {
-                let (start, end) = crate::terminal::selection::word_bounds(cells, usize::from(x));
-                (start, end)
-            }
-            SelectionGesture::Line => line_bounds(cells),
-        };
-        let _ = self.session.select_between(start as u16, y, end as u16, y);
     }
 
     fn mouse_event(
         &self,
         position: Point<Pixels>,
         modifiers: gpui::Modifiers,
-    ) -> (u16, u16, u16, u16, f32, f32, InputModifiers) {
+    ) -> (u16, u16, u32, u32, f32, f32, InputModifiers) {
         let geometry = *self.geometry.borrow();
         let (x, y) = self.cell_at(position);
+        let (surface_width, surface_height) = geometry.content_size_px();
         let mods = InputModifiers::new(
             modifiers.shift,
             modifiers.control,
@@ -354,12 +543,63 @@ impl TerminalView {
         (
             x,
             y,
-            geometry.screen_width,
-            geometry.screen_height,
+            surface_width,
+            surface_height,
             f32::from(position.x) - geometry.origin.0,
             f32::from(position.y) - geometry.origin.1,
             mods,
         )
+    }
+
+    /// One pointer event to the session: it decides routing and queues bytes
+    /// under a single terminal lock. Failures are logged, never silently
+    /// converted into local selection.
+    fn route_pointer(&self, input: MouseInput) -> MouseRoute {
+        match self.session.route_mouse(input) {
+            Ok(route) => route,
+            Err(error) => {
+                crate::log::error("mouse", &format!("mouse routing failed: {error}"));
+                MouseRoute::NotTracking
+            }
+        }
+    }
+
+    fn pointer_input(
+        &self,
+        action: MouseAction,
+        button: Option<PtyButton>,
+        mods: InputModifiers,
+        px: f32,
+        py: f32,
+        w: u32,
+        h: u32,
+        held: bool,
+    ) -> MouseInput {
+        let g = *self.geometry.borrow();
+        MouseInput {
+            action: action.ghostty(),
+            button: button.and_then(PtyButton::ghostty),
+            mods: mods.ghostty_bits(),
+            x: px,
+            y: py,
+            any_button_pressed: held,
+            surface_width: w,
+            surface_height: h,
+            cell_width: g.cell_width.max(1.0) as u32,
+            cell_height: g.cell_height.max(1.0) as u32,
+        }
+    }
+
+    fn drag_scrollbar_to(&self, y: f32) {
+        let (bar, state) = (*self.scrollbar.borrow(), *self.scroll_state.borrow());
+        if let (Some(bar), Some(state)) = (bar, state) {
+            let row = scrollbar_row_at(&bar, y, state.total, state.len);
+            // One lock/state transition. The returned scrollbar state replaces
+            // the cached one; no second `session.scrollbar()` query is needed.
+            if let Ok(outcome) = self.session.scroll_to_row(row) {
+                *self.scroll_state.borrow_mut() = Some(outcome.scrollbar);
+            }
+        }
     }
 
     fn on_mouse_down(
@@ -369,22 +609,16 @@ impl TerminalView {
         cx: &mut Context<Self>,
     ) {
         window.focus(&self.focus, cx);
+        self.restart_blink(window, cx);
         let (x, y, w, h, px, py, mods) = self.mouse_event(event.position, event.modifiers);
         if event.button == MouseButton::Left {
             if let Some(bar) = *self.scrollbar.borrow() {
                 let local_x = f32::from(event.position.x) - bar.track_x;
                 if (0.0..=bar.track_width).contains(&local_x) {
-                    self.scrollbar_drag = true;
-                    let bar_state = self.session.scrollbar();
-                    if let Ok(bar_state) = bar_state {
-                        let row = scrollbar_row_at(
-                            &bar,
-                            f32::from(event.position.y),
-                            bar_state.total,
-                            bar_state.len,
-                        );
-                        let _ = self.session.scroll_to_row(row);
-                    }
+                    // Explicit UI pointer capture; no terminal button bit is
+                    // set, so Ghostty never sees scrollbar drag reporting.
+                    self.capture = PointerCapture::Scrollbar;
+                    self.drag_scrollbar_to(f32::from(event.position.y));
                     cx.stop_propagation();
                     return;
                 }
@@ -395,26 +629,30 @@ impl TerminalView {
         };
         self.held_mouse.set(self.held_mouse.get() | button.bit());
         let held = self.held_mouse.get() != 0;
-        let tracking = self.session.mouse_tracking_enabled().unwrap_or(false);
-        if tracking && !mouse_escape(mods) {
-            let _ = self.session.encode_mouse(
-                MouseAction::Press.ghostty(),
-                button.ghostty(),
-                mods.ghostty_bits(),
+        if !mouse_escape(mods) {
+            let route = self.route_pointer(self.pointer_input(
+                MouseAction::Press,
+                Some(button),
+                mods,
                 px,
                 py,
+                w,
+                h,
                 held,
-                u32::from(w),
-                u32::from(h),
-                self.geometry.borrow().cell_width.max(1.0) as u32,
-                self.geometry.borrow().line_height.max(1.0) as u32,
-            );
-            cx.stop_propagation();
-        } else if button == PtyButton::Left {
+            ));
+            if matches!(route, MouseRoute::Reported { .. }) {
+                cx.stop_propagation();
+                return;
+            }
+        }
+        if button == PtyButton::Left {
             // Only the left button starts a local selection. Right/middle with
             // reporting off belong to the platform (context menu), not Ghostty.
             *self.selection_anchor.borrow_mut() = Some((x, y));
-            self.select_gesture(x, y, event.click_count);
+            self.last_drag_cell.set(Some((x, y)));
+            if let Err(error) = self.session.begin_selection_gesture(x, y, event.click_count) {
+                crate::log::error("selection", &format!("gesture press failed: {error}"));
+            }
             cx.stop_propagation();
         }
     }
@@ -425,45 +663,45 @@ impl TerminalView {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) {
-        if self.scrollbar_drag {
-            if let (Some(bar), Ok(state)) = (*self.scrollbar.borrow(), self.session.scrollbar()) {
-                let row =
-                    scrollbar_row_at(&bar, f32::from(event.position.y), state.total, state.len);
-                let _ = self.session.scroll_to_row(row);
-            }
+        if self.capture == PointerCapture::Scrollbar {
+            self.drag_scrollbar_to(f32::from(event.position.y));
             return;
         }
         let (x, y, w, h, px, py, mods) = self.mouse_event(event.position, event.modifiers);
         let held = self.held_mouse.get() != 0;
-        let tracking = self.session.mouse_tracking_enabled().unwrap_or(false);
-        if tracking && !mouse_escape(mods) {
-            // Ghostty decides whether this motion is reported: mode 1000 drops
-            // all motion, 1002 requires a held button, 1003 reports hover too.
-            // A `None` button is the correct "motion, nothing held" encoding.
-            let button = event
-                .pressed_button
-                .and_then(pty_button)
-                .and_then(PtyButton::ghostty);
-            let _ = self.session.encode_mouse(
-                MouseAction::Motion.ghostty(),
-                button,
-                mods.ghostty_bits(),
+        if !mouse_escape(mods) {
+            let route = self.route_pointer(self.pointer_input(
+                MouseAction::Motion,
+                event.pressed_button.and_then(pty_button),
+                mods,
                 px,
                 py,
+                w,
+                h,
                 held,
-                u32::from(w),
-                u32::from(h),
-                self.geometry.borrow().cell_width.max(1.0) as u32,
-                self.geometry.borrow().line_height.max(1.0) as u32,
-            );
-        } else if let Some((start_x, start_y)) = *self.selection_anchor.borrow() {
-            let _ = self.session.select_between(start_x, start_y, x, y);
+            ));
+            if matches!(route, MouseRoute::Reported { .. }) {
+                return;
+            }
+        }
+        if self.selection_anchor.borrow().is_some() {
+            // Do not feed Ghostty another gesture event until the pointer
+            // actually enters a different terminal cell.
+            if self.last_drag_cell.get() != Some((x, y)) {
+                self.last_drag_cell.set(Some((x, y)));
+                let g = *self.geometry.borrow();
+                let _ =
+                    self.session
+                        .drag_selection_gesture(x, y, g.cols, g.cell_width, g.cell_height);
+            }
         }
     }
 
     fn on_mouse_up(&mut self, event: &MouseUpEvent, _window: &mut Window, _cx: &mut Context<Self>) {
-        if self.scrollbar_drag {
-            self.scrollbar_drag = false;
+        if self.capture == PointerCapture::Scrollbar {
+            // Clear capture BEFORE returning: a release over the titlebar or
+            // outside the window must not leave a permanent drag.
+            self.capture = PointerCapture::None;
             return;
         }
         let (_x, _y, w, h, px, py, mods) = self.mouse_event(event.position, event.modifiers);
@@ -472,22 +710,25 @@ impl TerminalView {
         };
         self.held_mouse.set(self.held_mouse.get() & !button.bit());
         let held = self.held_mouse.get() != 0;
-        let tracking = self.session.mouse_tracking_enabled().unwrap_or(false);
-        if tracking && !mouse_escape(mods) {
-            let _ = self.session.encode_mouse(
-                MouseAction::Release.ghostty(),
-                button.ghostty(),
-                mods.ghostty_bits(),
+        if !mouse_escape(mods) {
+            let route = self.route_pointer(self.pointer_input(
+                MouseAction::Release,
+                Some(button),
+                mods,
                 px,
                 py,
+                w,
+                h,
                 held,
-                u32::from(w),
-                u32::from(h),
-                self.geometry.borrow().cell_width.max(1.0) as u32,
-                self.geometry.borrow().line_height.max(1.0) as u32,
-            );
-        } else if button == PtyButton::Left {
+            ));
+            if matches!(route, MouseRoute::Reported { .. }) {
+                return;
+            }
+        }
+        if button == PtyButton::Left {
+            self.last_drag_cell.set(None);
             *self.selection_anchor.borrow_mut() = None;
+            self.session.end_selection_gesture();
         }
     }
 }
@@ -507,6 +748,7 @@ impl Render for TerminalView {
             .track_focus(&self.focus)
             .key_context(KeyContext::new_with_defaults(cx.platform_info().os))
             .on_key_down(cx.listener(Self::on_key_down))
+            .on_key_up(cx.listener(Self::on_key_up))
             .on_action(cx.listener(Self::increase_font))
             .on_action(cx.listener(Self::decrease_font))
             .on_action(cx.listener(Self::reset_font))
@@ -519,6 +761,9 @@ impl Render for TerminalView {
             .on_mouse_down(MouseButton::Right, cx.listener(Self::on_mouse_down))
             .on_mouse_down(MouseButton::Middle, cx.listener(Self::on_mouse_down))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
+            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
+            .on_mouse_up(MouseButton::Right, cx.listener(Self::on_mouse_up))
+            .on_mouse_up(MouseButton::Middle, cx.listener(Self::on_mouse_up))
             .child(TerminalElement { view: cx.entity() })
     }
 }
@@ -536,10 +781,13 @@ struct TerminalElement {
     view: gpui::Entity<TerminalView>,
 }
 
-/// Everything paint needs, precomputed in prepaint.
+/// Everything paint needs, precomputed in prepaint. Rows are shared handles,
+/// so a cursor blink frame can reuse every shaped row without copying them.
 struct FrameState {
-    rows: Vec<CachedRow>,
+    rows: Arc<Vec<Arc<CachedRow>>>,
     cursor: Option<PaintQuad>,
+    /// Locally composed IME text, drawn at the caret but never in the PTY.
+    preedit: Option<(Point<Pixels>, ShapedLine)>,
     line_height: Pixels,
     background: Hsla,
     scrollbar: Option<ScrollbarGeometry>,
@@ -611,37 +859,38 @@ impl Element for TerminalElement {
             f32::from(font_size),
         );
         let metrics = CellMetrics::new(cell_width, line_height);
-        // Keep input mapping in sync even on a cache-hit frame: dragging the
-        // window changes `bounds` without changing any cached rows.
-        *view.geometry.borrow_mut() = InputGeometry {
-            origin: (f32::from(bounds.origin.x), f32::from(bounds.origin.y)),
-            cell_width,
-            line_height,
-            screen_width: (f32::from(bounds.size.width).max(0.0) as u32).min(u16::MAX as u32)
-                as u16,
-            screen_height: (f32::from(bounds.size.height).max(0.0) as u32).min(u16::MAX as u32)
-                as u16,
-        };
-        let (cols, rows) =
-            metrics.grid_for(f32::from(bounds.size.width), f32::from(bounds.size.height));
+        // The canonical geometry is written BEFORE any fast-path early return,
+        // so input handlers always hit-test against the current frame's child
+        // bounds even when no rows were rebuilt.
+        let geometry = TerminalGeometry::new(
+            (f32::from(bounds.origin.x), f32::from(bounds.origin.y)),
+            (
+                f32::from(bounds.size.width).max(0.0),
+                f32::from(bounds.size.height).max(0.0),
+            ),
+            &metrics,
+            window.scale_factor(),
+        );
+        *view.geometry.borrow_mut() = geometry;
+        let (cols, rows) = geometry.grid();
 
         // The scrollbar thumb is a view over Ghostty's row counts, never a GPUI
         // ScrollHandle or a second history model.
-        let bar = session.scrollbar().ok().and_then(|state| {
+        let scroll_state = session.scrollbar().ok();
+        let bar = scroll_state.and_then(|state| {
             scrollbar_geometry(
                 state.total,
                 state.offset,
                 state.len,
-                f32::from(bounds.origin.x),
-                f32::from(bounds.origin.y),
-                f32::from(bounds.size.width),
-                f32::from(bounds.size.height),
+                geometry.origin.0,
+                geometry.origin.1,
+                geometry.content_width,
+                geometry.content_height,
             )
         });
         *view.scrollbar.borrow_mut() = bar;
+        *view.scroll_state.borrow_mut() = scroll_state;
 
-        let origin_key = (f32::from(bounds.origin.x), f32::from(bounds.origin.y));
-        let metric_key = (cell_width, line_height);
         let wake = session.take_wakeup();
         let generation = session.generation();
 
@@ -649,20 +898,23 @@ impl Element for TerminalElement {
             let cache = view.cache.borrow();
             // A pixel-only window resize leaves the cached rows valid: their
             // quads and text origins depend on the content origin and cell
-            // metrics, not on the window's width/height. Rebuilding here was
-            // the source of jank during a drag.
+            // metrics, not on the window's width/height. The cached grid is
+            // compared explicitly; `shaped_rows.len()` is never used to infer
+            // cols or rows.
             if wake.is_none()
                 && cache.generation == generation
-                && cache.origin == origin_key
-                && cache.cell_metrics == Some(metric_key)
-                && cache.rows.len() == usize::from(rows)
+                && cache.geometry == geometry
+                && cache.cols == cols
+                && cache.rows == rows
+                && cache.preedit_text == view.preedit.borrow().text
             {
                 counters.prepaint_micros(
                     u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX),
                 );
                 return FrameState {
-                    rows: cache.rows.clone(),
+                    rows: cache.shaped_rows.clone(),
                     cursor: cache.cursor.clone(),
+                    preedit: None,
                     line_height: cache.line_height,
                     background: cache.background,
                     scrollbar: bar,
@@ -670,104 +922,168 @@ impl Element for TerminalElement {
             }
         }
 
-        // A grid change must reach Ghostty before reading render state.
-        if !session
-            .resize(cols, rows, cell_width as u32, line_height as u32)
-            .expect("terminal grid resize")
-        {
-            // Pixel-only change: rows/cols are unchanged, reuse the cached
-            // rows while recomputing only the origin below.
-        }
+        // Apply layout geometry synchronously: this frame paints the new
+        // state, so the session must not enqueue a redundant renderer wake.
+        let _ = session
+            .apply_layout_geometry(cols, rows, cell_width as u32, line_height as u32)
+            .expect("terminal geometry applied");
         let snapshot = session.render_snapshot().expect("render snapshot");
-        let (previous, rebuild, row_cache): (Vec<CachedRow>, Vec<usize>, RowCache) = {
+        let rebuild: Vec<usize> = {
             let mut cache = view.cache.borrow_mut();
             let listed =
                 cache
                     .row_cache
                     .rows_to_rebuild(generation, snapshot.dirty, &snapshot.dirty_rows);
-            let invalid = cache.origin != origin_key
-                || cache.cell_metrics != Some(metric_key)
-                || cache.rows.len() != usize::from(rows);
-            let rebuild = if invalid {
+            let invalid = cache.geometry != geometry
+                || cache.cols != cols
+                || cache.rows != rows;
+            if invalid {
                 cache.row_cache = RowCache::new(usize::from(rows));
                 let _ = cache
                     .row_cache
                     .rows_to_rebuild(generation, snapshot.dirty, &[]);
+                cache.shaped_rows = Arc::new(
+                    (0..usize::from(rows))
+                        .map(|_| Arc::new(CachedRow::default()))
+                        .collect(),
+                );
                 (0..usize::from(rows)).collect()
             } else {
                 listed
-            };
-            (cache.rows.clone(), rebuild, cache.row_cache.clone())
+            }
         };
-        let rebuild_set: std::collections::HashSet<usize> = rebuild.into_iter().collect();
         let palette = &snapshot.colors.palette;
         let default_bg = rgb(snapshot.colors.background);
         let default_fg = rgb(snapshot.colors.foreground);
-        let origin = (f32::from(bounds.origin.x), f32::from(bounds.origin.y));
+        let origin = geometry.origin;
 
-        let mut built: Vec<CachedRow> = Vec::with_capacity(usize::from(rows));
-        for y in 0..usize::from(rows) {
-            if !rebuild_set.contains(&y) {
-                if let Some(row) = previous.get(y) {
-                    built.push(row.clone());
+        // Mutate the canonical cache in place. Only Ghostty's dirty row indices
+        // are reshaped; every other shared row handle survives untouched.
+        let mut dirty = vec![false; usize::from(rows)];
+        for &y in &rebuild {
+            if let Some(slot) = dirty.get_mut(y) {
+                *slot = true;
+            }
+        }
+        {
+            let mut cache = view.cache.borrow_mut();
+            if Arc::get_mut(&mut cache.shaped_rows).is_none() {
+                // One cheap Vec-of-Arcs copy when a previous frame still holds
+                // the handle; never a deep copy of shaped rows.
+                counters.row_cache_copies(1);
+            }
+            let shaped = Arc::make_mut(&mut cache.shaped_rows);
+            shaped.resize_with(usize::from(rows), || Arc::new(CachedRow::default()));
+            for y in 0..usize::from(rows) {
+                if !dirty[y] {
                     counters.row_cache_hits(1);
                     continue;
                 }
-            }
-            let cells = snapshot.lines.get(y).map(Vec::as_slice).unwrap_or(&[]);
-            let mut quads = Vec::new();
-            let mut lines = Vec::new();
+                let cells = snapshot.line(y);
+                let mut quads = Vec::new();
+                let mut lines = Vec::new();
 
-            for run_bg in background_runs(cells, default_spec(snapshot.colors.background), palette)
-            {
-                quads.push(bg_quad(&metrics, origin, y, run_bg));
-                counters.background_quads(1);
-            }
-            if let Some((start_x, cells_len)) =
-                selection_span(snapshot.selections.get(y).copied().flatten())
-            {
-                let (x, top, w, h) = metrics.span_bounds(origin, start_x, y as u16, cells_len);
-                quads.push(fill(
-                    Bounds::new(point(px(x), px(top)), size(px(w), px(h))),
-                    rgba(0x446666cc),
-                ));
-                counters.background_quads(1);
-            }
+                for run_bg in
+                    background_runs(cells, default_spec(snapshot.colors.background), palette)
+                {
+                    quads.push(bg_quad(&metrics, origin, y, run_bg));
+                    counters.background_quads(1);
+                }
+                if let Some((start_x, cells_len)) = snapshot.selection(y)
+                    .and_then(|s| selection_span(Some(s)))
+                {
+                    let (x, top, w, h) = metrics.span_bounds(origin, start_x, y as u16, cells_len);
+                    quads.push(fill(
+                        Bounds::new(point(px(x), px(top)), size(px(w), px(h))),
+                        rgba(0x446666cc),
+                    ));
+                    counters.background_quads(1);
+                }
 
-            for run in batch_row(cells) {
-                let text: SharedString = run.text.clone().into();
-                let shape = shape_run(
-                    &run, text, &mono_font, font_size, &metrics, default_fg, window, &counters,
-                );
-                let (x, top, _, _) = metrics.span_bounds(origin, run.start_col, y as u16, 1);
-                lines.push((point(px(x), px(top)), shape));
-                counters.text_batches(1);
+                for run in batch_row(cells) {
+                    let text: SharedString = run.text.clone().into();
+                    let shape = shape_run(
+                        &run, text, &mono_font, font_size, &metrics, default_fg, window, &counters,
+                    );
+                    let (x, top, _, _) = metrics.span_bounds(origin, run.start_col, y as u16, 1);
+                    lines.push((point(px(x), px(top)), shape));
+                    counters.text_batches(1);
+                }
+                shaped[y] = Arc::new(CachedRow { quads, lines });
+                counters.rows_rebuilt(1);
             }
-            built.push(CachedRow { quads, lines });
-            counters.rows_rebuilt(1);
         }
 
-        let cursor = if snapshot.cursor.visible && snapshot.cursor.has_value {
+        view.cursor_cell.set((snapshot.cursor.x, snapshot.cursor.y));
+        let cursor_blinking = snapshot.cursor.blinking;
+        let blink_changed = view.blink.borrow().blinking != cursor_blinking;
+        if blink_changed {
+            view.blink.borrow_mut().blinking = cursor_blinking;
+        }
+        let cursor_visible = !cursor_blinking || view.blink.borrow().on;
+        let cursor = if snapshot.cursor.visible && snapshot.cursor.has_value && cursor_visible
+        {
             cursor_quad(&metrics, origin, &snapshot.cursor, default_fg)
         } else {
             None
         };
 
-        *view.cache.borrow_mut() = FrameCache {
-            generation,
-            cell_metrics: Some(metric_key),
-            origin: origin_key,
-            rows: built.clone(),
-            cursor: cursor.clone(),
-            line_height: px(line_height),
-            background: default_bg,
-            row_cache,
+        // Locally composed text is drawn at the caret. It is never part of a
+        // shaped terminal row and never reaches the PTY.
+        let preedit = {
+            let state = view.preedit.borrow();
+            if state.text.is_empty() {
+                None
+            } else {
+                let text: SharedString = state.text.clone().into();
+                let run = TextRun {
+                    len: text.len(),
+                    font: mono_font.clone(),
+                    color: default_fg,
+                    ..Default::default()
+                };
+                let shaped = window.text_system().shape_line(
+                    text,
+                    font_size,
+                    &[run],
+                    Some(px(metrics.cell_width)),
+                );
+                counters.shape_line(state.text.len());
+                let (x, y) = geometry.cell_origin(view.cursor_cell.get().0, view.cursor_cell.get().1);
+                Some((point(px(x), px(y)), shaped))
+            }
         };
+        let preedit_text = view.preedit.borrow().text.clone();
+
+        let frame_rows = view.cache.borrow().shaped_rows.clone();
+        {
+            let mut cache = view.cache.borrow_mut();
+            cache.generation = generation;
+            cache.geometry = geometry;
+            cache.cols = cols;
+            cache.rows = rows;
+            cache.preedit_text = preedit_text;
+            cache.cursor = cursor.clone();
+            cache.line_height = px(line_height);
+            cache.background = default_bg;
+        }
         session.mark_frame_complete().expect("frame consumed");
         counters.prepaint_micros(u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX));
+        if blink_changed {
+            let entity = self.view.clone();
+            entity
+                .update(cx, |this, cx| {
+                    if cursor_blinking && this.focus.is_focused(window) {
+                        this.restart_blink(window, cx);
+                    } else {
+                        this.stop_blink(cx);
+                    }
+                });
+        }
         FrameState {
-            rows: built,
+            rows: frame_rows,
             cursor,
+            preedit,
             line_height: px(line_height),
             background: default_bg,
             scrollbar: bar,
@@ -786,7 +1102,7 @@ impl Element for TerminalElement {
     ) {
         let start = std::time::Instant::now();
         window.paint_quad(fill(bounds, prepaint.background));
-        for row in &prepaint.rows {
+        for row in prepaint.rows.iter() {
             for quad in &row.quads {
                 window.paint_quad(quad.clone());
             }
@@ -804,6 +1120,17 @@ impl Element for TerminalElement {
         }
         if let Some(cursor) = &prepaint.cursor {
             window.paint_quad(cursor.clone());
+        }
+        if let Some((origin, line)) = &prepaint.preedit {
+            line.paint(
+                *origin,
+                prepaint.line_height,
+                TextAlign::Left,
+                None,
+                window,
+                cx,
+            )
+            .expect("paint local IME preedit");
         }
         if let Some(bar) = &prepaint.scrollbar {
             // Track and thumb stay a thin view over Ghostty's viewport state.
@@ -824,28 +1151,25 @@ impl Element for TerminalElement {
         }
         // GPUI delivers element mouse events only while the pointer is over
         // the element. A window-level listener continues a drag that leaves
-        // the surface, but only while a button started on the terminal is held.
-        // It must never consume events over the window chrome: those belong to
-        // the Silvestris traffic lights and titlebar.
+        // the surface when EITHER an explicit scrollbar capture or a terminal
+        // mouse button is held. It never calls stop_propagation, so Silvestris
+        // titlebar and traffic-light controls still receive their own events.
         let mouse_view = self.view.clone();
         window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
             if phase != DispatchPhase::Bubble {
                 return;
             }
             let view = mouse_view.read(cx);
-            if !view.focus.is_focused(window) || view.held_mouse.get() == 0 {
+            if view.capture == PointerCapture::None && view.held_mouse.get() == 0 {
                 return;
             }
             let g = *view.geometry.borrow();
             let terminal_bounds = Bounds::new(
                 point(px(g.origin.0), px(g.origin.1)),
-                size(
-                    px(g.screen_width as f32 * g.cell_width),
-                    px(g.screen_height as f32 * g.line_height),
-                ),
+                size(px(g.content_width), px(g.content_height)),
             );
             // The element-level listener handles moves inside the surface.
-            if terminal_bounds.contains(&event.position) {
+            if view.capture != PointerCapture::Scrollbar && terminal_bounds.contains(&event.position) {
                 return;
             }
             mouse_view.update(cx, |view, cx| view.on_mouse_move(event, window, cx));
@@ -856,7 +1180,7 @@ impl Element for TerminalElement {
                 return;
             }
             let view = mouse_view.read(cx);
-            if !view.focus.is_focused(window) || view.held_mouse.get() == 0 {
+            if view.capture == PointerCapture::None && view.held_mouse.get() == 0 {
                 return;
             }
             mouse_view.update(cx, |view, cx| view.on_mouse_up(event, window, cx));
@@ -866,6 +1190,7 @@ impl Element for TerminalElement {
             &view.focus,
             TerminalInputHandler {
                 session: Arc::clone(&view.session),
+                view: self.view.clone(),
             },
             cx,
         );
@@ -874,10 +1199,12 @@ impl Element for TerminalElement {
     }
 }
 
-/// Native text/IME bridge. Committed text goes straight to the PTY writer;
-/// platform-initiated paste goes through Ghostty's bracketed-paste policy.
+/// Native text/IME bridge. Only committed text goes to the PTY; marked text is
+/// held by the view for candidate placement. Paste goes through Ghostty's
+/// bracketed-paste policy.
 struct TerminalInputHandler {
     session: Arc<TerminalSession>,
+    view: gpui::Entity<TerminalView>,
 }
 
 impl InputHandler for TerminalInputHandler {
@@ -898,9 +1225,11 @@ impl InputHandler for TerminalInputHandler {
     fn marked_text_range(
         &mut self,
         _window: &mut Window,
-        _cx: &mut App,
+        cx: &mut App,
     ) -> Option<std::ops::Range<usize>> {
-        None
+        self.view
+            .read(cx)
+            .marked_range()
     }
 
     fn text_for_range(
@@ -913,28 +1242,40 @@ impl InputHandler for TerminalInputHandler {
         None
     }
 
+    /// Commit path. Windows calls this with the completed reading (and with an
+    /// empty string when a composition is cancelled), so only non-empty final
+    /// text is forwarded to the child.
     fn replace_text_in_range(
         &mut self,
         _replacement_range: Option<std::ops::Range<usize>>,
         text: &str,
         _window: &mut Window,
-        _cx: &mut App,
+        cx: &mut App,
     ) {
-        self.session.write_input(text);
+        if crate::terminal::input::should_commit_text(false, text) {
+            self.session.write_input(text);
+        }
+        self.view.update(cx, |view, cx| view.clear_preedit(cx));
     }
 
+    /// Composition path: update local preedit only. Never write to the PTY and
+    /// never treat an intermediate reading as a paste.
     fn replace_and_mark_text_in_range(
         &mut self,
         _range_utf16: Option<std::ops::Range<usize>>,
         new_text: &str,
-        _new_selected_range: Option<std::ops::Range<usize>>,
+        new_selected_range: Option<std::ops::Range<usize>>,
         _window: &mut Window,
-        _cx: &mut App,
+        cx: &mut App,
     ) {
-        self.session.write_input(new_text);
+        self.view.update(cx, |view, cx| {
+            view.set_preedit(new_text, new_selected_range.map(|r| (r.start, r.end)), cx);
+        });
     }
 
-    fn unmark_text(&mut self, _window: &mut Window, _cx: &mut App) {}
+    fn unmark_text(&mut self, _window: &mut Window, cx: &mut App) {
+        self.view.update(cx, |view, cx| view.clear_preedit(cx));
+    }
 
     fn paste(&mut self, item: ClipboardItem, _window: &mut Window, _cx: &mut App) {
         if let Some(text) = item.text() {
@@ -946,18 +1287,20 @@ impl InputHandler for TerminalInputHandler {
         &mut self,
         _range_utf16: std::ops::Range<usize>,
         _window: &mut Window,
-        _cx: &mut App,
+        cx: &mut App,
     ) -> Option<Bounds<Pixels>> {
-        None
+        self.view.update(cx, |view, _| view.caret_bounds())
     }
 
+    /// There is no mapping from arbitrary screen points into Ghostty's
+    /// terminal document, so do not claim one.
     fn character_index_for_point(
         &mut self,
         _point: Point<Pixels>,
         _window: &mut Window,
         _cx: &mut App,
     ) -> Option<usize> {
-        Some(0)
+        None
     }
 }
 

@@ -13,8 +13,11 @@ fn report(label: &str, counters: &CountersSnapshot) {
     println!(
         "M6 {label}: writes={} bytes={} wakeups_scheduled={} wakeups_coalesced={} \
          render_updates={} dirty_full={} dirty_partial={} dirty_clean={} \
-         cursor_only_frames={} rows_rebuilt={} shape_line_calls={} \
-         lock_max_us={} prepaint_us={}",
+         cursor_only_frames={} cells_materialized={} rows_materialized={} \
+         rows_rebuilt={} row_cache_copies={} shape_line_calls={} \
+         mouse_offered={} mouse_encoded={} mouse_bytes={} \
+         ghostty_geometry_updates={} pty_grid_resize_requests={} \
+         scroll_locks={} lock_max_us={} prepaint_us={}",
         counters.vt_write_calls,
         counters.vt_write_bytes,
         counters.wakeups_scheduled,
@@ -24,8 +27,17 @@ fn report(label: &str, counters: &CountersSnapshot) {
         counters.dirty_partial,
         counters.dirty_clean,
         counters.cursor_only_frames,
+        counters.cells_materialized,
+        counters.rows_materialized,
         counters.rows_rebuilt,
+        counters.row_cache_copies,
         counters.shape_line_calls,
+        counters.mouse_events_offered,
+        counters.mouse_events_encoded,
+        counters.mouse_bytes_queued,
+        counters.ghostty_geometry_updates,
+        counters.pty_grid_resize_requests,
+        counters.scroll_lock_acquisitions,
         counters.terminal_lock_hold_max_micros,
         counters.prepaint_micros,
     );
@@ -56,7 +68,7 @@ fn output_flood_coalesces_wakeups_and_bounds_render_work() {
         handle.join().expect("producer joined");
     }
     let final_frame = session.render_snapshot().expect("final frame");
-    assert!(!final_frame.lines[0].is_empty());
+    assert!(!final_frame.line(0).is_empty());
 
     let counters = session.snapshot_counters();
     report("output-flood", &counters);
@@ -71,6 +83,8 @@ fn output_flood_coalesces_wakeups_and_bounds_render_work() {
         "terminal lock hold must stay bounded to VT work"
     );
     assert!(counters.dirty_rows_visited > 0);
+    assert!(counters.rows_materialized > 0);
+    assert!(counters.cells_materialized > 0);
 }
 
 #[test]
@@ -83,7 +97,7 @@ fn cursor_only_frame_rebuilds_no_rows() {
     // Hide/show cursor is a mode change: the visible glyph rows stay clean.
     session.write_vt(b"\x1b[?25l");
     let snapshot = session.render_snapshot().expect("cursor frame");
-    let mut cache = RowCache::new(usize::from(snapshot.rows));
+    let mut cache = RowCache::new(usize::from(snapshot.meta.rows));
     // Prime the cache with the preceding complete frame.
     let _ = cache.rows_to_rebuild(1, sys::GHOSTTY_RENDER_STATE_DIRTY_FULL, &[]);
     let rebuild = cache.rows_to_rebuild(2, snapshot.dirty, &snapshot.dirty_rows);
@@ -97,6 +111,9 @@ fn cursor_only_frame_rebuilds_no_rows() {
         "cursor blink must not reshape visible rows"
     );
     assert_eq!(counters.cursor_only_frames, 1);
+    // No rows/cells may be materialized for the cursor-only frame.
+    assert_eq!(counters.rows_materialized, 24);
+    assert_eq!(counters.cells_materialized, 24 * 80);
 }
 
 #[test]
@@ -109,13 +126,21 @@ fn resize_storm_coalesces_to_distinct_grid_sizes() {
         // legitimate grid changes, not a coalescing case.
         let step = index / 100;
         let size = (80 + step as u16 * 2, 24 + step as u16);
-        let _ = session.resize(size.0, size.1, 9, 18);
+        let _ = session.apply_layout_geometry(size.0, size.1, 9, 18);
         last = size;
     }
     let counters = session.snapshot_counters();
     report("resize-storm", &counters);
     assert_eq!(last, (98, 33));
     assert_eq!(counters.bounds_changes_observed, 1000);
-    assert_eq!(counters.ghostty_resize_calls, 9);
-    assert_eq!(counters.duplicate_resize_suppressed, 991);
+    assert_eq!(counters.ghostty_geometry_updates, 1 + 9);
+    assert_eq!(counters.pty_grid_resize_requests, 9);
+    // Every call is either a real Ghostty geometry change or a suppressed
+    // duplicate. The 10 changes are: 1 cell-pixel-only change on the first
+    // call plus 9 grid changes as the drag crosses cell boundaries.
+    assert_eq!(
+        counters.duplicate_resize_suppressed,
+        counters.bounds_changes_observed - counters.ghostty_geometry_updates
+    );
+    assert_eq!(counters.duplicate_resize_suppressed, 990);
 }
