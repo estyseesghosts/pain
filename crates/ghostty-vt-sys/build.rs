@@ -40,6 +40,11 @@ fn main() {
         "cargo:rerun-if-changed={}",
         manifest_dir.join("chkstk.S").display()
     );
+    // The release version comes from HEAD, so a moved branch or new tag must
+    // rerun this script even when no vendored source file changed.
+    println!("cargo:rerun-if-changed=.git/HEAD");
+    println!("cargo:rerun-if-changed=.git/refs");
+    println!("cargo:rerun-if-changed=.git/packed-refs");
     println!("cargo:rerun-if-env-changed=ZIG");
     println!("cargo:rerun-if-env-changed=GHOSTTY_VT_SOURCE");
 

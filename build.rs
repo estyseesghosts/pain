@@ -47,6 +47,10 @@ fn main() {
         _ => String::from("v00-00-unknown"),
     };
     println!("cargo:rustc-env=PAIN_RELEASE_VERSION={release_version}");
+    // A commit or tag changes the version without changing any source file.
+    println!("cargo:rerun-if-changed=.git/HEAD");
+    println!("cargo:rerun-if-changed=.git/refs");
+    println!("cargo:rerun-if-changed=.git/packed-refs");
 
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
