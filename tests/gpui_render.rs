@@ -22,7 +22,7 @@ use gpui::{
     Result as GpuiResult, ScaledPixels, Scene, Size, TextRenderingMode, TileId,
 };
 use image::{Rgba, RgbaImage};
-use pain::terminal::render::TerminalView;
+use pain::gpui::render::{TerminalFont, TerminalView};
 use pain::terminal::session::{NoopWakeup, TerminalSession};
 
 /// GPUI's test platform owns some thread-local/global state. Keep every case
@@ -547,12 +547,18 @@ impl Harness {
                     as Box<dyn PlatformHeadlessRenderer>))
             },
         );
-        app.update(|cx| silvestris::theme::install(silvestris::ThemePreference::default(), cx));
         let session = Arc::new(session);
         let build_session = Arc::clone(&session);
         let handle = app
             .open_window(size(px(640.0), px(360.0)), move |window, cx| {
-                cx.new(|cx| TerminalView::new(build_session, window, cx))
+                cx.new(|cx| {
+                    TerminalView::new(
+                        build_session,
+                        TerminalFont::new("monospace", 14.0),
+                        window,
+                        cx,
+                    )
+                })
             })
             .expect("open headless window");
         let window: AnyWindowHandle = *handle;

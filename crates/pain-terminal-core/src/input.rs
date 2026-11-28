@@ -46,39 +46,6 @@ impl Modifiers {
     }
 }
 
-/// Whitelisted application commands driven by Ctrl+key. Font shortcuts are
-/// app-level commands, never terminal input, so they are resolved before the
-/// key reaches Ghostty's encoder.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FontCommand {
-    Increase,
-    Decrease,
-    Reset,
-}
-
-/// Resolve a font command from a keystroke. GPUI reports the same physical key
-/// with different names on Windows and Linux (`-`, `minus`, `_`), and a
-/// shifted or IME-produced event can leave the useful spelling in `key_char`
-/// instead of `key`. Keeping this mapping pure lets every platform spelling be
-/// covered by a headless unit test.
-#[must_use]
-pub fn font_command(name: &str, key_char: Option<&str>, control: bool) -> Option<FontCommand> {
-    if !control {
-        return None;
-    }
-    match name {
-        "=" | "+" | "equal" | "plus" => Some(FontCommand::Increase),
-        "-" | "_" | "minus" | "underscore" | "subtract" => Some(FontCommand::Decrease),
-        "0" | "zero" => Some(FontCommand::Reset),
-        _ => match key_char {
-            Some("=") | Some("+") => Some(FontCommand::Increase),
-            Some("-") | Some("_") => Some(FontCommand::Decrease),
-            Some("0") => Some(FontCommand::Reset),
-            _ => None,
-        },
-    }
-}
-
 /// One key press ready to be fed to `GhosttyKeyEncoder`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KeyInput {
@@ -274,75 +241,6 @@ pub fn key_release_for_keystroke(
     Some(encoded)
 }
 
-/// An app command owned by the shell rather than the PTY.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AppCommand {
-    IncreaseFont,
-    DecreaseFont,
-    ResetFont,
-    CopySelection,
-    PasteClipboard,
-    SelectAll,
-    OpenPreferences,
-}
-
-/// Resolve a keystroke to an app command. This is shared by the GPUI keybinding
-/// interceptor (which must run before native text handling) and the terminal
-/// view's ownership check, so the two can never disagree about a key.
-///
-/// On Windows, GPUI marks Ctrl+letter/punctuation keystrokes as
-/// `prefer_character_input` because ToUnicode changes the character. When a
-/// focused `InputHandler` accepts that, GPUI skips key bindings entirely.
-/// Resolving commands from the raw keystroke in an interceptor keeps app
-/// shortcuts working without taking text input away from AltGr/dead keys.
-#[must_use]
-pub fn app_command(name: &str, key_char: Option<&str>, mods: Modifiers) -> Option<AppCommand> {
-    if name.eq_ignore_ascii_case("insert")
-        && mods.shift
-        && !mods.control
-        && !mods.alt
-        && !mods.super_key
-    {
-        return Some(AppCommand::PasteClipboard); // Shift+Insert
-    }
-    if !mods.control || mods.alt || mods.super_key {
-        return None; // AltGr is composed text, not a Ctrl shortcut.
-    }
-    if mods.shift {
-        return match name.to_ascii_lowercase().as_str() {
-            "c" => Some(AppCommand::CopySelection),
-            "v" => Some(AppCommand::PasteClipboard),
-            "a" => Some(AppCommand::SelectAll),
-            _ => None,
-        };
-    }
-    if name == "," || name.eq_ignore_ascii_case("comma") {
-        return Some(AppCommand::OpenPreferences);
-    }
-    match font_command(name, key_char, true)? {
-        FontCommand::Increase => Some(AppCommand::IncreaseFont),
-        FontCommand::Decrease => Some(AppCommand::DecreaseFont),
-        FontCommand::Reset => Some(AppCommand::ResetFont),
-    }
-}
-
-/// Keys bound to application commands rather than the PTY. GPUI dispatches
-/// these bindings before the terminal's `on_key_down` listener; the view must
-/// not also encode them, or a Ctrl+Shift+C in a TUI becomes a stray escape
-/// sequence after the clipboard copy. Zed's pinned keymaps use the same
-/// bindings for the terminal: Ctrl+Shift+C/V and Shift+Insert.
-#[must_use]
-pub fn is_app_shortcut(name: &str, mods: Modifiers) -> bool {
-    is_app_shortcut_with_char(name, None, mods)
-}
-
-/// Same allowlist as `is_app_shortcut`, but uses the produced character too so
-/// Windows' `prefer_character_input` keystrokes are owned identically.
-#[must_use]
-pub fn is_app_shortcut_with_char(name: &str, key_char: Option<&str>, mods: Modifiers) -> bool {
-    app_command(name, key_char, mods).is_some()
-}
-
 /// True when the user is asking for local selection instead of terminal mouse
 /// reporting. Shift is the conventional override (xterm/kitty); Super is kept
 /// as a second explicit escape because it is already the platform menu key.
@@ -461,44 +359,6 @@ impl MouseButton {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn font_commands_cover_every_platform_spelling() {
-        // Main-row keys on Windows and Linux.
-        assert_eq!(font_command("=", None, true), Some(FontCommand::Increase));
-        assert_eq!(font_command("-", None, true), Some(FontCommand::Decrease));
-        assert_eq!(font_command("0", None, true), Some(FontCommand::Reset));
-        // Named and shifted spellings.
-        assert_eq!(
-            font_command("equal", None, true),
-            Some(FontCommand::Increase)
-        );
-        assert_eq!(
-            font_command("minus", None, true),
-            Some(FontCommand::Decrease)
-        );
-        assert_eq!(font_command("_", None, true), Some(FontCommand::Decrease));
-        assert_eq!(
-            font_command("underscore", None, true),
-            Some(FontCommand::Decrease)
-        );
-        assert_eq!(
-            font_command("subtract", None, true),
-            Some(FontCommand::Decrease)
-        );
-        // The committed character is the only signal on some IME paths.
-        assert_eq!(
-            font_command("unknown", Some("-"), true),
-            Some(FontCommand::Decrease)
-        );
-        assert_eq!(
-            font_command("unknown", Some("+"), true),
-            Some(FontCommand::Increase)
-        );
-        // Without Ctrl, these characters belong to the shell.
-        assert_eq!(font_command("-", None, false), None);
-        assert_eq!(font_command("a", Some("a"), true), None);
-    }
 
     #[test]
     fn modifiers_pack_ghostty_bits() {
@@ -627,79 +487,6 @@ mod tests {
     }
 
     #[test]
-    fn app_shortcuts_are_not_key_sequences_for_the_pty() {
-        assert!(is_app_shortcut(
-            "c",
-            Modifiers::new(true, true, false, false)
-        ));
-        assert!(is_app_shortcut(
-            "v",
-            Modifiers::new(true, true, false, false)
-        ));
-        assert!(is_app_shortcut(
-            "a",
-            Modifiers::new(true, true, false, false)
-        ));
-        assert!(is_app_shortcut(
-            "insert",
-            Modifiers::new(true, false, false, false)
-        ));
-        assert!(is_app_shortcut(
-            ",",
-            Modifiers::new(false, true, false, false)
-        ));
-        // Plain Ctrl+C and unmodified keys still belong to the PTY.
-        assert!(!is_app_shortcut(
-            "c",
-            Modifiers::new(false, true, false, false)
-        ));
-        assert!(!is_app_shortcut("c", Modifiers::default()));
-        assert!(!is_app_shortcut("insert", Modifiers::default()));
-    }
-
-    #[test]
-    fn app_commands_resolve_for_every_binding_spelling() {
-        let ctrl = Modifiers::new(false, true, false, false);
-        let ctrl_shift = Modifiers::new(true, true, false, false);
-        assert_eq!(
-            app_command("c", Some("C"), ctrl_shift),
-            Some(AppCommand::CopySelection)
-        );
-        assert_eq!(
-            app_command("v", None, ctrl_shift),
-            Some(AppCommand::PasteClipboard)
-        );
-        assert_eq!(
-            app_command("a", None, ctrl_shift),
-            Some(AppCommand::SelectAll)
-        );
-        assert_eq!(
-            app_command("insert", None, Modifiers::new(true, false, false, false)),
-            Some(AppCommand::PasteClipboard)
-        );
-        assert_eq!(
-            app_command(",", None, ctrl),
-            Some(AppCommand::OpenPreferences)
-        );
-        assert_eq!(
-            app_command("comma", None, ctrl),
-            Some(AppCommand::OpenPreferences)
-        );
-        assert_eq!(app_command("=", None, ctrl), Some(AppCommand::IncreaseFont));
-        assert_eq!(
-            app_command("minus", None, ctrl),
-            Some(AppCommand::DecreaseFont)
-        );
-        assert_eq!(app_command("0", None, ctrl), Some(AppCommand::ResetFont));
-        // AltGr still belongs to the text handler, and plain Ctrl+C is a byte.
-        assert_eq!(
-            app_command("c", None, Modifiers::new(false, true, true, false)),
-            None
-        );
-        assert_eq!(app_command("c", None, ctrl), None);
-    }
-
-    #[test]
     fn ime_marked_readings_are_never_committed() {
         assert!(!should_commit_text(true, "かん"));
         assert!(!should_commit_text(true, ""));
@@ -729,22 +516,6 @@ mod tests {
             Modifiers::new(false, true, true, false)
         )
         .is_none());
-    }
-
-    #[test]
-    fn shortcut_allowlist_has_one_source_of_truth() {
-        let ctrl_shift = Modifiers::new(true, true, false, false);
-        assert!(is_app_shortcut("c", ctrl_shift));
-        assert!(is_app_shortcut_with_char("c", Some("C"), ctrl_shift));
-        assert!(!is_app_shortcut_with_char(
-            "c",
-            None,
-            Modifiers::new(false, true, true, false)
-        )); // AltGr
-        assert!(!is_app_shortcut(
-            "c",
-            Modifiers::new(false, true, false, false)
-        ));
     }
 
     #[test]

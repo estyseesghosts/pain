@@ -7,9 +7,24 @@
 
 use std::cell::{Cell, RefCell};
 use std::fmt;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::gpui::images::{ImageCache, ImageDraw};
+use crate::terminal::geometry::{
+    adjust_font_size, background_runs, batch_row, line_height_for, selection_span, BgRun,
+    CellMetrics, InputGeometry, RowCache, TerminalGeometry, TextRun as CellRun, FONT_SIZE_STEP,
+};
+use crate::terminal::ghostty::{Cursor, KeyEvent};
+use crate::terminal::input::{
+    key_for_keystroke, key_release_for_keystroke, mouse_escape, Modifiers as InputModifiers,
+    MouseAction, MouseButton as PtyButton,
+};
+use crate::terminal::selection::{
+    accumulate_wheel, scrollbar_geometry, scrollbar_row_at, wheel_button, ScrollbarGeometry,
+};
+use crate::terminal::session::{CountersHandle, MouseInput, MouseRoute, TerminalSession};
 use gpui::{
     div, fill, hsla, point, prelude::*, px, relative, rgba, size, App, Bounds, ClipboardItem,
     Context, Corners, DispatchPhase, Element, ElementId, FocusHandle, Focusable, GlobalElementId,
@@ -19,30 +34,52 @@ use gpui::{
     StrikethroughStyle, Style, Subscription, TextAlign, TextRun, UTF16Selection, UnderlineStyle,
     Window,
 };
-use silvestris::ActiveTheme;
 
-use crate::app::{
-    CopySelection, DecreaseFont, IncreaseFont, OpenPreferences, PasteClipboard, ResetFont,
-    SelectAllTerminal,
-};
-use crate::gpui::images::{ImageCache, ImageDraw};
-use crate::terminal::geometry::{
-    adjust_font_size, background_runs, batch_row, line_height_for, selection_span, BgRun,
-    CellMetrics, InputGeometry, RowCache, TerminalGeometry, TextRun as CellRun, FONT_SIZE_STEP,
-};
-use crate::terminal::ghostty::{Cursor, KeyEvent};
-use crate::terminal::input::{
-    is_app_shortcut_with_char, key_for_keystroke, key_release_for_keystroke, mouse_escape,
-    Modifiers as InputModifiers, MouseAction, MouseButton as PtyButton,
-};
-use crate::terminal::selection::{
-    accumulate_wheel, scrollbar_geometry, scrollbar_row_at, wheel_button, ScrollbarGeometry,
-};
-use crate::terminal::session::{CountersHandle, MouseInput, MouseRoute, TerminalSession};
+// Intrinsic terminal actions. They are defined with the view, never bound to
+// keys here: the host owns shortcut policy and binds whatever it wants.
+gpui::actions!(
+    terminal,
+    [
+        IncreaseFont,
+        DecreaseFont,
+        ResetFont,
+        CopySelection,
+        PasteClipboard,
+        SelectAllTerminal
+    ]
+);
+
+/// Explicit font configuration supplied by the host. The renderer does not
+/// import a theme or read any theme global, so multiple views may use
+/// different families and sizes in the same application.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TerminalFont {
+    pub family: SharedString,
+    pub size: f32,
+}
+
+impl TerminalFont {
+    #[must_use]
+    pub fn new(family: impl Into<SharedString>, size: f32) -> Self {
+        Self {
+            family: family.into(),
+            size,
+        }
+    }
+}
+
+/// Host-owned predicate for keys it claims before terminal input. Windows
+/// needs an early raw-keystroke interceptor for `prefer_character_input`; the
+/// view asks the same host policy so the two never disagree.
+pub type ShortcutFilter = Arc<dyn Fn(&str, Option<&str>, InputModifiers) -> bool + Send + Sync>;
 
 /// Ghostty exposes whether a cursor blinks but not a period; 530 ms matches
 /// conventional terminal timing without a continuous frame loop.
 const CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(530);
+
+/// Unique GPUI element identity per view. A fixed id would make two terminal
+/// panes collide in the element tree and break focus hit-testing.
+static NEXT_VIEW_ID: AtomicUsize = AtomicUsize::new(0);
 
 /// A shaped row kept between frames. Clean rows are shared, never cloned.
 #[derive(Default)]
@@ -80,12 +117,6 @@ pub type TerminalErrorSink = Arc<dyn Fn(String) + Send + Sync>;
 /// Host-owned grid-change notification. The renderer reports the new grid and
 /// device-pixel cell size; it never names or imports a PTY.
 pub type GridChangeSink = Arc<dyn Fn(u16, u16, u32, u32) + Send + Sync>;
-
-/// Global focus token used by the early raw-keystroke ownership check. The
-/// interceptor never calls into a leased window; it only reads this handle.
-pub struct TerminalFocusGlobal(pub FocusHandle);
-
-impl gpui::Global for TerminalFocusGlobal {}
 
 /// Local IME composition. Ghostty owns the terminal document; this is only
 /// the uncommitted reading used for the candidate window and never a PTY write.
@@ -165,11 +196,19 @@ enum PointerCapture {
 /// Application/domain view owning one session. Silvestris owns the window
 /// chrome; this view is the terminal surface inside `WindowFrame::child`.
 pub struct TerminalView {
+    view_id: usize,
     session: Arc<TerminalSession>,
     counters: Arc<CountersHandle>,
     focus: FocusHandle,
+    /// Host-supplied monospace family. Never read from a theme global.
+    font_family: SharedString,
+    /// Initial size from the host; `reset_font` returns to this value.
+    default_font_size: f32,
     /// Font size in logical pixels; overwritten by Ctrl+= / Ctrl+- actions.
     font_size: f32,
+    /// Host-owned shortcut policy. The view asks this so its ownership check
+    /// agrees with the host's early keystroke interceptor.
+    shortcut_filter: RefCell<ShortcutFilter>,
     cache: RefCell<FrameCache>,
     geometry: RefCell<InputGeometry>,
     selection_anchor: RefCell<Option<(u16, u16)>>,
@@ -210,18 +249,27 @@ pub struct TerminalView {
 }
 
 impl TerminalView {
+    /// Construct a terminal surface. Font configuration is explicit and focus
+    /// is left to the host: creating one view never steals focus from another.
     #[must_use]
-    pub fn new(session: Arc<TerminalSession>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        session: Arc<TerminalSession>,
+        font: TerminalFont,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let counters = session.counters();
         let focus = cx.focus_handle();
-        cx.set_global(TerminalFocusGlobal(focus.clone()));
-        let font_size = cx.theme().type_.size_mono;
-        window.focus(&focus, cx);
+        let default_font_size = font.size;
         let mut view = Self {
+            view_id: NEXT_VIEW_ID.fetch_add(1, Ordering::Relaxed),
             session,
             counters,
             focus,
-            font_size,
+            font_family: font.family,
+            default_font_size,
+            font_size: default_font_size,
+            shortcut_filter: RefCell::new(Arc::new(|_, _, _| false)),
             cache: RefCell::new(FrameCache::default()),
             geometry: RefCell::new(InputGeometry::default()),
             selection_anchor: RefCell::new(None),
@@ -238,9 +286,9 @@ impl TerminalView {
             kitty: RefCell::new(KittyAnimation::default()),
             preedit: RefCell::new(PreeditState::default()),
             cursor_cell: Cell::new((0, 0)),
-            error_sink: RefCell::new(Arc::new(|message| {
-                crate::log::error("terminal", &message);
-            })),
+            // The host installs reporting. With no sink, failures stay
+            // pane-local and silent rather than dragging in a logger.
+            error_sink: RefCell::new(Arc::new(|_| {})),
             error_reported: Cell::new(false),
             grid_change: RefCell::new(None),
         };
@@ -494,6 +542,22 @@ impl TerminalView {
         self.font_size
     }
 
+    /// Apply a host theme change. Pain owns Silvestris; the view only receives
+    /// the resolved monospace family and size, so other hosts can supply their
+    /// own without forcing a Silvestris dependency here.
+    pub fn set_font(&mut self, font: TerminalFont, cx: &mut Context<Self>) {
+        self.font_family = font.family;
+        self.default_font_size = font.size;
+        self.font_size = font.size;
+        cx.notify();
+    }
+
+    /// Install the host's shortcut ownership predicate. The early interceptor
+    /// and this view then agree on which keys never reach the PTY.
+    pub fn set_shortcut_filter(&mut self, filter: ShortcutFilter) {
+        *self.shortcut_filter.borrow_mut() = filter;
+    }
+
     fn cell_at(&self, position: Point<Pixels>) -> (u16, u16) {
         self.geometry
             .borrow()
@@ -512,7 +576,7 @@ impl TerminalView {
         // GPUI dispatches these bindings before this listener. Let the action
         // own the key entirely; encoding it too would send a stray sequence
         // to the PTY after a clipboard copy or paste.
-        if is_app_shortcut_with_char(name, event.keystroke.key_char.as_deref(), mods) {
+        if (self.shortcut_filter.borrow())(name, event.keystroke.key_char.as_deref(), mods) {
             return;
         }
         // The pure policy decides whether this key belongs to Ghostty's
@@ -538,7 +602,7 @@ impl TerminalView {
             }
             let _ = key_event.set_unshifted_codepoint(encoded.unshifted_codepoint);
             if let Err(error) = self.session.encode_key(&key_event) {
-                crate::log::error("key", &format!("input rejected: {error}"));
+                self.report_error_once(format!("key input rejected: {error}"));
             }
             self.held_keys
                 .borrow_mut()
@@ -576,7 +640,7 @@ impl TerminalView {
         }
         let _ = key_event.set_unshifted_codepoint(press.unshifted_codepoint);
         if let Err(error) = self.session.encode_key(&key_event) {
-            crate::log::error("key", &format!("input rejected: {error}"));
+            self.report_error_once(format!("key release rejected: {error}"));
         }
     }
 
@@ -595,7 +659,7 @@ impl TerminalView {
     }
 
     fn reset_font(&mut self, _: &ResetFont, _window: &mut Window, cx: &mut Context<Self>) {
-        self.set_font_size(cx.theme().type_.size_mono, cx);
+        self.set_font_size(self.default_font_size, cx);
         cx.stop_propagation();
     }
 
@@ -605,7 +669,7 @@ impl TerminalView {
                 cx.write_to_clipboard(ClipboardItem::new_string(text));
             }
             Ok(_) => {}
-            Err(error) => crate::log::error("copy", &format!("copy failed: {error}")),
+            Err(error) => self.report_error_once(format!("copy failed: {error}")),
         }
         cx.stop_propagation();
     }
@@ -618,7 +682,7 @@ impl TerminalView {
     ) {
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
             if let Err(error) = self.session.paste(&text) {
-                crate::log::error("paste", &format!("paste failed: {error}"));
+                self.report_error_once(format!("paste failed: {error}"));
             }
         }
         cx.stop_propagation();
@@ -626,18 +690,8 @@ impl TerminalView {
 
     fn select_all(&mut self, _: &SelectAllTerminal, _window: &mut Window, cx: &mut Context<Self>) {
         if let Err(error) = self.session.select_all() {
-            crate::log::error("selection", &format!("select all failed: {error}"));
+            self.report_error_once(format!("select all failed: {error}"));
         }
-        cx.stop_propagation();
-    }
-
-    fn open_preferences(
-        &mut self,
-        _: &OpenPreferences,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        crate::preferences::open_preferences(cx);
         cx.stop_propagation();
     }
 
@@ -725,7 +779,7 @@ impl TerminalView {
         match self.session.route_mouse(input) {
             Ok(route) => route,
             Err(error) => {
-                crate::log::error("mouse", &format!("mouse routing failed: {error}"));
+                self.report_error_once(format!("mouse routing failed: {error}"));
                 MouseRoute::NotTracking
             }
         }
@@ -822,7 +876,7 @@ impl TerminalView {
                 .session
                 .begin_selection_gesture(x, y, event.click_count)
             {
-                crate::log::error("selection", &format!("gesture press failed: {error}"));
+                self.report_error_once(format!("gesture press failed: {error}"));
             }
             cx.stop_propagation();
         }
@@ -913,7 +967,7 @@ impl Focusable for TerminalView {
 impl Render for TerminalView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
-            .id("terminal-view")
+            .id(("terminal-view", self.view_id))
             .size_full()
             .relative()
             .track_focus(&self.focus)
@@ -926,7 +980,6 @@ impl Render for TerminalView {
             .on_action(cx.listener(Self::copy_selection))
             .on_action(cx.listener(Self::paste_clipboard))
             .on_action(cx.listener(Self::select_all))
-            .on_action(cx.listener(Self::open_preferences))
             .on_scroll(cx.listener(Self::on_scroll))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_down(MouseButton::Right, cx.listener(Self::on_mouse_down))
@@ -1023,10 +1076,9 @@ impl Element for TerminalElement {
         let counters = Arc::clone(&view.counters);
         let start = std::time::Instant::now();
 
-        let theme = cx.theme().clone();
-        let font_family: SharedString = theme.type_.mono.into();
-        // The theme supplies the family and initial size; Ctrl+=/- changes
-        // only the size override held by the view.
+        let font_family = view.font_family.clone();
+        // The host supplies the family and initial size; Ctrl+=/- changes only
+        // the size override held by this view.
         let font_size = px(view.font_size);
         let mono_font = gpui::font(font_family);
         let mut probe_font = mono_font.clone();
@@ -1544,7 +1596,9 @@ impl InputHandler for TerminalInputHandler {
     ) {
         if crate::terminal::input::should_commit_text(false, text) {
             if let Err(error) = self.session.write_input(text) {
-                crate::log::error("input", &format!("committed text rejected: {error}"));
+                self.view.update(cx, |view, _| {
+                    view.report_error_once(format!("committed text rejected: {error}"));
+                });
             }
         }
         self.view.update(cx, |view, cx| view.clear_preedit(cx));
@@ -1569,10 +1623,12 @@ impl InputHandler for TerminalInputHandler {
         self.view.update(cx, |view, cx| view.clear_preedit(cx));
     }
 
-    fn paste(&mut self, item: ClipboardItem, _window: &mut Window, _cx: &mut App) {
+    fn paste(&mut self, item: ClipboardItem, _window: &mut Window, cx: &mut App) {
         if let Some(text) = item.text() {
             if let Err(error) = self.session.paste(&text) {
-                crate::log::error("paste", &format!("paste failed: {error}"));
+                self.view.update(cx, |view, _| {
+                    view.report_error_once(format!("paste failed: {error}"));
+                });
             }
         }
     }

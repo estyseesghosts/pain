@@ -8,10 +8,13 @@ use std::time::Duration;
 
 use gpui::{App, AppContext, Bounds, Entity, IntoElement, Render, SharedString, Window};
 use silvestris::chrome::{open_window, window_options, WindowFrame};
-use silvestris::ThemePreference;
+use silvestris::{ActiveTheme, ThemePreference};
 
 use crate::config::{parse_args, usage, version_line, Config};
-use crate::gpui::render::TerminalView;
+use crate::gpui::render::{
+    CopySelection, DecreaseFont, IncreaseFont, PasteClipboard, ResetFont, SelectAllTerminal,
+    TerminalFont, TerminalView,
+};
 use crate::log;
 use crate::platform::profiles::{self, ShellProfile};
 use crate::platform::{
@@ -19,22 +22,13 @@ use crate::platform::{
     ShellCommand,
 };
 use crate::preferences::{self, SessionGlobal, ShellProfilesGlobal};
+use crate::shortcuts::{self, AppCommand};
 use crate::terminal::fixtures::Fixture;
 use crate::terminal::session::{SessionConfig, TerminalSession};
 
-// Deliberately whitelisted app commands. Every other key reaches the terminal.
-gpui::actions!(
-    pain,
-    [
-        IncreaseFont,
-        DecreaseFont,
-        ResetFont,
-        CopySelection,
-        PasteClipboard,
-        SelectAllTerminal,
-        OpenPreferences
-    ]
-);
+// Pain-owned action: opening preferences is host policy, not terminal input.
+// Intrinsic terminal actions are defined with the view and bound here.
+gpui::actions!(pain, [OpenPreferences]);
 
 /// Latest-value title mailbox. OSC 0/2 can produce A, B, C before the UI
 /// consumes any of them; a capacity-one channel that drops on send can lose C,
@@ -215,7 +209,20 @@ pub fn run() {
         );
         let holder_for_view = Arc::clone(&pty_holder);
         let view = match open_window(options, cx, |window: &mut Window, cx| {
-            let terminal = cx.new(|cx| TerminalView::new(Arc::clone(&session), window, cx));
+            let theme = cx.theme().clone();
+            let font = TerminalFont::new(theme.type_.mono, theme.type_.size_mono);
+            let terminal = cx.new(|cx| TerminalView::new(Arc::clone(&session), font, window, cx));
+            // Pain owns focus: constructing the sole terminal must not steal it
+            // by itself, so focus is applied explicitly by the host here.
+            window.focus(&terminal.read(cx).focus(), cx);
+            terminal.update(cx, |view, _cx| {
+                view.set_error_sink(Arc::new(|message| {
+                    log::error("terminal", &message);
+                }));
+                view.set_shortcut_filter(Arc::new(|name, key_char, mods| {
+                    shortcuts::is_app_shortcut_with_char(name, key_char, mods)
+                }));
+            });
             cx.new(|_| AppView {
                 terminal,
                 pty: holder_for_view,
@@ -331,21 +338,25 @@ pub fn run() {
         // Early raw-keystroke ownership check. Windows marks many Ctrl keys as
         // `prefer_character_input`, which normally skips bindings and sends the
         // keystroke to the native text input path. The interceptor runs before
-        // that decision, uses the SAME pure `app_command` allowlist as the
-        // view's ownership check, and claims the key without calling back into
-        // a window that GPUI has already leased for key dispatch. The actual
-        // command is dispatched on the focused view after this dispatch ends.
+        // that decision, uses the SAME pure shortcut allowlist as the view's
+        // ownership check, and claims the key without calling back into a
+        // window that GPUI has already leased for key dispatch. The focus
+        // handle comes from this host's own terminal, never a global, so more
+        // than one view can coexist without fighting over ownership.
+        let interceptor_focus = view
+            .read(cx)
+            .expect("app view available for shortcut interceptor")
+            .terminal
+            .read(cx)
+            .focus();
         cx.intercept_keystrokes(move |event: &gpui::KeystrokeEvent, window, cx| {
-            let Some(focus) = cx.try_global::<crate::gpui::render::TerminalFocusGlobal>() else {
-                return;
-            };
-            if !focus.0.is_focused(window) {
+            if !interceptor_focus.is_focused(window) {
                 return;
             }
             let m = event.keystroke.modifiers;
             let mods =
-                crate::terminal::input::Modifiers::new(m.shift, m.control, m.alt, m.platform);
-            let Some(command) = crate::terminal::input::app_command(
+                pain_terminal_core::input::Modifiers::new(m.shift, m.control, m.alt, m.platform);
+            let Some(command) = shortcuts::app_command(
                 &event.keystroke.key,
                 event.keystroke.key_char.as_deref(),
                 mods,
@@ -356,15 +367,13 @@ pub fn run() {
             let handle = window.window_handle();
             cx.defer(move |cx| {
                 let action: Box<dyn gpui::Action> = match command {
-                    crate::terminal::input::AppCommand::IncreaseFont => Box::new(IncreaseFont),
-                    crate::terminal::input::AppCommand::DecreaseFont => Box::new(DecreaseFont),
-                    crate::terminal::input::AppCommand::ResetFont => Box::new(ResetFont),
-                    crate::terminal::input::AppCommand::CopySelection => Box::new(CopySelection),
-                    crate::terminal::input::AppCommand::PasteClipboard => Box::new(PasteClipboard),
-                    crate::terminal::input::AppCommand::SelectAll => Box::new(SelectAllTerminal),
-                    crate::terminal::input::AppCommand::OpenPreferences => {
-                        Box::new(OpenPreferences)
-                    }
+                    AppCommand::IncreaseFont => Box::new(IncreaseFont),
+                    AppCommand::DecreaseFont => Box::new(DecreaseFont),
+                    AppCommand::ResetFont => Box::new(ResetFont),
+                    AppCommand::CopySelection => Box::new(CopySelection),
+                    AppCommand::PasteClipboard => Box::new(PasteClipboard),
+                    AppCommand::SelectAll => Box::new(SelectAllTerminal),
+                    AppCommand::OpenPreferences => Box::new(OpenPreferences),
                 };
                 let _ = handle.update(cx, |_, window, cx| window.dispatch_action(action, cx));
             });

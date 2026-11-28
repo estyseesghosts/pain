@@ -14,5 +14,7 @@ pub mod log;
 pub mod platform;
 #[cfg(feature = "shell")]
 pub mod preferences;
+#[cfg(feature = "shell")]
+pub mod shortcuts;
 pub use pain_terminal_core as terminal;
 pub mod version;
