@@ -111,9 +111,62 @@ struct FrameCache {
 }
 
 /// Per-view error report. The renderer never logs by itself; the host decides
-/// presentation. One message per view is enough to keep a broken terminal from
-/// flooding logs on every frame.
+/// presentation.
 pub type TerminalErrorSink = Arc<dyn Fn(String) + Send + Sync>;
+
+/// The distinct operations a view can report. Frame-path failures are
+/// deduplicated per operation while they persist; discrete user actions are
+/// never suppressed by an unrelated earlier failure.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TerminalViewOperation {
+    Render,
+    Geometry,
+    Input,
+    Clipboard,
+    Pointer,
+    Selection,
+}
+
+/// One typed view diagnostic. Keeping the operation alongside the message
+/// gives the host a stable key and keeps the renderer from emitting a naked
+/// string it later has to parse.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TerminalViewError {
+    pub operation: TerminalViewOperation,
+    pub message: String,
+}
+
+impl fmt::Display for TerminalViewError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:?}: {}", self.operation, self.message)
+    }
+}
+
+/// Dedup state for frame-path failures only. It is deliberately independent
+/// of discrete action reporting so one renderer failure cannot hide a later
+/// input or clipboard failure for the lifetime of the pane.
+#[derive(Default)]
+struct FrameErrorGate {
+    current: Cell<Option<TerminalViewOperation>>,
+}
+
+impl FrameErrorGate {
+    /// Whether this operation should be reported now. Repeats of the current
+    /// frame failure are suppressed; a different operation gets through.
+    fn report(&self, operation: TerminalViewOperation) -> bool {
+        if self.current.get() == Some(operation) {
+            false
+        } else {
+            self.current.set(Some(operation));
+            true
+        }
+    }
+
+    /// A completely successful frame clears suppression permanently.
+    fn reset(&self) {
+        self.current.set(None);
+    }
+}
 
 /// Host-owned grid-change notification. The renderer reports the new grid and
 /// device-pixel cell size; it never names or imports a PTY.
@@ -244,7 +297,9 @@ pub struct TerminalView {
     cursor_cell: Cell<(u16, u16)>,
     /// Host-owned report path for pane-local recoverable failures.
     error_sink: RefCell<TerminalErrorSink>,
-    error_reported: Cell<bool>,
+    /// Only the current frame-path failure is suppressed. It resets after a
+    /// completely successful frame; discrete actions never consult it.
+    frame_error: FrameErrorGate,
     /// Host-owned PTY bridge, installed by the application that owns both.
     grid_change: RefCell<Option<GridChangeSink>>,
 }
@@ -290,7 +345,7 @@ impl TerminalView {
             // The host installs reporting. With no sink, failures stay
             // pane-local and silent rather than dragging in a logger.
             error_sink: RefCell::new(Arc::new(|_| {})),
-            error_reported: Cell::new(false),
+            frame_error: FrameErrorGate::default(),
             grid_change: RefCell::new(None),
         };
         // A lost OS release must never strand a scrollbar drag or a held
@@ -325,16 +380,32 @@ impl TerminalView {
     /// status area or diagnostics without the renderer knowing either.
     pub fn set_error_sink(&mut self, sink: TerminalErrorSink) {
         *self.error_sink.borrow_mut() = sink;
-        self.error_reported.set(false);
+        self.frame_error.reset();
     }
 
-    /// Report one recoverable failure for this view. A second failure is
-    /// silently ignored for the lifetime of the view to avoid per-frame chatter;
-    /// state remains pane-local so other views are unaffected.
-    fn report_error_once(&self, message: impl fmt::Display) {
-        if !self.error_reported.replace(true) {
-            (self.error_sink.borrow())(format!("{message}"));
+    /// Report a frame-path failure. Repeating the *same* operation while the
+    /// frame path stays broken would fire every 16 ms, so it is deduplicated.
+    /// A different operation still gets through, and a successful frame clears
+    /// the suppression so a later recurrence is visible.
+    fn report_frame_error(&self, operation: TerminalViewOperation, message: impl fmt::Display) {
+        if self.frame_error.report(operation) {
+            self.emit_error(operation, message);
         }
+    }
+
+    /// Report a discrete user action failure. It is a separate operation from
+    /// any prior frame failure and must never be swallowed for the lifetime of
+    /// the pane.
+    fn report_action_error(&self, operation: TerminalViewOperation, message: impl fmt::Display) {
+        self.emit_error(operation, message);
+    }
+
+    fn emit_error(&self, operation: TerminalViewOperation, message: impl fmt::Display) {
+        let diagnostic = TerminalViewError {
+            operation,
+            message: format!("{message}"),
+        };
+        (self.error_sink.borrow())(diagnostic.to_string());
     }
 
     /// Keep the last successfully captured frame. If none exists yet, show the
@@ -597,7 +668,10 @@ impl TerminalView {
             }
             let _ = key_event.set_unshifted_codepoint(encoded.unshifted_codepoint);
             if let Err(error) = self.session.encode_key(&key_event) {
-                self.report_error_once(format!("key input rejected: {error}"));
+                self.report_action_error(
+                    TerminalViewOperation::Input,
+                    format!("key input rejected: {error}"),
+                );
             }
             self.held_keys
                 .borrow_mut()
@@ -635,7 +709,10 @@ impl TerminalView {
         }
         let _ = key_event.set_unshifted_codepoint(press.unshifted_codepoint);
         if let Err(error) = self.session.encode_key(&key_event) {
-            self.report_error_once(format!("key release rejected: {error}"));
+            self.report_action_error(
+                TerminalViewOperation::Input,
+                format!("key release rejected: {error}"),
+            );
         }
     }
 
@@ -664,7 +741,10 @@ impl TerminalView {
                 cx.write_to_clipboard(ClipboardItem::new_string(text));
             }
             Ok(_) => {}
-            Err(error) => self.report_error_once(format!("copy failed: {error}")),
+            Err(error) => self.report_action_error(
+                TerminalViewOperation::Clipboard,
+                format!("copy failed: {error}"),
+            ),
         }
         cx.stop_propagation();
     }
@@ -677,7 +757,10 @@ impl TerminalView {
     ) {
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
             if let Err(error) = self.session.paste(&text) {
-                self.report_error_once(format!("paste failed: {error}"));
+                self.report_action_error(
+                    TerminalViewOperation::Clipboard,
+                    format!("paste failed: {error}"),
+                );
             }
         }
         cx.stop_propagation();
@@ -685,7 +768,10 @@ impl TerminalView {
 
     fn select_all(&mut self, _: &SelectAllTerminal, _window: &mut Window, cx: &mut Context<Self>) {
         if let Err(error) = self.session.select_all() {
-            self.report_error_once(format!("select all failed: {error}"));
+            self.report_action_error(
+                TerminalViewOperation::Clipboard,
+                format!("select all failed: {error}"),
+            );
         }
         cx.stop_propagation();
     }
@@ -762,7 +848,10 @@ impl TerminalView {
         match self.session.route_mouse(input) {
             Ok(route) => route,
             Err(error) => {
-                self.report_error_once(format!("mouse routing failed: {error}"));
+                self.report_action_error(
+                    TerminalViewOperation::Pointer,
+                    format!("mouse routing failed: {error}"),
+                );
                 MouseRoute::NotTracking
             }
         }
@@ -849,7 +938,10 @@ impl TerminalView {
                 .session
                 .begin_selection_gesture(x, y, event.click_count)
             {
-                self.report_error_once(format!("gesture press failed: {error}"));
+                self.report_action_error(
+                    TerminalViewOperation::Selection,
+                    format!("gesture press failed: {error}"),
+                );
             }
             cx.stop_propagation();
         }
@@ -1162,7 +1254,7 @@ impl Element for TerminalElement {
             Err(error) => {
                 // Preserve the previous frame and do not mark it complete: the
                 // failed geometry leaves Ghostty dirty for a later recovery.
-                view.report_error_once(error);
+                view.report_frame_error(TerminalViewOperation::Geometry, error);
                 counters.prepaint_micros(
                     u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX),
                 );
@@ -1186,7 +1278,7 @@ impl Element for TerminalElement {
             Err(error) => {
                 // Leave Ghostty dirty: no `mark_frame_complete` for a frame we
                 // did not capture. The next successful frame rebuilds it.
-                view.report_error_once(error);
+                view.report_frame_error(TerminalViewOperation::Render, error);
                 counters.prepaint_micros(
                     u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX),
                 );
@@ -1202,26 +1294,22 @@ impl Element for TerminalElement {
             &counters,
             window,
         );
-        let rebuild: Vec<usize> = {
-            let mut cache = view.cache.borrow_mut();
-            let listed =
-                cache
-                    .row_cache
-                    .rows_to_rebuild(generation, snapshot.dirty, &snapshot.dirty_rows);
+        // Build the candidate frame in local state. Nothing in `view.cache`
+        // changes until Ghostty accepts it, so `fallback_frame()` always
+        // returns the last fully successful frame.
+        let (rebuild, staged_row_cache) = {
+            let cache = view.cache.borrow();
+            let mut row_cache = cache.row_cache.clone();
             let invalid = cache.geometry != geometry || cache.cols != cols || cache.rows != rows;
             if invalid {
-                cache.row_cache = RowCache::new(usize::from(rows));
-                let _ = cache
-                    .row_cache
-                    .rows_to_rebuild(generation, snapshot.dirty, &[]);
-                cache.shaped_rows = Arc::new(
-                    (0..usize::from(rows))
-                        .map(|_| Arc::new(CachedRow::default()))
-                        .collect(),
-                );
-                (0..usize::from(rows)).collect()
+                row_cache = RowCache::new(usize::from(rows));
+                let _ = row_cache.rows_to_rebuild(generation, snapshot.dirty, &[]);
+                ((0..usize::from(rows)).collect(), row_cache)
             } else {
-                listed
+                (
+                    row_cache.rows_to_rebuild(generation, snapshot.dirty, &snapshot.dirty_rows),
+                    row_cache,
+                )
             }
         };
         let palette = &snapshot.colors.palette;
@@ -1229,22 +1317,24 @@ impl Element for TerminalElement {
         let default_fg = rgb(snapshot.colors.foreground);
         let origin = geometry.origin;
 
-        // Mutate the canonical cache in place. Only Ghostty's dirty row indices
-        // are reshaped; every other shared row handle survives untouched.
+        // Only Ghostty's dirty row indices are reshaped; every other shared
+        // row handle survives untouched. This is a Vec-of-Arcs copy at most,
+        // never a deep copy of the shaped rows themselves.
         let mut dirty = vec![false; usize::from(rows)];
         for &y in &rebuild {
             if let Some(slot) = dirty.get_mut(y) {
                 *slot = true;
             }
         }
+        let mut candidate_rows = {
+            let cache = view.cache.borrow();
+            Arc::clone(&cache.shaped_rows)
+        };
         {
-            let mut cache = view.cache.borrow_mut();
-            if Arc::get_mut(&mut cache.shaped_rows).is_none() {
-                // One cheap Vec-of-Arcs copy when a previous frame still holds
-                // the handle; never a deep copy of shaped rows.
+            if Arc::get_mut(&mut candidate_rows).is_none() {
                 counters.row_cache_copies(1);
             }
-            let shaped = Arc::make_mut(&mut cache.shaped_rows);
+            let shaped = Arc::make_mut(&mut candidate_rows);
             shaped.resize_with(usize::from(rows), || Arc::new(CachedRow::default()));
             for y in 0..usize::from(rows) {
                 if !dirty[y] {
@@ -1286,12 +1376,8 @@ impl Element for TerminalElement {
             }
         }
 
-        view.cursor_cell.set((snapshot.cursor.x, snapshot.cursor.y));
         let cursor_blinking = snapshot.cursor.blinking;
         let blink_changed = view.blink.borrow().blinking != cursor_blinking;
-        if blink_changed {
-            view.blink.borrow_mut().blinking = cursor_blinking;
-        }
         let cursor_visible = !cursor_blinking || view.blink.borrow().on;
         let cursor = if snapshot.cursor.visible && snapshot.cursor.has_value && cursor_visible {
             cursor_quad(&metrics, origin, &snapshot.cursor, default_fg)
@@ -1320,8 +1406,7 @@ impl Element for TerminalElement {
                     Some(px(metrics.cell_width)),
                 );
                 counters.shape_line(state.text.len());
-                let (x, y) =
-                    geometry.cell_origin(view.cursor_cell.get().0, view.cursor_cell.get().1);
+                let (x, y) = geometry.cell_origin(snapshot.cursor.x, snapshot.cursor.y);
                 Some((point(px(x), px(y)), shaped))
             }
         };
@@ -1334,12 +1419,16 @@ impl Element for TerminalElement {
         // clean call fails, keep the prior cache and leave the state dirty so
         // the next frame can rebuild it.
         if let Err(error) = session.mark_frame_complete() {
-            view.report_error_once(error);
+            view.report_frame_error(TerminalViewOperation::Render, error);
             counters
                 .prepaint_micros(u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX));
             return view.fallback_frame(bar, &metrics, rows);
         }
-        let frame_rows = view.cache.borrow().shaped_rows.clone();
+        let frame_rows = Arc::clone(&candidate_rows);
+        view.cursor_cell.set((snapshot.cursor.x, snapshot.cursor.y));
+        if blink_changed {
+            view.blink.borrow_mut().blinking = cursor_blinking;
+        }
         {
             let mut cache = view.cache.borrow_mut();
             cache.generation = generation;
@@ -1347,6 +1436,8 @@ impl Element for TerminalElement {
             cache.cols = cols;
             cache.rows = rows;
             cache.preedit_text = preedit_text;
+            cache.row_cache = staged_row_cache;
+            cache.shaped_rows = candidate_rows;
             cache.cursor = cursor.clone();
             cache.line_height = px(line_height);
             cache.background = default_bg;
@@ -1354,6 +1445,9 @@ impl Element for TerminalElement {
             cache.image_below_text = image_below_text.clone();
             cache.image_above_text = image_above_text.clone();
         }
+        // A complete frame clears frame-error suppression; a later recurrence
+        // must be reported again.
+        view.frame_error.reset();
         counters.prepaint_micros(u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX));
         if blink_changed {
             let entity = self.view.clone();
@@ -1414,10 +1508,11 @@ impl Element for TerminalElement {
                     cx,
                 ) {
                     // A single unshapable row must not crash the pane or the
-                    // window; skip it and report once to the host.
-                    self.view
-                        .read(cx)
-                        .report_error_once(format!("terminal line paint failed: {error}"));
+                    // window; skip it and report once while it persists.
+                    self.view.read(cx).report_frame_error(
+                        TerminalViewOperation::Render,
+                        format!("terminal line paint failed: {error}"),
+                    );
                 }
             }
         }
@@ -1434,9 +1529,10 @@ impl Element for TerminalElement {
                 window,
                 cx,
             ) {
-                self.view
-                    .read(cx)
-                    .report_error_once(format!("IME preedit paint failed: {error}"));
+                self.view.read(cx).report_frame_error(
+                    TerminalViewOperation::Render,
+                    format!("IME preedit paint failed: {error}"),
+                );
             }
         }
         if let Some(bar) = &prepaint.scrollbar {
@@ -1562,7 +1658,10 @@ impl InputHandler for TerminalInputHandler {
         if pain_terminal_core::input::should_commit_text(false, text) {
             if let Err(error) = self.session.write_input(text) {
                 self.view.update(cx, |view, _| {
-                    view.report_error_once(format!("committed text rejected: {error}"));
+                    view.report_action_error(
+                        TerminalViewOperation::Input,
+                        format!("committed text rejected: {error}"),
+                    );
                 });
             }
         }
@@ -1592,7 +1691,10 @@ impl InputHandler for TerminalInputHandler {
         if let Some(text) = item.text() {
             if let Err(error) = self.session.paste(&text) {
                 self.view.update(cx, |view, _| {
-                    view.report_error_once(format!("paste failed: {error}"));
+                    view.report_action_error(
+                        TerminalViewOperation::Clipboard,
+                        format!("paste failed: {error}"),
+                    );
                 });
             }
         }
@@ -1721,4 +1823,39 @@ fn cursor_quad(
         Bounds::new(point(px(x), px(y)), size(px(2.0), px(h)))
     };
     Some(fill(rect, color))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn frame_error_gate_dedups_only_the_current_operation() {
+        let gate = FrameErrorGate::default();
+        assert!(gate.report(TerminalViewOperation::Render));
+        assert!(
+            !gate.report(TerminalViewOperation::Render),
+            "a persistent render failure must not fire every frame"
+        );
+        assert!(
+            gate.report(TerminalViewOperation::Geometry),
+            "an unrelated frame failure must not be masked for the pane's lifetime"
+        );
+        assert!(!gate.report(TerminalViewOperation::Geometry));
+        gate.reset();
+        assert!(
+            gate.report(TerminalViewOperation::Render),
+            "a recurrence after a complete frame must be visible"
+        );
+    }
+
+    #[test]
+    fn view_diagnostic_keeps_its_operation_and_message() {
+        let error = TerminalViewError {
+            operation: TerminalViewOperation::Pointer,
+            message: "mouse routing failed".into(),
+        };
+        assert_eq!(error.to_string(), "Pointer: mouse routing failed");
+        assert_ne!(error.operation, TerminalViewOperation::Input);
+    }
 }
