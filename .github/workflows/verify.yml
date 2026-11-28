@@ -35,6 +35,13 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --features shell --locked -- -D warnings
       - run: cargo test --workspace --all-targets --features shell --locked
+      # The multi-view and headless pointer regressions are cfg-gated. The
+      # workspace command above does not compile them, so run the GPUI suite
+      # with its feature explicitly on both hosts.
+      - name: GPUI headless tests (two-view and pointer regressions)
+        run: cargo test -p pain-terminal-gpui --features gpui-tests --locked
+      - name: GPUI headless clippy
+        run: cargo clippy -p pain-terminal-gpui --all-targets --features gpui-tests --locked -- -D warnings
       - name: Release build
         run: cargo build --release --features shell --locked
       - name: CLI version smoke test

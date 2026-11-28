@@ -60,17 +60,28 @@ policy merely to embed a terminal.
 crates/
   ghostty-vt-sys/
   pain-terminal-core/src/{lib,ghostty,session,writer,input,geometry,palette,selection,counters,error}.rs
+    (all implementation modules are private; the crate root is the integration API)
   pain-terminal-pty/src/{lib,windows,linux}.rs
-  pain-terminal-gpui/src/{lib,render,images}.rs
-src/  (pain app: main.rs, app.rs, config.rs, preferences.rs, platform/mod.rs + profiles.rs, shortcuts.rs)
+  pain-terminal-gpui/src/{lib,render.rs,render/pointer.rs,images}.rs
+src/  (pain app: main.rs, app.rs, config.rs, fixtures.rs, preferences.rs,
+       platform/mod.rs + profiles.rs, shortcuts.rs)
 ```
 
 `pain-terminal-core` never names `ghostty_vt_sys` in its public API; consumers
-use Pain-domain values (`TerminalSession`, snapshots, `ScrollbarState`,
-`KittyPixelFormat`, `ImageLayer`, `TerminalError`). Raw C constants stay inside
-the core crate's FFI wrapper.
+use Pain-domain values from the crate root (`TerminalSession`, snapshots,
+`ScrollbarState`, `KittyPixelFormat`, `ImageLayer`, `TerminalError`). Raw C
+constants, the writer queue and application fixtures stay private to their
+owner crates. `fixtures.rs` belongs to Pain, not to reusable core.
 
 ## Threading and serialization rules
+
+**Canonical lock order:** when `TerminalSession` needs both the terminal and
+input locks, it acquires `terminal` first and then `input`, without exception.
+The private `with_terminal_and_input()` helper is the only nested acquisition;
+no Ghostty callback takes either lock. Keyboard, mouse and selection all use
+it, so a `terminal ↔ input` wait cycle is mechanically impossible. Do not
+replace the two locks with one lock over the whole session: render state,
+geometry and unrelated operations must remain independently usable.
 
 Never touch the same `GhosttyTerminal` concurrently. Current Ghostty documentation explicitly marks terminal operations such as scrollback compression as not thread-safe with writes, rendering, searches and other access. Serialize all terminal access through one lock or one strict owner. See [Ghostty `terminal.h`](https://github.com/ghostty-org/ghostty/blob/64a6fedfd26d1fa687733f9f411db5eb8e205ebe/include/ghostty/vt/terminal.h).
 
@@ -100,6 +111,20 @@ Paste must go through Ghostty's terminal-aware paste API, not a raw PTY write. T
 
 Mouse reporting and local selection are separate modes. If the running TUI has mouse tracking enabled, send encoded terminal mouse events; preserve an explicit escape modifier/policy for local text selection. Do not make the UI “sometimes select and sometimes report” based on undocumented heuristics.
 
+**One pointer coordinate contract:** `TerminalGeometry::pointer_sample()` is
+the only GPUI-window-to-terminal conversion. It returns a `PointerSample` in
+the device-pixel lattice used by `cell_device_pixels()` and size reporting:
+resolved cell, surface position, surface size and exact cell size. GPUI passes
+the domain `MouseInput` (typed action/button/modifiers plus that sample) to
+core; GPUI never constructs Ghostty numeric mouse codes and never derives a
+cell, pixel position or cell size a second time. The interior remainder strip
+clamps into the final complete cell; points genuinely outside the terminal
+keep an outside surface position so Ghostty's held/unheld viewport policy
+still works. Mouse reporting, local selection drag and scrollbar hit-testing
+all read the same sample. Pointer state (`held_mouse`, `selection_anchor`,
+`last_drag_cell`, scrollbar capture) belongs to one `TerminalView` and lives
+in `render/pointer.rs`; core still owns Ghostty mouse encoding.
+
 ## Resize rules
 
 Cell metrics are derived from the actual resolved GPUI monospace font and current scale, never from an assumed `8×16`. Compute rows/columns from the terminal element's allocated content bounds. Call both `ghostty_terminal_resize` and platform PTY resize when terminal grid geometry changes. Ghostty also accepts cell pixel dimensions because size-report and image-related protocols need them. See [Ghostty `terminal.h`](https://github.com/ghostty-org/ghostty/blob/64a6fedfd26d1fa687733f9f411db5eb8e205ebe/include/ghostty/vt/terminal.h).
@@ -127,6 +152,13 @@ Do not set `TERM=xterm-ghostty` for the MVP. We are not the full Ghostty applica
 Every milestone in [ROADMAP.md](ROADMAP.md) has its own acceptance checks. At minimum, agents must add tests for any fixed regression involving terminal parsing, resize coalescing, wakeup coalescing, selection coordinates, key mapping, UTF-8/IME input or process lifecycle. Platform code needs unit-testable helpers around raw OS calls so important behavior is not testable only by launching a GUI.
 
 Interactive smoke tests must cover Windows and Linux separately. A Windows-only success does not imply the POSIX process/TTY path works, and a Linux-only success does not imply ConPTY key/text/resize behavior works.
+
+The workspace `cargo test` is supporting evidence only. CI must also run
+`cargo test -p pain-terminal-gpui --features gpui-tests --locked` on both
+hosts so the multi-view and headless pointer regressions actually execute;
+their Clippy target uses the same feature. The mouse-specific interactive
+checklist in `docs/SMOKE.md` is required because pointer correctness at
+fractional DPI and with two embedded views cannot be proven by unit tests.
 
 ## Deliverables for every change
 

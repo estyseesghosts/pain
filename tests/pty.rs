@@ -474,6 +474,8 @@ fn linux_real_kitty_client_image_reaches_ghostty() {
 #[cfg(target_os = "linux")]
 #[test]
 fn linux_kitten_unicode_placeholder_reaches_ghostty() {
+    use pain_terminal_core::ImagePlacementKind;
+
     // A real Kitty client using the Unicode-placeholder path, not a
     // hand-written APC: kitten -> Linux PTY -> Pain -> libghostty-vt.
     let available = std::process::Command::new("kitten")
@@ -522,7 +524,7 @@ fn linux_kitten_unicode_placeholder_reaches_ghostty() {
     let virtual_placement = snapshot
         .image_placements
         .iter()
-        .any(|placement| placement.kind == pain::terminal::ImagePlacementKind::Virtual);
+        .any(|placement| placement.kind == ImagePlacementKind::Virtual);
     session.mark_frame_complete().expect("frame complete");
     pty.shutdown().expect("PTY shutdown completed");
     let _ = std::fs::remove_file(&path);

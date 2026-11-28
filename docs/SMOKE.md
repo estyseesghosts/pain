@@ -68,6 +68,45 @@ Run the manual half on each platform before calling a build shippable.
 - OSC titles A/B/C arriving before a UI frame end with C applied to both the
   native title and the drawn Silvestris title band.
 
+## Mouse interaction checklist (required manual pass)
+
+Automated geometry tests pin the coordinate contract, but only a real pointer
+can establish that selection and reporting *feel* aligned. Walk this list on
+each platform after any pointer change; do not mark it green from `cargo test`.
+
+1. **Local click and drag selection** with reporting off: click at a cell,
+   drag across rows and columns, release, and copy. The copied characters must
+   match the cells under the pointer, including the first and last cell and the
+   unused remainder strip at the right/bottom edge.
+2. **Shift/Super override** while a mode-1003 TUI has mouse tracking on: the
+   same drag must select local text instead of reaching the child, and releasing
+   the modifier must restore reporting immediately.
+3. **Press and release in `vim` or another mouse-reporting TUI**: clicks land on
+   the expected character; a press followed by a release produces exactly one
+   press and one release in the child, with no duplicate or missing event.
+4. **Motion and drag reporting**: hovering produces any-motion reports in 1003
+   and none in 1000/1002; a drag that leaves the surface keeps reporting while
+   a button is held and stops when it is not.
+5. **Wheel reporting**: wheel up/down inside a mouse-reporting TUI is reported
+   as buttons 4/5 one per whole row; with reporting off it moves Ghostty's
+   viewport, and the scrollbar thumb follows.
+6. **Scrollbar dragging**: drag the thumb, release inside the terminal, outside
+   the window, over the titlebar and over the traffic lights. The next mouse
+   move must not move the thumb, and window buttons still work.
+7. **Window movement and live resize**: dragging the terminal window and
+   resizing it horizontally, vertically and both at once keeps hit-testing,
+   selection and the TUI's `stty size` in agreement with the rendered grid.
+8. **Font-size change** (`Ctrl+=`, `Ctrl+-`, `Ctrl+0`) at an unchanged grid:
+   device cell pixels change, the PTY grid resize count does not, and the next
+   click still lands on the cell under the pointer.
+9. **HiDPI / non-100% scale** (125%, 150%, 200% where available): repeat steps
+   1–5 at fractional metrics such as `9.7 × 18.4`, not only at 100% with one
+   font. Move the window between displays with different scale factors and
+   confirm the pointer contract survives the geometry change.
+10. **Two embedded views**: with two terminal panes in one window, mouse events,
+    select-all and font actions must go only to the focused pane's session.
+    Repeat the HiDPI and resize cases with both panes present.
+
 ## Kitty graphics (both platforms)
 
 - Windows: run the automated `conpty_apc_survives_to_ghostty_graphics` and

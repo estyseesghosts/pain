@@ -19,6 +19,9 @@ echo '== clippy =='
 cargo clippy --workspace --all-targets --features shell --locked -- -D warnings
 echo '== tests =='
 cargo test --workspace --all-targets --features shell --locked
+echo '== GPUI headless tests =='
+cargo test -p pain-terminal-gpui --features gpui-tests --locked
+cargo clippy -p pain-terminal-gpui --all-targets --features gpui-tests --locked -- -D warnings
 echo '== performance counters =='
 cargo test --release --test m6 --features shell --locked -- --nocapture
 echo '== release build =='

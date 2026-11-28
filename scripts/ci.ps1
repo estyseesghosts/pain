@@ -41,6 +41,9 @@ Write-Host '== clippy =='
 Invoke-Cargo @('clippy', '--workspace', '--all-targets', '--features', 'shell', '--locked', '--', '-D', 'warnings')
 Write-Host '== tests =='
 Invoke-Cargo @('test', '--workspace', '--all-targets', '--features', 'shell', '--locked')
+Write-Host '== GPUI headless tests =='
+Invoke-Cargo @('test', '-p', 'pain-terminal-gpui', '--features', 'gpui-tests', '--locked')
+Invoke-Cargo @('clippy', '-p', 'pain-terminal-gpui', '--all-targets', '--features', 'gpui-tests', '--locked', '--', '-D', 'warnings')
 Write-Host '== performance counters =='
 Invoke-Cargo @('test', '--release', '--test', 'm6', '--features', 'shell', '--locked', '--', '--nocapture')
 Write-Host '== release build =='
