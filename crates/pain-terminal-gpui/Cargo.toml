@@ -1,0 +1,23 @@
+[package]
+name = "pain-terminal-gpui"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.98"
+description = "Reusable GPUI terminal surface backed by pain-terminal-core"
+publish = false
+
+[dependencies]
+pain-terminal-core = { path = "../pain-terminal-core" }
+gpui = { workspace = true }
+image = { version = "=0.25.10", default-features = false, features = ["png"] }
+
+[dev-dependencies]
+# Headless window/render tests need GPUI's test-support platform. This does
+# not pull Pain, Silvestris, preferences or any PTY transport.
+gpui = { workspace = true, features = ["test-support"] }
+
+[features]
+default = []
+# Opt-in headless GPUI window/render tests. GPUI's test-support platform is a
+# dev-dependency, so no test-only types leak into the library API.
+gpui-tests = []

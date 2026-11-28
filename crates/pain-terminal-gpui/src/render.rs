@@ -11,20 +11,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::gpui::images::{ImageCache, ImageDraw};
-use crate::terminal::geometry::{
-    adjust_font_size, background_runs, batch_row, line_height_for, selection_span, BgRun,
-    CellMetrics, InputGeometry, RowCache, TerminalGeometry, TextRun as CellRun, FONT_SIZE_STEP,
-};
-use crate::terminal::ghostty::{Cursor, KeyEvent};
-use crate::terminal::input::{
-    key_for_keystroke, key_release_for_keystroke, mouse_escape, Modifiers as InputModifiers,
-    MouseAction, MouseButton as PtyButton,
-};
-use crate::terminal::selection::{
-    accumulate_wheel, scrollbar_geometry, scrollbar_row_at, wheel_button, ScrollbarGeometry,
-};
-use crate::terminal::session::{CountersHandle, MouseInput, MouseRoute, TerminalSession};
+use crate::images::{ImageCache, ImageDraw};
 use gpui::{
     div, fill, hsla, point, prelude::*, px, relative, rgba, size, App, Bounds, ClipboardItem,
     Context, Corners, DispatchPhase, Element, ElementId, FocusHandle, Focusable, GlobalElementId,
@@ -34,6 +21,19 @@ use gpui::{
     StrikethroughStyle, Style, Subscription, TextAlign, TextRun, UTF16Selection, UnderlineStyle,
     Window,
 };
+use pain_terminal_core::geometry::{
+    adjust_font_size, background_runs, batch_row, line_height_for, selection_span, BgRun,
+    CellMetrics, InputGeometry, RowCache, TerminalGeometry, TextRun as CellRun, FONT_SIZE_STEP,
+};
+use pain_terminal_core::ghostty::{Cursor, KeyEvent};
+use pain_terminal_core::input::{
+    key_for_keystroke, key_release_for_keystroke, mouse_escape, Modifiers as InputModifiers,
+    MouseAction, MouseButton as PtyButton,
+};
+use pain_terminal_core::selection::{
+    accumulate_wheel, scrollbar_geometry, scrollbar_row_at, wheel_button, ScrollbarGeometry,
+};
+use pain_terminal_core::session::{CountersHandle, MouseInput, MouseRoute, TerminalSession};
 
 // Intrinsic terminal actions. They are defined with the view, never bound to
 // keys here: the host owns shortcut policy and binds whatever it wants.
@@ -217,7 +217,7 @@ pub struct TerminalView {
     /// Ghostty-derived scrollbar thumb and the state behind it, both
     /// recomputed once in prepaint or from a scroll operation's result.
     scrollbar: RefCell<Option<ScrollbarGeometry>>,
-    scroll_state: RefCell<Option<crate::terminal::ghostty::ScrollbarState>>,
+    scroll_state: RefCell<Option<pain_terminal_core::ghostty::ScrollbarState>>,
     /// Explicit capture state for the scrollbar thumb.
     capture: PointerCapture,
     /// Kept alive so focus loss / deactivation can always cancel a drag.
@@ -227,7 +227,7 @@ pub struct TerminalView {
     held_mouse: Cell<u8>,
     /// Keys whose press was encoded into Ghostty. Only these may produce a
     /// matching release; app/IME/text-owned keys never do.
-    held_keys: RefCell<Vec<(String, crate::terminal::input::EncodedKey)>>,
+    held_keys: RefCell<Vec<(String, pain_terminal_core::input::EncodedKey)>>,
     /// Last cell visited by a local selection drag. Ghostty's gesture API must
     /// not be fed a second drag event for the same cell.
     last_drag_cell: Cell<Option<(u16, u16)>>,
@@ -340,7 +340,7 @@ impl TerminalView {
     /// ordinary empty terminal surface rather than inventing a second error UI.
     fn fallback_frame(
         &self,
-        scrollbar: Option<crate::terminal::selection::ScrollbarGeometry>,
+        scrollbar: Option<pain_terminal_core::selection::ScrollbarGeometry>,
         metrics: &CellMetrics,
         rows: u16,
     ) -> FrameState {
@@ -1594,7 +1594,7 @@ impl InputHandler for TerminalInputHandler {
         _window: &mut Window,
         cx: &mut App,
     ) {
-        if crate::terminal::input::should_commit_text(false, text) {
+        if pain_terminal_core::input::should_commit_text(false, text) {
             if let Err(error) = self.session.write_input(text) {
                 self.view.update(cx, |view, _| {
                     view.report_error_once(format!("committed text rejected: {error}"));
@@ -1654,8 +1654,8 @@ impl InputHandler for TerminalInputHandler {
     }
 }
 
-fn default_spec(rgb: (u8, u8, u8)) -> crate::terminal::ghostty::ColorSpec {
-    crate::terminal::ghostty::ColorSpec::Rgb(rgb.0, rgb.1, rgb.2)
+fn default_spec(rgb: (u8, u8, u8)) -> pain_terminal_core::ghostty::ColorSpec {
+    pain_terminal_core::ghostty::ColorSpec::Rgb(rgb.0, rgb.1, rgb.2)
 }
 
 fn rgb(c: (u8, u8, u8)) -> Hsla {

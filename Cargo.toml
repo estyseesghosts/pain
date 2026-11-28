@@ -12,15 +12,22 @@ members = [
     "crates/ghostty-vt-sys",
     "crates/pain-terminal-core",
     "crates/pain-terminal-pty",
+    "crates/pain-terminal-gpui",
 ]
+
+# One pin for every GPUI consumer. Root Pain and pain-terminal-gpui must resolve
+# the exact same revision; two GPUI revisions produce incompatible types.
+[workspace.dependencies]
+gpui = { git = "https://github.com/zed-industries/zed", rev = "6b720973027999bae402df23d469026f4cced988", default-features = false }
 
 [dependencies]
 ghostty-vt-sys = { path = "crates/ghostty-vt-sys" }
 pain-terminal-core = { path = "crates/pain-terminal-core" }
+pain-terminal-gpui = { path = "crates/pain-terminal-gpui", optional = true }
 pain-terminal-pty = { path = "crates/pain-terminal-pty" }
 serde = { version = "1", features = ["derive"] }
-# The GPUI image cache decodes frames for display; the PNG decoder used by
-# Ghostty's system callback lives in pain-terminal-core.
+# Integration gates rasterize frames and decode PNGs; the GPUI view's own image
+# cache dependency lives in pain-terminal-gpui.
 image = { version = "=0.25.10", default-features = false, features = ["png"] }
 
 
@@ -57,12 +64,8 @@ git = "https://github.com/estyseesghosts/silvestris"
 rev = "f1c2a010c1c84a90c9ad938eb307f5f2ef5a5ba7"
 optional = true
 
-# Must match the pinned Silvestris config/pins.toml exactly. Never upgrade this
-# independently: two GPUI revisions produce incompatible types.
 [dependencies.gpui]
-git = "https://github.com/zed-industries/zed"
-rev = "6b720973027999bae402df23d469026f4cced988"
-default-features = false
+workspace = true
 optional = true
 
 [dependencies.gpui_platform]
@@ -87,7 +90,7 @@ optional = true
 [features]
 default = []
 # Enable only with the M1 window renderer; pulls in Silvestris and its GPUI.
-shell = ["dep:silvestris", "dep:gpui", "dep:gpui_platform", "dep:async-channel"]
+shell = ["dep:silvestris", "dep:gpui", "dep:gpui_platform", "dep:async-channel", "dep:pain-terminal-gpui"]
 # Opt-in GPUI window/render tests. Adds GPUI's headless test platform; it is
 # not part of the normal shell binary.
 gpui-tests = ["shell", "gpui/test-support"]

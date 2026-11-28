@@ -22,9 +22,10 @@ pub mod selection;
 // operations, never raw Ghostty handles or C constants.
 pub use error::TerminalError;
 pub use ghostty::{
-    paste_encode, paste_is_safe, Cell, Colors, Cursor, FrameMeta, ImagePlacement,
-    ImagePlacementCache, ImagePlacementKind, KeyEvent, KittyConfig, KittyImagePixels, RenderFrame,
-    RenderSnapshot, RowSelection, ScrollbarState, Style,
+    paste_encode, paste_is_safe, Cell, Colors, Cursor, FrameMeta, ImageLayer, ImagePlacement,
+    ImagePlacementCache, ImagePlacementKind, ImageProtocol, KeyEvent, KittyConfig,
+    KittyImagePixels, KittyPixelFormat, RenderFrame, RenderSnapshot, RowSelection, ScrollbarState,
+    Style,
 };
 pub use session::{
     AppliedGeometry, CountersHandle, CountersSnapshot, MouseInput, MouseRoute, ResizeOutcome,

@@ -486,6 +486,20 @@ pub struct ImagePlacement {
     pub kind: ImagePlacementKind,
 }
 
+impl ImagePlacement {
+    /// The image protocol as a Pain-domain value.
+    #[must_use]
+    pub fn protocol_kind(&self) -> ImageProtocol {
+        ImageProtocol::from_raw(self.protocol)
+    }
+
+    /// The paint layer as a Pain-domain value.
+    #[must_use]
+    pub fn layer_kind(&self) -> ImageLayer {
+        ImageLayer::from_raw(self.layer)
+    }
+}
+
 /// Result of refreshing the render state's placement cache.
 #[derive(Clone, Debug)]
 pub struct ImagePlacementCache {
@@ -561,6 +575,98 @@ impl KittyConfig {
 /// Backwards-compatible name used by existing call sites.
 pub type RenderSnapshot = RenderFrame;
 
+/// Kitty pixel layouts in Pain's own type. A consumer never names the raw
+/// `GHOSTTY_KITTY_IMAGE_FORMAT_*` constants.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KittyPixelFormat {
+    Rgb,
+    Rgba,
+    Gray,
+    GrayAlpha,
+    Unknown,
+}
+
+impl KittyPixelFormat {
+    #[must_use]
+    pub fn from_raw(raw: i32) -> Self {
+        match raw {
+            sys::GHOSTTY_KITTY_IMAGE_FORMAT_RGB => Self::Rgb,
+            sys::GHOSTTY_KITTY_IMAGE_FORMAT_RGBA => Self::Rgba,
+            sys::GHOSTTY_KITTY_IMAGE_FORMAT_GRAY => Self::Gray,
+            sys::GHOSTTY_KITTY_IMAGE_FORMAT_GRAY_ALPHA => Self::GrayAlpha,
+            _ => Self::Unknown,
+        }
+    }
+
+    #[must_use]
+    pub fn raw(self) -> i32 {
+        match self {
+            Self::Rgb => sys::GHOSTTY_KITTY_IMAGE_FORMAT_RGB,
+            Self::Rgba => sys::GHOSTTY_KITTY_IMAGE_FORMAT_RGBA,
+            Self::Gray => sys::GHOSTTY_KITTY_IMAGE_FORMAT_GRAY,
+            Self::GrayAlpha => sys::GHOSTTY_KITTY_IMAGE_FORMAT_GRAY_ALPHA,
+            Self::Unknown => -1,
+        }
+    }
+}
+
+/// Ghostty image protocols as a Pain-domain value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImageProtocol {
+    Kitty,
+    Other,
+}
+
+impl ImageProtocol {
+    #[must_use]
+    pub fn from_raw(raw: i32) -> Self {
+        if raw == sys::GHOSTTY_IMAGE_PROTOCOL_KITTY {
+            Self::Kitty
+        } else {
+            Self::Other
+        }
+    }
+
+    #[must_use]
+    pub fn raw(self) -> i32 {
+        match self {
+            Self::Kitty => sys::GHOSTTY_IMAGE_PROTOCOL_KITTY,
+            Self::Other => sys::GHOSTTY_IMAGE_PROTOCOL_KITTY + 1,
+        }
+    }
+}
+
+/// Ghostty image paint layers as a Pain-domain value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImageLayer {
+    BelowBackground,
+    BelowText,
+    AboveText,
+    Other,
+}
+
+impl ImageLayer {
+    #[must_use]
+    pub fn from_raw(raw: i32) -> Self {
+        match raw {
+            sys::GHOSTTY_IMAGE_LAYER_BELOW_BACKGROUND => Self::BelowBackground,
+            sys::GHOSTTY_IMAGE_LAYER_BELOW_TEXT => Self::BelowText,
+            sys::GHOSTTY_IMAGE_LAYER_ABOVE_TEXT => Self::AboveText,
+            _ => Self::Other,
+        }
+    }
+
+    #[must_use]
+    pub fn raw(self) -> i32 {
+        match self {
+            Self::BelowBackground => sys::GHOSTTY_IMAGE_LAYER_BELOW_BACKGROUND,
+            Self::BelowText => sys::GHOSTTY_IMAGE_LAYER_BELOW_TEXT,
+            Self::AboveText => sys::GHOSTTY_IMAGE_LAYER_ABOVE_TEXT,
+            Self::Other => -1,
+        }
+    }
+}
+
 /// Renderer-neutral copy of one Kitty image's raw decoded pixels. The pixel
 /// bytes are owned by Rust and never point into Ghostty's storage.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -569,12 +675,39 @@ pub struct KittyImagePixels {
     pub generation: u64,
     pub width: u32,
     pub height: u32,
-    /// `GHOSTTY_KITTY_IMAGE_FORMAT_*`.
+    /// `GHOSTTY_KITTY_IMAGE_FORMAT_*`. Domain consumers should use
+    /// [`KittyImagePixels::format_kind`] instead of naming raw constants.
     pub format: i32,
     pub pixels: Vec<u8>,
 }
 
 impl KittyImagePixels {
+    /// The pixel layout as a Pain-domain value.
+    #[must_use]
+    pub fn format_kind(&self) -> KittyPixelFormat {
+        KittyPixelFormat::from_raw(self.format)
+    }
+
+    /// Construct from a domain pixel format. Fallible FFI construction lives
+    /// only in this crate; callers never name raw constants.
+    pub fn new(
+        image_id: u32,
+        generation: u64,
+        width: u32,
+        height: u32,
+        format: KittyPixelFormat,
+        pixels: Vec<u8>,
+    ) -> Self {
+        Self {
+            image_id,
+            generation,
+            width,
+            height,
+            format: format.raw(),
+            pixels,
+        }
+    }
+
     /// Bytes per pixel for a stored format. `None` for PNG (never stored) and
     /// unknown values.
     #[must_use]

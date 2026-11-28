@@ -3660,6 +3660,7 @@ dependencies = [
  "gpui_platform",
  "image",
  "pain-terminal-core",
+ "pain-terminal-gpui",
  "pain-terminal-pty",
  "serde",
  "silvestris",
@@ -3673,6 +3674,15 @@ dependencies = [
  "ghostty-vt-sys",
  "image",
  "serde",
+]
+
+[[package]]
+name = "pain-terminal-gpui"
+version = "0.1.0"
+dependencies = [
+ "gpui",
+ "image",
+ "pain-terminal-core",
 ]
 
 [[package]]

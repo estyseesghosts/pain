@@ -11,7 +11,7 @@ use silvestris::chrome::{open_window, window_options, WindowFrame};
 use silvestris::{ActiveTheme, ThemePreference};
 
 use crate::config::{parse_args, usage, version_line, Config};
-use crate::gpui::render::{
+use crate::gpui::{
     CopySelection, DecreaseFont, IncreaseFont, PasteClipboard, ResetFont, SelectAllTerminal,
     TerminalFont, TerminalView,
 };

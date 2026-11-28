@@ -13,10 +13,10 @@ use std::sync::Arc;
 use gpui::{point, px, size, Bounds, Pixels, RenderImage, Window};
 use image::{Frame, ImageBuffer, Rgba};
 
-use ghostty_vt_sys as sys;
-
-use crate::terminal::ghostty::{ImagePlacement, KittyImagePixels};
-use crate::terminal::session::{CountersHandle, TerminalSession};
+use pain_terminal_core::ghostty::{
+    ImageLayer, ImagePlacement, ImageProtocol, KittyImagePixels, KittyPixelFormat,
+};
+use pain_terminal_core::session::{CountersHandle, TerminalSession};
 
 /// One texture identity. The protocol is part of the key because image IDs are
 /// only unique within a protocol.
@@ -93,21 +93,6 @@ impl ImageCache {
         }
     }
 
-    #[must_use]
-    pub fn len(&self) -> usize {
-        self.entries.len()
-    }
-
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
-
-    #[must_use]
-    pub fn cached_bytes(&self) -> usize {
-        self.bytes
-    }
-
     /// Convert a Ghostty image to the byte order GPUI's polychrome atlas
     /// expects (BGRA). The GPUI buffer declares `Rgba<u8>` because that is the
     /// only constructor GPUI exposes, but the atlas uploads the raw bytes as
@@ -118,28 +103,29 @@ impl ImageCache {
             .ok()?
             .checked_mul(usize::try_from(image.height).ok()?)?;
         let out_len = pixels.checked_mul(4)?;
-        let expected = KittyImagePixels::expected_len(image.width, image.height, image.format)?;
+        let format = image.format_kind();
+        let expected = KittyImagePixels::expected_len(image.width, image.height, format.raw())?;
         if image.pixels.len() != expected {
             return None;
         }
         let mut out = vec![0u8; out_len];
-        match image.format {
-            sys::GHOSTTY_KITTY_IMAGE_FORMAT_RGB => {
+        match format {
+            KittyPixelFormat::Rgb => {
                 for (dst, src) in out.chunks_exact_mut(4).zip(image.pixels.chunks_exact(3)) {
                     dst.copy_from_slice(&[src[2], src[1], src[0], 0xff]);
                 }
             }
-            sys::GHOSTTY_KITTY_IMAGE_FORMAT_RGBA => {
+            KittyPixelFormat::Rgba => {
                 for (dst, src) in out.chunks_exact_mut(4).zip(image.pixels.chunks_exact(4)) {
                     dst.copy_from_slice(&[src[2], src[1], src[0], src[3]]);
                 }
             }
-            sys::GHOSTTY_KITTY_IMAGE_FORMAT_GRAY => {
+            KittyPixelFormat::Gray => {
                 for (dst, src) in out.chunks_exact_mut(4).zip(image.pixels.iter()) {
                     dst.copy_from_slice(&[*src, *src, *src, 0xff]);
                 }
             }
-            sys::GHOSTTY_KITTY_IMAGE_FORMAT_GRAY_ALPHA => {
+            KittyPixelFormat::GrayAlpha => {
                 for (dst, src) in out.chunks_exact_mut(4).zip(image.pixels.chunks_exact(2)) {
                     dst.copy_from_slice(&[src[0], src[0], src[0], src[1]]);
                 }
@@ -162,7 +148,7 @@ impl ImageCache {
         &mut self,
         session: &TerminalSession,
         placements: &[ImagePlacement],
-        geometry: &crate::terminal::geometry::TerminalGeometry,
+        geometry: &pain_terminal_core::geometry::TerminalGeometry,
         counters: &CountersHandle,
         window: &mut Window,
     ) -> ImageLayers {
@@ -171,7 +157,7 @@ impl ImageCache {
         let mut layers = ImageLayers::default();
         let mut referenced: Vec<ImageKey> = Vec::new();
         for placement in placements {
-            if placement.protocol != sys::GHOSTTY_IMAGE_PROTOCOL_KITTY {
+            if placement.protocol_kind() != ImageProtocol::Kitty {
                 continue;
             }
             let key = ImageKey::from_placement(placement);
@@ -193,7 +179,7 @@ impl ImageCache {
         if !requested.is_empty() {
             for pixels in session.read_kitty_images(&requested) {
                 let key = ImageKey {
-                    protocol: sys::GHOSTTY_IMAGE_PROTOCOL_KITTY,
+                    protocol: ImageProtocol::Kitty.raw(),
                     image_id: pixels.image_id,
                     generation: pixels.generation,
                 };
@@ -267,7 +253,7 @@ impl ImageCache {
         }
 
         for placement in placements {
-            if placement.protocol != sys::GHOSTTY_IMAGE_PROTOCOL_KITTY {
+            if placement.protocol_kind() != ImageProtocol::Kitty {
                 continue;
             }
             let key = ImageKey::from_placement(placement);
@@ -286,11 +272,11 @@ impl ImageCache {
                     bounds,
                     image_bounds,
                 };
-                match placement.layer {
-                    sys::GHOSTTY_IMAGE_LAYER_BELOW_BACKGROUND => {
+                match placement.layer_kind() {
+                    ImageLayer::BelowBackground => {
                         layers.below_background.push(draw);
                     }
-                    sys::GHOSTTY_IMAGE_LAYER_BELOW_TEXT => {
+                    ImageLayer::BelowText => {
                         layers.below_text.push(draw);
                     }
                     _ => layers.above_text.push(draw),
@@ -312,7 +298,7 @@ pub fn project_placement(
     placement: &ImagePlacement,
     image_width: u32,
     image_height: u32,
-    geometry: &crate::terminal::geometry::TerminalGeometry,
+    geometry: &pain_terminal_core::geometry::TerminalGeometry,
 ) -> Option<(Bounds<Pixels>, Bounds<Pixels>)> {
     if placement.pixel_width == 0 || placement.pixel_height == 0 {
         return None;
@@ -364,14 +350,14 @@ pub fn project_placement(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::terminal::geometry::{CellMetrics, TerminalGeometry};
+    use pain_terminal_core::geometry::{CellMetrics, TerminalGeometry};
 
-    fn placement(layer: i32, z: i32, col: i32, row: i32) -> ImagePlacement {
+    fn placement(layer: ImageLayer, z: i32, col: i32, row: i32) -> ImagePlacement {
         ImagePlacement {
-            protocol: sys::GHOSTTY_IMAGE_PROTOCOL_KITTY,
+            protocol: ImageProtocol::Kitty.raw(),
             image_id: 7,
             image_generation: 3,
-            layer,
+            layer: layer.raw(),
             z,
             viewport_col: col,
             viewport_row: row,
@@ -386,7 +372,7 @@ mod tests {
             source_width: 10,
             source_height: 10,
             placement_id: 1,
-            kind: crate::terminal::ImagePlacementKind::Fixed,
+            kind: pain_terminal_core::ImagePlacementKind::Fixed,
         }
     }
 
@@ -406,7 +392,7 @@ mod tests {
             generation: 1,
             width: 1,
             height: 1,
-            format: sys::GHOSTTY_KITTY_IMAGE_FORMAT_RGB,
+            format: KittyPixelFormat::Rgb.raw(),
             pixels: vec![0x11, 0x22, 0x33],
         };
         assert_eq!(
@@ -419,7 +405,7 @@ mod tests {
             generation: 1,
             width: 1,
             height: 1,
-            format: sys::GHOSTTY_KITTY_IMAGE_FORMAT_RGBA,
+            format: KittyPixelFormat::Rgba.raw(),
             pixels: vec![0x11, 0x22, 0x33, 0x44],
         };
         assert_eq!(
@@ -432,7 +418,7 @@ mod tests {
             generation: 1,
             width: 1,
             height: 1,
-            format: sys::GHOSTTY_KITTY_IMAGE_FORMAT_GRAY,
+            format: KittyPixelFormat::Gray.raw(),
             pixels: vec![0x80],
         };
         assert_eq!(
@@ -445,7 +431,7 @@ mod tests {
             generation: 1,
             width: 1,
             height: 1,
-            format: sys::GHOSTTY_KITTY_IMAGE_FORMAT_GRAY_ALPHA,
+            format: KittyPixelFormat::GrayAlpha.raw(),
             pixels: vec![0x40, 0x7f],
         };
         assert_eq!(
@@ -461,7 +447,7 @@ mod tests {
             generation: 1,
             width: 2,
             height: 2,
-            format: sys::GHOSTTY_KITTY_IMAGE_FORMAT_RGBA,
+            format: KittyPixelFormat::Rgba.raw(),
             pixels: vec![0; 3],
         };
         assert!(ImageCache::to_bgra(&bad).is_none());
@@ -469,8 +455,13 @@ mod tests {
 
     #[test]
     fn projection_places_image_at_cell_and_offset() {
-        let (bounds, full) =
-            project_placement(&placement(2, 0, 2, 1), 10, 10, &geometry(1.0)).expect("visible");
+        let (bounds, full) = project_placement(
+            &placement(ImageLayer::AboveText, 0, 2, 1),
+            10,
+            10,
+            &geometry(1.0),
+        )
+        .expect("visible");
         assert_eq!(f32::from(bounds.origin.x), 120.0);
         assert_eq!(f32::from(bounds.origin.y), 70.0);
         assert_eq!(f32::from(bounds.size.width), 30.0);
@@ -481,7 +472,7 @@ mod tests {
 
     #[test]
     fn projection_clips_negative_rows_to_terminal_bounds() {
-        let mut p = placement(2, 0, 0, -2);
+        let mut p = placement(ImageLayer::AboveText, 0, 0, -2);
         p.pixel_height = 80;
         let (bounds, full) = project_placement(&p, 10, 10, &geometry(1.0)).expect("partly visible");
         // Destination starts above the terminal and is clipped at its top.
@@ -494,15 +485,26 @@ mod tests {
 
     #[test]
     fn projection_is_empty_when_fully_outside() {
-        assert!(project_placement(&placement(2, 0, 0, -10), 10, 10, &geometry(1.0)).is_none());
+        assert!(project_placement(
+            &placement(ImageLayer::AboveText, 0, 0, -10),
+            10,
+            10,
+            &geometry(1.0)
+        )
+        .is_none());
     }
 
     #[test]
     fn projection_hidpi_keeps_source_in_image_pixels() {
         // At 2x, a 30-device-pixel destination is 15 logical pixels. Source
         // coordinates remain image pixels and must not be divided by scale.
-        let (bounds, full) =
-            project_placement(&placement(2, 0, 0, 0), 20, 20, &geometry(2.0)).expect("visible");
+        let (bounds, full) = project_placement(
+            &placement(ImageLayer::AboveText, 0, 0, 0),
+            20,
+            20,
+            &geometry(2.0),
+        )
+        .expect("visible");
         assert_eq!(f32::from(bounds.size.width), 15.0);
         assert_eq!(f32::from(bounds.size.height), 10.0);
         // scale_x = 15 / 10 = 1.5; full image = 20 * 1.5 = 30 logical px.
@@ -515,8 +517,13 @@ mod tests {
     fn projection_at_150_percent_does_not_change_source_rectangles() {
         // The exact fractional case that used to floor and crop: 30 device
         // pixels become 20 logical pixels at 1.5x, not 19.
-        let (bounds, full) =
-            project_placement(&placement(2, 0, 0, 0), 20, 20, &geometry(1.5)).expect("visible");
+        let (bounds, full) = project_placement(
+            &placement(ImageLayer::AboveText, 0, 0, 0),
+            20,
+            20,
+            &geometry(1.5),
+        )
+        .expect("visible");
         assert!((f32::from(bounds.size.width) - 20.0).abs() < 0.001);
         assert!((f32::from(bounds.size.height) - 40.0 / 3.0).abs() < 0.001);
         // scale_x = 20 / 10 = 2; the whole 20 px image projects to 40 logical.
@@ -527,7 +534,7 @@ mod tests {
 
     #[test]
     fn negative_columns_are_clipped_like_negative_rows() {
-        let mut p = placement(2, 0, -2, 0);
+        let mut p = placement(ImageLayer::AboveText, 0, -2, 0);
         p.pixel_width = 80;
         let (bounds, full) = project_placement(&p, 10, 10, &geometry(1.0)).expect("partly visible");
         // Destination starts 20 logical px left of the terminal and is clipped.
@@ -540,7 +547,7 @@ mod tests {
     fn generation_change_replaces_the_texture_key() {
         // Same image id and protocol, new generation: the renderer must upload
         // a new texture rather than reuse the old pixels.
-        let mut first = placement(2, 0, 0, 0);
+        let mut first = placement(ImageLayer::AboveText, 0, 0, 0);
         first.image_generation = 7;
         let mut replacement = first.clone();
         replacement.image_generation = 8;
@@ -550,19 +557,15 @@ mod tests {
         assert_eq!(old_key.image_id, new_key.image_id);
         // A new protocol with the same numeric id is also a distinct texture.
         let mut other_protocol = first.clone();
-        other_protocol.protocol = sys::GHOSTTY_IMAGE_PROTOCOL_KITTY + 1;
+        other_protocol.protocol = ImageProtocol::Other.raw();
         assert_ne!(old_key, ImageKey::from_placement(&other_protocol));
     }
 
     #[test]
     fn alpha_is_preserved_for_both_alpha_formats() {
         for (format, pixels, expected_alpha) in [
-            (
-                sys::GHOSTTY_KITTY_IMAGE_FORMAT_RGBA,
-                vec![10, 20, 30, 40],
-                40,
-            ),
-            (sys::GHOSTTY_KITTY_IMAGE_FORMAT_GRAY_ALPHA, vec![50, 60], 60),
+            (KittyPixelFormat::Rgba.raw(), vec![10, 20, 30, 40], 40),
+            (KittyPixelFormat::GrayAlpha.raw(), vec![50, 60], 60),
         ] {
             let image = KittyImagePixels {
                 image_id: 1,
@@ -580,7 +583,7 @@ mod tests {
 
     #[test]
     fn source_rectangle_projects_the_whole_image_behind_destination() {
-        let mut p = placement(2, 0, 0, 0);
+        let mut p = placement(ImageLayer::AboveText, 0, 0, 0);
         p.source_x = 5;
         p.source_y = 5;
         p.source_width = 5;
@@ -600,24 +603,24 @@ mod tests {
     fn layer_partition_is_stable_for_sorted_placements() {
         let p = |layer, z| placement(layer, z, 0, 0);
         let all = [
-            p(sys::GHOSTTY_IMAGE_LAYER_BELOW_BACKGROUND, -2),
-            p(sys::GHOSTTY_IMAGE_LAYER_BELOW_BACKGROUND, 0),
-            p(sys::GHOSTTY_IMAGE_LAYER_BELOW_TEXT, -1),
-            p(sys::GHOSTTY_IMAGE_LAYER_ABOVE_TEXT, 0),
+            p(ImageLayer::BelowBackground, -2),
+            p(ImageLayer::BelowBackground, 0),
+            p(ImageLayer::BelowText, -1),
+            p(ImageLayer::AboveText, 0),
         ];
         let below_bg: Vec<_> = all
             .iter()
-            .filter(|p| p.layer == sys::GHOSTTY_IMAGE_LAYER_BELOW_BACKGROUND)
+            .filter(|p| p.layer_kind() == ImageLayer::BelowBackground)
             .map(|p| p.z)
             .collect();
         let below_text: Vec<_> = all
             .iter()
-            .filter(|p| p.layer == sys::GHOSTTY_IMAGE_LAYER_BELOW_TEXT)
+            .filter(|p| p.layer_kind() == ImageLayer::BelowText)
             .map(|p| p.z)
             .collect();
         let above_text: Vec<_> = all
             .iter()
-            .filter(|p| p.layer == sys::GHOSTTY_IMAGE_LAYER_ABOVE_TEXT)
+            .filter(|p| p.layer_kind() == ImageLayer::AboveText)
             .map(|p| p.z)
             .collect();
         assert_eq!(below_bg, vec![-2, 0]);
