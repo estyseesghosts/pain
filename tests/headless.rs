@@ -3,8 +3,7 @@
 //! wrapper; the repeated-create test exercises that path.
 
 use ghostty_vt_sys as sys;
-use pain::terminal::session::{NoopWakeup, TerminalSession};
-use pain::terminal::KeyEvent;
+use pain_terminal_core::{KeyEvent, NoopWakeup, TerminalSession};
 
 /// Space is a printable key whose GPUI name is multi-character (`"space"`).
 /// Ghostty's encoder emits nothing for it unless UTF-8 text is supplied. This
@@ -72,7 +71,7 @@ fn named_control_keys_encode_to_pty_bytes() {
 /// sequences. This is the same path `TerminalView::on_key_down` drives.
 #[test]
 fn keyboard_policy_reaches_the_pty_correctly() {
-    use pain::terminal::input::{key_for_keystroke, Modifiers};
+    use pain_terminal_core::{key_for_keystroke, Modifiers};
 
     let session = TerminalSession::new(80, 24, Box::new(NoopWakeup)).expect("session");
 
@@ -111,7 +110,7 @@ fn keyboard_policy_reaches_the_pty_correctly() {
 /// document. This covers both a named palette and the light/dark Theme palette.
 #[test]
 fn selected_palette_reaches_ghostty_render_state() {
-    use pain::terminal::palette::{resolve, PaletteChoice};
+    use pain_terminal_core::{resolve, PaletteChoice};
 
     let session = TerminalSession::new(80, 24, Box::new(NoopWakeup)).expect("session");
     let mocha = resolve(PaletteChoice::CatppuccinMocha, true).expect("mocha palette");
@@ -142,9 +141,9 @@ fn selected_palette_reaches_ghostty_render_state() {
 /// 1003. This guards the "mouse reporting feels off" regression.
 #[test]
 fn mouse_motion_follows_terminal_tracking_modes() {
-    use pain::terminal::geometry::{CellMetrics, TerminalGeometry};
-    use pain::terminal::input::{Modifiers, MouseAction, MouseButton};
-    use pain::terminal::session::MouseInput;
+    use pain_terminal_core::{
+        CellMetrics, Modifiers, MouseAction, MouseButton, MouseInput, TerminalGeometry,
+    };
 
     let session = TerminalSession::new(80, 24, Box::new(NoopWakeup)).expect("session");
     // One canonical geometry for the whole test: the encoder sees the same

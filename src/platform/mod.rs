@@ -3,17 +3,12 @@
 
 use std::path::PathBuf;
 
+// Only the transport values the application itself needs. Backend internals
+// and integration-test helpers live in `pain-terminal-pty` and are imported
+// there directly by the tests that use them.
 pub use pain_terminal_pty::{
-    spawn_pty, PlatformPty, PtyConfig, PtyError, PtyEvent, PtyEventSink, PtyResizeCounters,
-    ShellCommand,
+    spawn_pty, PlatformPty, PtyConfig, PtyError, PtyEvent, PtyEventSink, ShellCommand,
 };
-
-// Platform backends stay reachable from the application path so existing
-// integration gates can assert the real ConPTY packaging and winsize behavior.
-#[cfg(target_os = "linux")]
-pub use pain_terminal_pty::linux;
-#[cfg(target_os = "windows")]
-pub use pain_terminal_pty::windows;
 
 pub mod profiles;
 

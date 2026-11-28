@@ -20,7 +20,7 @@ fn main() {
     {
         println!(
             "pain {}: headless libghostty-vt spike (M0); build with --features shell for the M1 window",
-            pain::terminal::ghostty::version()
+            pain_terminal_core::version()
         );
     }
 }

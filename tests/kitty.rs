@@ -6,8 +6,9 @@
 use ghostty_vt_sys as sys;
 use image::codecs::png::PngEncoder;
 use image::{ExtendedColorType, ImageEncoder};
-use pain::terminal::session::{NoopWakeup, SessionConfig, TerminalSession};
-use pain::terminal::{ImagePlacement, KittyConfig};
+use pain_terminal_core::{
+    ImagePlacement, ImagePlacementKind, KittyConfig, NoopWakeup, SessionConfig, TerminalSession,
+};
 
 const CELL_W: u32 = 10;
 const CELL_H: u32 = 20;
@@ -463,7 +464,7 @@ fn unicode_placeholder_placement_comes_from_the_render_state() {
     let placements = snapshot(&session);
     let virtuals: Vec<&ImagePlacement> = placements
         .iter()
-        .filter(|p| p.kind == pain::terminal::ImagePlacementKind::Virtual)
+        .filter(|p| p.kind == ImagePlacementKind::Virtual)
         .collect();
     assert!(
         !virtuals.is_empty(),
@@ -488,7 +489,7 @@ fn relative_placement_tracks_its_parent() {
         .iter()
         .find(|p| p.image_id == 51)
         .expect("relative placement");
-    assert_eq!(relative.kind, pain::terminal::ImagePlacementKind::Relative);
+    assert_eq!(relative.kind, ImagePlacementKind::Relative);
     assert!(placements.iter().any(|p| p.image_id == 50));
 }
 

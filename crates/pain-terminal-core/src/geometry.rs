@@ -526,14 +526,6 @@ pub fn selection_span(selection: Option<RowSelection>) -> Option<(u16, u16)> {
     selection.map(|s| (s.start_x, s.end_x.saturating_sub(s.start_x) + 1))
 }
 
-/// Effective foreground color for a run: Ghostty resolves palette indices,
-/// so the resolved RGB on the cell is authoritative. `None` means use the
-/// terminal's default foreground from the frame's `Colors`.
-#[must_use]
-pub fn run_foreground(run: &TextRun) -> Option<(u8, u8, u8)> {
-    run.style.foreground
-}
-
 /// Returns true when a frame's dirty state means all visible rows must be
 /// rebuilt; partial and clean frames can reuse cached rows.
 #[must_use]

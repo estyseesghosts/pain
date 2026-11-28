@@ -3,7 +3,7 @@
 //! preferences document; this module only parses one launch.
 
 use crate::platform::ShellCommand;
-use crate::terminal::ghostty::version as ghostty_version;
+use pain_terminal_core::version as ghostty_version;
 
 pub const DEFAULT_SCROLLBACK_LINES: usize = 10_000;
 pub const DEFAULT_SCROLLBACK_BYTES: usize = 16 * 1024 * 1024;

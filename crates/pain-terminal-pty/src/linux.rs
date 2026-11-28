@@ -15,7 +15,7 @@ use super::{
     terminal_environment, PlatformPty, PtyConfig, PtyError, PtyEvent, PtyEventSink,
     PtyResizeMailbox,
 };
-use pain_terminal_core::session::TerminalSession;
+use pain_terminal_core::TerminalSession;
 
 /// `TIOCSWINSZ` payload derived from the terminal grid. The pixel fields stay
 /// zero until the renderer has measured a cell; they are carried only when the

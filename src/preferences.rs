@@ -23,8 +23,7 @@ use silvestris::{set_theme_preference, Appearance, ThemeId, ThemePreference};
 
 use crate::log::{data_dir, error};
 use crate::platform::profiles::{self, ShellProfile};
-use crate::terminal::palette::{self, PaletteChoice};
-use crate::terminal::session::TerminalSession;
+use pain_terminal_core::{resolve, PaletteChoice, TerminalSession};
 
 const SCHEMA_VERSION: u32 = 1;
 
@@ -173,7 +172,7 @@ pub fn install(cx: &mut App) {
 pub fn apply(cx: &mut App) {
     let value = cx.global::<PreferencesGlobal>().0.read(cx).value().clone();
     set_theme_preference(ThemePreference::explicit(value.theme.theme_id()), cx);
-    let colors = palette::resolve(value.palette, value.theme.appearance() == Appearance::Dark);
+    let colors = resolve(value.palette, value.theme.appearance() == Appearance::Dark);
     if let Some(session) = cx.try_global::<SessionGlobal>() {
         if let Err(failure) = session.0.set_colors(colors.as_ref()) {
             error(

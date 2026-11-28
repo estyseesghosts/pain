@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 
-use pain_terminal_core::session::TerminalSession;
+use pain_terminal_core::TerminalSession;
 
 #[cfg(target_os = "linux")]
 pub mod linux;

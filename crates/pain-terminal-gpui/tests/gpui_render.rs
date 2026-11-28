@@ -22,7 +22,7 @@ use gpui::{
     Result as GpuiResult, ScaledPixels, Scene, Size, TextRenderingMode, TileId,
 };
 use image::{Rgba, RgbaImage};
-use pain_terminal_core::session::{NoopWakeup, TerminalSession};
+use pain_terminal_core::{NoopWakeup, TerminalSession};
 use pain_terminal_gpui::{TerminalFont, TerminalView};
 
 /// GPUI's test platform owns some thread-local/global state. Keep every case

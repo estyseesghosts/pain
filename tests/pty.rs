@@ -6,8 +6,8 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use pain::platform::{spawn_pty, PtyConfig, PtyEventSink, ShellCommand};
-use pain::terminal::session::{NoopWakeup, TerminalSession};
+use pain_terminal_core::{NoopWakeup, TerminalSession};
+use pain_terminal_pty::{spawn_pty, PtyConfig, PtyEventSink, ShellCommand};
 
 /// These gates exercise transport and parsing, not host presentation. They
 /// supply a sink that deliberately discards events instead of mocking the
@@ -104,6 +104,8 @@ fn wait_for(session: &TerminalSession, marker: &str) -> bool {
 #[cfg(target_os = "linux")]
 #[test]
 fn linux_pty_runs_shell_input_resize_and_shutdown() {
+    use pain_terminal_pty::PtyEvent;
+
     let session = Arc::new(TerminalSession::new(80, 24, Box::new(NoopWakeup)).expect("session"));
     session.install_pty_writer().expect("write bridge");
     let config = PtyConfig {
@@ -115,8 +117,8 @@ fn linux_pty_runs_shell_input_resize_and_shutdown() {
     };
     let exited = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let exit_seen = Arc::clone(&exited);
-    let events: pain::platform::PtyEventSink = Arc::new(move |event| {
-        if matches!(event, pain::platform::PtyEvent::ProcessExited { .. }) {
+    let events: PtyEventSink = Arc::new(move |event| {
+        if matches!(event, PtyEvent::ProcessExited { .. }) {
             exit_seen.store(true, std::sync::atomic::Ordering::SeqCst);
         }
     });
@@ -302,7 +304,7 @@ fn bundled_conpty_is_packaged_next_to_the_test_binary() {
     // this fails, the Windows graphics gate cannot be trusted: the in-box host
     // drops Kitty APCs.
     assert!(
-        pain::platform::windows::conpty_is_bundled(),
+        pain_terminal_pty::windows::conpty_is_bundled(),
         "windows/conpty/x64 was not copied beside the test binary"
     );
 }
@@ -310,7 +312,7 @@ fn bundled_conpty_is_packaged_next_to_the_test_binary() {
 #[cfg(target_os = "windows")]
 #[test]
 fn conpty_apc_survives_to_ghostty_graphics() {
-    if !pain::platform::windows::conpty_is_bundled() {
+    if !pain_terminal_pty::windows::conpty_is_bundled() {
         eprintln!(
             "SKIP conpty APC gate: no bundled conpty.dll; the kernel32 fallback is \
              documented as Kitty-graphics-degraded"
@@ -356,7 +358,7 @@ fn conpty_apc_survives_to_ghostty_graphics() {
 #[cfg(target_os = "windows")]
 #[test]
 fn wsl_client_apc_survives_wsl_pty_and_conpty() {
-    if !pain::platform::windows::conpty_is_bundled() {
+    if !pain_terminal_pty::windows::conpty_is_bundled() {
         eprintln!("SKIP WSL APC gate: bundled ConPTY is absent");
         return;
     }

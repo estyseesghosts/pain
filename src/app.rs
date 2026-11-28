@@ -11,10 +11,13 @@ use silvestris::chrome::{open_window, window_options, WindowFrame};
 use silvestris::{ActiveTheme, ThemePreference};
 
 use crate::config::{parse_args, usage, version_line, Config};
-use crate::gpui::{
+use pain_terminal_core::{SessionConfig, TerminalSession};
+use pain_terminal_gpui::{
     CopySelection, DecreaseFont, IncreaseFont, PasteClipboard, ResetFont, SelectAllTerminal,
     TerminalFont, TerminalView,
 };
+
+use crate::fixtures::Fixture;
 use crate::log;
 use crate::platform::profiles::{self, ShellProfile};
 use crate::platform::{
@@ -23,8 +26,6 @@ use crate::platform::{
 };
 use crate::preferences::{self, SessionGlobal, ShellProfilesGlobal};
 use crate::shortcuts::{self, AppCommand};
-use crate::terminal::fixtures::Fixture;
-use crate::terminal::session::{SessionConfig, TerminalSession};
 
 // Pain-owned action: opening preferences is host policy, not terminal input.
 // Intrinsic terminal actions are defined with the view and bound here.
@@ -354,8 +355,7 @@ pub fn run() {
                 return;
             }
             let m = event.keystroke.modifiers;
-            let mods =
-                pain_terminal_core::input::Modifiers::new(m.shift, m.control, m.alt, m.platform);
+            let mods = pain_terminal_core::Modifiers::new(m.shift, m.control, m.alt, m.platform);
             let Some(command) = shortcuts::app_command(
                 &event.keystroke.key,
                 event.keystroke.key_char.as_deref(),

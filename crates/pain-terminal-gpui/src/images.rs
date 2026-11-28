@@ -13,10 +13,10 @@ use std::sync::Arc;
 use gpui::{point, px, size, Bounds, Pixels, RenderImage, Window};
 use image::{Frame, ImageBuffer, Rgba};
 
-use pain_terminal_core::ghostty::{
-    ImageLayer, ImagePlacement, ImageProtocol, KittyImagePixels, KittyPixelFormat,
+use pain_terminal_core::{
+    CountersHandle, ImageLayer, ImagePlacement, ImageProtocol, KittyImagePixels, KittyPixelFormat,
+    TerminalGeometry, TerminalSession,
 };
-use pain_terminal_core::session::{CountersHandle, TerminalSession};
 
 /// One texture identity. The protocol is part of the key because image IDs are
 /// only unique within a protocol.
@@ -148,7 +148,7 @@ impl ImageCache {
         &mut self,
         session: &TerminalSession,
         placements: &[ImagePlacement],
-        geometry: &pain_terminal_core::geometry::TerminalGeometry,
+        geometry: &TerminalGeometry,
         counters: &CountersHandle,
         window: &mut Window,
     ) -> ImageLayers {
@@ -298,7 +298,7 @@ pub fn project_placement(
     placement: &ImagePlacement,
     image_width: u32,
     image_height: u32,
-    geometry: &pain_terminal_core::geometry::TerminalGeometry,
+    geometry: &TerminalGeometry,
 ) -> Option<(Bounds<Pixels>, Bounds<Pixels>)> {
     if placement.pixel_width == 0 || placement.pixel_height == 0 {
         return None;
@@ -350,7 +350,7 @@ pub fn project_placement(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pain_terminal_core::geometry::{CellMetrics, TerminalGeometry};
+    use pain_terminal_core::CellMetrics;
 
     fn placement(layer: ImageLayer, z: i32, col: i32, row: i32) -> ImagePlacement {
         ImagePlacement {

@@ -35,7 +35,7 @@ use super::{
     terminal_environment, PlatformPty, PtyConfig, PtyError, PtyEvent, PtyEventSink,
     PtyResizeMailbox,
 };
-use pain_terminal_core::session::TerminalSession;
+use pain_terminal_core::TerminalSession;
 
 static NEXT_PIPE_ID: AtomicU32 = AtomicU32::new(0);
 

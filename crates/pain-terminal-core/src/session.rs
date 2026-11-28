@@ -712,10 +712,17 @@ impl TerminalSession {
         self.writer.fail();
     }
 
-    /// Shared queue handle for installing Ghostty's `WRITE_PTY` callback.
+    /// Narrow diagnostic for the queue lifecycle. Callers do not need the
+    /// queue itself, only whether it is open/closed/failed and why.
     #[must_use]
-    pub fn writer_queue(&self) -> Arc<WriterQueue> {
-        Arc::clone(&self.writer)
+    pub fn writer_state(&self) -> crate::writer::WriterQueueState {
+        self.writer.state()
+    }
+
+    /// The retained reason for a failed writer queue, if any.
+    #[must_use]
+    pub fn writer_failure(&self) -> Option<WriterQueueError> {
+        self.writer.failure()
     }
 
     /// Register Ghostty's effect callbacks. `on_title` is invoked on the thread
@@ -1053,7 +1060,7 @@ mod tests {
             Err(WriterQueueError::ByteBudgetExceeded { len: 4, budget: 4 })
         );
         assert_eq!(
-            session.writer_queue().state(),
+            session.writer_state(),
             crate::writer::WriterQueueState::Failed
         );
         assert_eq!(session.snapshot_counters().writer_bytes_rejected, 1);
@@ -1097,8 +1104,7 @@ mod tests {
         // an error, so the queue must retain it for the platform worker.
         session.write_vt(b"\x1b[?7$p");
         let failure = session
-            .writer_queue()
-            .failure()
+            .writer_failure()
             .expect("callback failure was recorded");
         assert!(
             matches!(

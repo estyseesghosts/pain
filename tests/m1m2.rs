@@ -1,17 +1,16 @@
 //! M1/M2 acceptance through the public API, without opening a window.
 //!
-//! M1's rendering decisions are pure functions in `terminal::geometry`; M2's
+//! M1's rendering decisions are pure functions in `pain_terminal_core`; M2's
 //! session/concurrency model is entirely headless. Together these tests cover
 //! the acceptance gates that do not require launching the GPUI window.
 
 use std::sync::Arc;
 
-use pain::terminal::fixtures::Fixture;
-use pain::terminal::geometry::{
-    adjust_font_size, batch_row, display_columns, selection_span, CellMetrics, RowCache,
-    FONT_SIZE_STEP, MAX_FONT_SIZE, MIN_FONT_SIZE,
+use pain::fixtures::Fixture;
+use pain_terminal_core::{
+    adjust_font_size, batch_row, display_columns, selection_span, CellMetrics, NoopWakeup,
+    RowCache, TerminalSession, FONT_SIZE_STEP, MAX_FONT_SIZE, MIN_FONT_SIZE,
 };
-use pain::terminal::session::{NoopWakeup, TerminalSession};
 
 #[test]
 fn m1_canned_fixtures_render_styled_wide_and_selected_cells() {

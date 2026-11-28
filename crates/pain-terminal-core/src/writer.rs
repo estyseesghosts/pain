@@ -230,13 +230,16 @@ impl WriterQueue {
             .len()
     }
 
+    #[cfg(test)]
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
     /// Bytes currently held by queued buffers. Tracks message removals from
-    /// both `pop` and `pop_blocking`.
+    /// both `pop` and `pop_blocking`. Test-only: the production API exposes
+    /// lifecycle and failure through `TerminalSession`.
+    #[cfg(test)]
     #[must_use]
     pub fn pending_bytes(&self) -> usize {
         self.inner

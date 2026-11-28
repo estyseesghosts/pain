@@ -5,7 +5,7 @@
 //! A reusable terminal surface must not decide that `Ctrl+,` opens Pain's
 //! preferences, so this allowlist stays in the application.
 
-use pain_terminal_core::input::Modifiers;
+use pain_terminal_core::Modifiers;
 
 /// Whitelisted application commands driven by Ctrl/Shift+key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

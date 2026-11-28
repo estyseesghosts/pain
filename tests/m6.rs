@@ -6,8 +6,7 @@ use std::sync::Arc;
 use std::thread;
 
 use ghostty_vt_sys as sys;
-use pain::terminal::geometry::RowCache;
-use pain::terminal::session::{CountersSnapshot, NoopWakeup, TerminalSession};
+use pain_terminal_core::{CountersSnapshot, NoopWakeup, RowCache, TerminalSession};
 fn report(label: &str, counters: &CountersSnapshot) {
     println!(
         "M6 {label}: writes={} bytes={} wakeups_scheduled={} wakeups_coalesced={} \
@@ -321,8 +320,7 @@ fn dpi_only_change_does_not_resize_the_pty() {
 
 #[test]
 fn many_images_stay_bounded_by_the_storage_cap() {
-    use pain::terminal::ghostty::KittyConfig;
-    use pain::terminal::session::SessionConfig;
+    use pain_terminal_core::{KittyConfig, SessionConfig};
 
     let session = TerminalSession::new_with_config(
         SessionConfig {

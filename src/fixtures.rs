@@ -1,7 +1,10 @@
-//! Canned VT fixtures for M1 rendering and M2 stress tests. No live shell is
-//! involved: every byte here is produced locally and fed to `GhosttyTerminal`.
+//! Canned VT fixtures for Pain's fixture and stress application modes.
+//!
+//! These are application policy, not terminal semantics: the reusable
+//! `pain-terminal-core` crate does not inherit fixture data. Bytes are fed
+//! through the public `TerminalSession` API exactly as a PTY would feed them.
 
-use crate::ghostty::GhosttyTerminal;
+use pain_terminal_core::TerminalSession;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Fixture {
@@ -43,20 +46,9 @@ impl Fixture {
         }
     }
 
-    /// Feed the fixture and apply its non-byte state (currently a selection).
-    #[allow(dead_code)]
-    fn apply(self, terminal: &mut GhosttyTerminal) {
-        terminal.write(self.bytes());
-        if self == Fixture::Selection {
-            terminal
-                .set_row_selection(0, 0, 7)
-                .expect("selection fixture installs a Ghostty selection");
-        }
-    }
-
-    /// Feed a fixture through the M2 session, preserving Ghostty-owned
-    /// selection state where the fixture asks for it.
-    pub fn apply_session(self, session: &crate::session::TerminalSession) {
+    /// Feed the fixture through a session, preserving Ghostty-owned selection
+    /// state where the fixture asks for it.
+    pub fn apply_session(self, session: &TerminalSession) {
         session.write_vt(self.bytes());
         if self == Fixture::Selection {
             session
@@ -65,7 +57,7 @@ impl Fixture {
         }
     }
 
-    /// A short deterministic chunk stream used by M2's synthetic producer.
+    /// A short deterministic chunk stream used by the stress application mode.
     /// Each chunk is a valid, independently writable piece of VT.
     #[must_use]
     pub fn chunks(self) -> Vec<&'static [u8]> {
@@ -94,16 +86,18 @@ impl Fixture {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ghostty::GhosttyRenderState;
+    use pain_terminal_core::{NoopWakeup, RowSelection};
+
+    fn session() -> TerminalSession {
+        TerminalSession::new(80, 24, Box::new(NoopWakeup)).expect("session")
+    }
 
     #[test]
     fn every_fixture_renders_a_snapshot() {
         for fixture in Fixture::ALL {
-            let mut terminal = GhosttyTerminal::new(80, 24).expect("terminal created");
-            fixture.apply(&mut terminal);
-            let mut state = GhosttyRenderState::new().expect("render state created");
-            state.update(&terminal).expect("update");
-            let snapshot = state.snapshot().expect("snapshot");
+            let session = session();
+            fixture.apply_session(&session);
+            let snapshot = session.render_snapshot().expect("snapshot");
             assert_eq!(
                 (snapshot.cols, snapshot.meta.rows),
                 (80, 24),
@@ -120,14 +114,12 @@ mod tests {
 
     #[test]
     fn selection_fixture_reaches_render_state() {
-        let mut terminal = GhosttyTerminal::new(80, 24).expect("terminal created");
-        Fixture::Selection.apply(&mut terminal);
-        let mut state = GhosttyRenderState::new().expect("render state created");
-        state.update(&terminal).expect("update");
-        let snapshot = state.snapshot().expect("snapshot");
+        let session = session();
+        Fixture::Selection.apply_session(&session);
+        let snapshot = session.render_snapshot().expect("snapshot");
         assert_eq!(
-            snapshot.selections[0],
-            Some(crate::ghostty::RowSelection {
+            snapshot.meta.selections[0],
+            Some(RowSelection {
                 start_x: 0,
                 end_x: 7
             })

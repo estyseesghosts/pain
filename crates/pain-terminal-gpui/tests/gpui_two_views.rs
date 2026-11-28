@@ -9,7 +9,7 @@ use gpui::{
     div, prelude::*, px, size, AnyWindowHandle, App, AppContext, Context, Entity,
     HeadlessAppContext, NoopTextSystem, Render, Window,
 };
-use pain_terminal_core::session::{NoopWakeup, TerminalSession};
+use pain_terminal_core::{NoopWakeup, TerminalSession};
 use pain_terminal_gpui::{IncreaseFont, SelectAllTerminal, TerminalFont, TerminalView};
 
 fn serial() -> MutexGuard<'static, ()> {
