@@ -10,12 +10,13 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use crate::terminal::error::TerminalError;
 use crate::terminal::ghostty::{
     ghostty_vt_sys as sys, CallbackRegistration, GhosttyError, GhosttyRenderState, GhosttyTerminal,
     KeyEncoder, KeyEvent, KittyConfig, KittyImagePixels, KittyImageRead, MouseEncoder, MouseEvent,
     RenderSnapshot, SelectionGesture, SizeReportState,
 };
-use crate::terminal::writer::WriterQueue;
+use crate::terminal::writer::{WriterQueue, WriterQueueError};
 
 /// UI notification hook. Keep this UI-agnostic: the GPUI integration supplies
 /// a sink that posts to the foreground executor, headless tests use a counter.
@@ -103,6 +104,7 @@ pub struct CountersSnapshot {
     pub writer_messages: u64,
     pub writer_queue_depth_max: u64,
     pub writer_bytes_queued: u64,
+    pub writer_bytes_rejected: u64,
     // Process
     pub process_exited: bool,
     pub title_changes: u64,
@@ -246,6 +248,7 @@ impl Counters {
             writer_messages: 0, // merged from WriterQueue in snapshot_counters
             writer_queue_depth_max: 0,
             writer_bytes_queued: 0,
+            writer_bytes_rejected: 0, // merged from WriterQueue in snapshot_counters
             process_exited: false,
             title_changes: get!(title_changes),
             bounds_changes_observed: get!(bounds_changes_observed),
@@ -283,6 +286,8 @@ pub struct SessionConfig {
     pub rows: u16,
     pub scrollback_lines: usize,
     pub scrollback_bytes: usize,
+    /// Implementation limit on pending outbound bytes. Not a user preference.
+    pub writer_byte_budget: usize,
     pub kitty: KittyConfig,
 }
 
@@ -293,6 +298,7 @@ impl Default for SessionConfig {
             rows: 24,
             scrollback_lines: 10_000,
             scrollback_bytes: 16 * 1024 * 1024,
+            writer_byte_budget: crate::terminal::writer::DEFAULT_WRITER_BYTE_BUDGET,
             kitty: KittyConfig::default(),
         }
     }
@@ -398,7 +404,7 @@ impl TerminalSession {
             pending_wakeup: AtomicBool::new(false),
             exited: AtomicBool::new(false),
             wakeup,
-            writer: Arc::new(WriterQueue::new()),
+            writer: Arc::new(WriterQueue::with_byte_budget(config.writer_byte_budget)),
             geometry: Mutex::new(AppliedGeometry {
                 cols: config.cols,
                 rows: config.rows,
@@ -427,6 +433,7 @@ impl TerminalSession {
         snapshot.writer_messages = writer.messages;
         snapshot.writer_queue_depth_max = writer.max_depth;
         snapshot.writer_bytes_queued = writer.bytes;
+        snapshot.writer_bytes_rejected = writer.rejected;
         snapshot.process_exited = self.process_exited();
         snapshot
     }
@@ -785,14 +792,14 @@ impl TerminalSession {
 
     /// Encode a key against current Ghostty modes and queue the bytes for the
     /// (future) PTY writer. Returning the bytes keeps this testable.
-    pub fn encode_key(&self, event: &KeyEvent) -> Result<Vec<u8>, GhosttyError> {
+    pub fn encode_key(&self, event: &KeyEvent) -> Result<Vec<u8>, TerminalError> {
         let terminal = self.terminal.lock().expect("terminal mutex poisoned");
         let mut encoder = self.encoder.lock().expect("encoder mutex poisoned");
         encoder.sync_from_terminal(&terminal)?;
         let bytes = encoder.encode_owned(event)?;
         drop(encoder);
         drop(terminal);
-        self.enqueue_writer(bytes.clone());
+        self.enqueue_writer(bytes.clone())?;
         Ok(bytes)
     }
 
@@ -804,13 +811,13 @@ impl TerminalSession {
 
     /// Bracketed-paste policy comes from the terminal's current mode, never
     /// from a Rust-side mode table.
-    pub fn paste(&self, text: &str) -> Result<Vec<u8>, GhosttyError> {
+    pub fn paste(&self, text: &str) -> Result<Vec<u8>, TerminalError> {
         let bracketed = {
             let terminal = self.terminal.lock().expect("terminal mutex poisoned");
             terminal.mode(sys::GHOSTTY_MODE_BRACKETED_PASTE)?
         };
         let bytes = crate::terminal::ghostty::paste_encode(text, bracketed)?;
-        self.enqueue_writer(bytes.clone());
+        self.enqueue_writer(bytes.clone())?;
         Ok(bytes)
     }
 
@@ -832,7 +839,7 @@ impl TerminalSession {
 
     /// Writer queue interface. UI input and Ghostty's `WRITE_PTY` callback
     /// both enqueue here; the platform writer thread drains it in order.
-    pub fn enqueue_writer(&self, bytes: Vec<u8>) -> usize {
+    pub fn enqueue_writer(&self, bytes: Vec<u8>) -> Result<usize, WriterQueueError> {
         self.writer.push(bytes)
     }
 
@@ -856,6 +863,12 @@ impl TerminalSession {
     /// Signal the writer thread to stop after flushing queued bytes.
     pub fn close_writer(&self) {
         self.writer.close();
+    }
+
+    /// Record a platform writer failure. The queue wakes its consumer, rejects
+    /// new writes and keeps its failed state observable through counters.
+    pub fn fail_writer(&self) {
+        self.writer.fail();
     }
 
     /// Shared queue handle for installing Ghostty's `WRITE_PTY` callback.
@@ -968,10 +981,11 @@ impl TerminalSession {
 
     /// Write committed text straight to the PTY (IME/character input path).
     /// This is distinct from `paste`, which applies bracketed-paste semantics.
-    pub fn write_input(&self, text: &str) {
+    pub fn write_input(&self, text: &str) -> Result<(), TerminalError> {
         if !text.is_empty() {
-            self.enqueue_writer(text.as_bytes().to_vec());
+            self.enqueue_writer(text.as_bytes().to_vec())?;
         }
+        Ok(())
     }
 
     /// Whether the running program currently reports mouse tracking. The UI
@@ -984,7 +998,7 @@ impl TerminalSession {
     /// Decide mouse ownership and encode under ONE terminal lock, then move the
     /// encoded bytes straight into the writer queue. There is no cached
     /// "tracking enabled" flag that could drift from Ghostty's modes.
-    pub fn route_mouse(&self, input: MouseInput) -> Result<MouseRoute, GhosttyError> {
+    pub fn route_mouse(&self, input: MouseInput) -> Result<MouseRoute, TerminalError> {
         Counters::add(&self.counters.mouse_events_offered, 1);
         let mut encoder = self.mouse_encoder.lock().expect("mouse encoder poisoned");
         let mut event = self.mouse_event.lock().expect("mouse event poisoned");
@@ -1000,8 +1014,9 @@ impl TerminalSession {
             return Ok(MouseRoute::Reported { bytes_queued: 0 });
         };
         let queued = bytes.len();
-        // Production path: move the Vec; no clone for the UI's benefit.
-        self.writer.push(bytes);
+        // Production path: move the Vec; no clone for the UI's benefit. A
+        // rejection is reported instead of being counted as a successful send.
+        self.writer.push(bytes)?;
         Counters::add(&self.counters.mouse_events_encoded, 1);
         Counters::add(&self.counters.mouse_bytes_queued, queued as u64);
         Ok(MouseRoute::Reported {
@@ -1260,6 +1275,33 @@ mod tests {
         fn schedule(&self) {
             self.0.fetch_add(1, Ordering::SeqCst);
         }
+    }
+
+    #[test]
+    fn session_config_limits_pending_writer_bytes() {
+        let session = TerminalSession::new_with_config(
+            SessionConfig {
+                writer_byte_budget: 4,
+                ..SessionConfig::default()
+            },
+            Box::new(NoopWakeup),
+        )
+        .expect("session created");
+        assert_eq!(session.enqueue_writer(b"abc".to_vec()), Ok(1));
+        assert_eq!(
+            session.enqueue_writer(b"defg".to_vec()),
+            Err(WriterQueueError::ByteBudgetExceeded { len: 4, budget: 4 })
+        );
+        assert_eq!(
+            session.writer_queue().state(),
+            crate::terminal::writer::WriterQueueState::Failed
+        );
+        assert_eq!(session.snapshot_counters().writer_bytes_rejected, 1);
+        // Once failed, ordinary input is rejected instead of silently queued.
+        assert_eq!(
+            session.enqueue_writer(b"x".to_vec()),
+            Err(WriterQueueError::Failed)
+        );
     }
 
     #[test]

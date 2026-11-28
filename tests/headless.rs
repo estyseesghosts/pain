@@ -83,7 +83,7 @@ fn keyboard_policy_reaches_the_pty_correctly() {
         key_for_keystroke("space", Some(" "), Modifiers::default(), false, false).is_none(),
         "space must not be encoded twice"
     );
-    session.write_input(" ");
+    session.write_input(" ").expect("commit text");
     assert_eq!(session.drain_writer(8), vec![b" ".to_vec()]);
 
     // Ctrl+C is a control key: Ghostty encodes it to the C0 byte.

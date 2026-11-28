@@ -457,7 +457,9 @@ impl TerminalView {
                 let _ = key_event.set_utf8(text);
             }
             let _ = key_event.set_unshifted_codepoint(encoded.unshifted_codepoint);
-            let _ = self.session.encode_key(&key_event);
+            if let Err(error) = self.session.encode_key(&key_event) {
+                crate::log::error("key", &format!("input rejected: {error}"));
+            }
             self.held_keys
                 .borrow_mut()
                 .push((name.to_owned(), encoded.clone()));
@@ -493,7 +495,9 @@ impl TerminalView {
             let _ = key_event.set_utf8(text);
         }
         let _ = key_event.set_unshifted_codepoint(press.unshifted_codepoint);
-        let _ = self.session.encode_key(&key_event);
+        if let Err(error) = self.session.encode_key(&key_event) {
+            crate::log::error("key", &format!("input rejected: {error}"));
+        }
     }
 
     // Action listeners live on this focused element, matching Chaus. A global
@@ -1406,7 +1410,9 @@ impl InputHandler for TerminalInputHandler {
         cx: &mut App,
     ) {
         if crate::terminal::input::should_commit_text(false, text) {
-            self.session.write_input(text);
+            if let Err(error) = self.session.write_input(text) {
+                crate::log::error("input", &format!("committed text rejected: {error}"));
+            }
         }
         self.view.update(cx, |view, cx| view.clear_preedit(cx));
     }
@@ -1432,7 +1438,9 @@ impl InputHandler for TerminalInputHandler {
 
     fn paste(&mut self, item: ClipboardItem, _window: &mut Window, _cx: &mut App) {
         if let Some(text) = item.text() {
-            let _ = self.session.paste(&text);
+            if let Err(error) = self.session.paste(&text) {
+                crate::log::error("paste", &format!("paste failed: {error}"));
+            }
         }
     }
 

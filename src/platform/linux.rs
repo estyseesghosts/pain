@@ -317,6 +317,9 @@ fn start_threads(
         .spawn(move || {
             while let Some(bytes) = writer_session.wait_writer() {
                 if let Err(error) = writer_master.write_all(&bytes) {
+                    // The transport is gone: fail the queue so no later input,
+                    // paste or Ghostty reply is accepted into a dead writer.
+                    writer_session.fail_writer();
                     crate::log::error("pty-write", &format!("PTY write failed: {error}"));
                     break;
                 }

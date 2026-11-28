@@ -108,7 +108,9 @@ fn linux_pty_runs_shell_input_resize_and_shutdown() {
     };
     let pty = spawn_pty(&config, Arc::clone(&session)).expect("spawn /bin/sh");
 
-    session.enqueue_writer(b"echo PAIN_LINUX_MARKER\n".to_vec());
+    session
+        .enqueue_writer(b"echo PAIN_LINUX_MARKER\n".to_vec())
+        .expect("enqueue echo");
     assert!(
         wait_for(&session, "PAIN_LINUX_MARKER"),
         "shell output never reached Ghostty: {}",
@@ -119,7 +121,9 @@ fn linux_pty_runs_shell_input_resize_and_shutdown() {
     // backend and must not disturb the session.
     pty.resize(100, 30, 10, 20).expect("resize PTY");
     pty.resize(100, 30, 10, 20).expect("duplicate resize");
-    session.enqueue_writer(b"stty size\n".to_vec());
+    session
+        .enqueue_writer(b"stty size\n".to_vec())
+        .expect("enqueue stty");
     assert!(
         wait_for(&session, "30 100"),
         "stty size did not reflect resize: {}",
@@ -153,7 +157,9 @@ fn windows_conpty_runs_cmd_input_resize_and_shutdown() {
     while Instant::now() < deadline && snapshot_text(&session).is_empty() {
         std::thread::sleep(Duration::from_millis(20));
     }
-    session.enqueue_writer(b"echo PAIN_WINDOWS_MARKER\r\n".to_vec());
+    session
+        .enqueue_writer(b"echo PAIN_WINDOWS_MARKER\r\n".to_vec())
+        .expect("enqueue echo");
     assert!(
         wait_for(&session, "PAIN_WINDOWS_MARKER"),
         "shell output never reached Ghostty: {}",
@@ -257,14 +263,18 @@ fn windows_conpty_runs_vim_alternate_screen_and_mouse_mode() {
     // Ghostty owns. The session must observe it without any Rust-side table.
     // Capture the observed state before shutdown so every path tears the
     // child down even when the assertion fails.
-    session.enqueue_writer(b":set mouse=a\r".to_vec());
+    session
+        .enqueue_writer(b":set mouse=a\r".to_vec())
+        .expect("enqueue vim mouse mode");
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline && !session.mouse_tracking_enabled().unwrap_or(false) {
         std::thread::sleep(Duration::from_millis(20));
     }
     let mouse_enabled = session.mouse_tracking_enabled().unwrap_or(false);
 
-    session.enqueue_writer(b":q!\r".to_vec());
+    session
+        .enqueue_writer(b":q!\r".to_vec())
+        .expect("enqueue vim quit");
     pty.shutdown();
     assert!(mouse_enabled, "vim did not enable mouse reporting");
 }
@@ -516,7 +526,9 @@ fn linux_kitten_unicode_placeholder_reaches_ghostty() {
 #[test]
 fn writer_counters_are_reported() {
     let session = TerminalSession::new(80, 24, Box::new(NoopWakeup)).expect("session");
-    session.enqueue_writer(b"abc".to_vec());
+    session
+        .enqueue_writer(b"abc".to_vec())
+        .expect("enqueue counter bytes");
     let counters = session.snapshot_counters();
     assert_eq!(counters.writer_messages, 1);
     assert_eq!(counters.writer_bytes_queued, 3);

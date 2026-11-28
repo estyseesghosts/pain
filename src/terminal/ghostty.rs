@@ -1488,7 +1488,10 @@ unsafe extern "C" fn write_pty_callback(
     let callbacks = unsafe { &*(userdata.cast::<CallbackData>()) };
     // SAFETY: Ghostty guarantees `data` is readable for `len` bytes this call.
     let bytes = unsafe { std::slice::from_raw_parts(data, len) }.to_vec();
-    callbacks.writer.push(bytes);
+    // Rejection is recorded in WriterQueue stats for the host to observe. This
+    // C callback cannot return an error and must never re-enter Ghostty or
+    // acquire the terminal lock, so there is nothing further to do here.
+    let _ = callbacks.writer.push(bytes);
 }
 
 /// `GhosttyTerminalTitleChangedFn`: copy the borrowed title and hand it to the

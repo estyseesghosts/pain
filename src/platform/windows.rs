@@ -660,9 +660,18 @@ fn start_threads(
                         )
                     };
                     match result {
-                        Ok(()) if chunk == 0 => break,
+                        // A zero-byte write on a non-empty buffer is a stalled
+                        // writer, not progress: fail the queue so future input
+                        // and Ghostty replies are rejected instead of piling up.
+                        Ok(()) if chunk == 0 => {
+                            writer_session.fail_writer();
+                            return;
+                        }
                         Ok(()) => written += chunk as usize,
-                        Err(_) => return,
+                        Err(_) => {
+                            writer_session.fail_writer();
+                            return;
+                        }
                     }
                 }
             }

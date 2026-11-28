@@ -1,6 +1,7 @@
 //! Terminal engine layer. Ghostty owns all terminal semantics; this module
 //! only owns the handles and translates data into plain Rust values.
 
+pub mod error;
 pub mod ghostty;
 
 pub mod fixtures;
@@ -16,6 +17,7 @@ pub mod images;
 #[cfg(feature = "shell")]
 pub mod render;
 
+pub use error::TerminalError;
 pub use ghostty::{
     paste_encode, paste_is_safe, CallbackRegistration, Cell, Colors, Cursor, FrameMeta,
     GhosttyError, GhosttyRenderState, GhosttyTerminal, ImagePlacement, ImagePlacementCache,
@@ -23,4 +25,4 @@ pub use ghostty::{
     RenderSnapshot, RowSelection, Style,
 };
 pub use session::{CountersSnapshot, TerminalSession, WakeupSink};
-pub use writer::{WriterQueue, WriterStats};
+pub use writer::{WriterQueue, WriterQueueError, WriterQueueState, WriterStats};
