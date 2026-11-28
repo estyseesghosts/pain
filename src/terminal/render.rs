@@ -6,6 +6,7 @@
 //! scroll container, or second grid model are created.
 
 use std::cell::{Cell, RefCell};
+use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -24,6 +25,7 @@ use crate::app::{
     CopySelection, DecreaseFont, IncreaseFont, OpenPreferences, PasteClipboard, ResetFont,
     SelectAllTerminal,
 };
+use crate::terminal::error::TerminalError;
 use crate::terminal::geometry::{
     adjust_font_size, background_runs, batch_row, line_height_for, selection_span, BgRun,
     CellMetrics, InputGeometry, RowCache, TerminalGeometry, TextRun as CellRun, FONT_SIZE_STEP,
@@ -70,6 +72,11 @@ struct FrameCache {
     background: Hsla,
     row_cache: RowCache,
 }
+
+/// Per-view error report. The renderer never logs by itself; the host decides
+/// presentation. One message per view is enough to keep a broken terminal from
+/// flooding logs on every frame.
+pub type TerminalErrorSink = Arc<dyn Fn(String) + Send + Sync>;
 
 /// Global focus token used by the early raw-keystroke ownership check. The
 /// interceptor never calls into a leased window; it only reads this handle.
@@ -193,6 +200,9 @@ pub struct TerminalView {
     preedit: RefCell<PreeditState>,
     /// Cursor cell from the latest snapshot, used to place IME candidates.
     cursor_cell: Cell<(u16, u16)>,
+    /// Host-owned report path for pane-local recoverable failures.
+    error_sink: RefCell<TerminalErrorSink>,
+    error_reported: Cell<bool>,
 }
 
 impl TerminalView {
@@ -224,6 +234,10 @@ impl TerminalView {
             kitty: RefCell::new(KittyAnimation::default()),
             preedit: RefCell::new(PreeditState::default()),
             cursor_cell: Cell::new((0, 0)),
+            error_sink: RefCell::new(Arc::new(|message| {
+                crate::log::error("terminal", &message);
+            })),
+            error_reported: Cell::new(false),
         };
         // A lost OS release must never strand a scrollbar drag or a held
         // terminal button. Both focus loss and window deactivation cancel it.
@@ -245,6 +259,61 @@ impl TerminalView {
                 this.restart_blink(window, cx);
             }));
         view
+    }
+
+    /// Replace the default reporter. The host can route this to its own log,
+    /// status area or diagnostics without the renderer knowing either.
+    pub fn set_error_sink(&mut self, sink: TerminalErrorSink) {
+        *self.error_sink.borrow_mut() = sink;
+        self.error_reported.set(false);
+    }
+
+    /// Report one recoverable failure for this view. A second failure is
+    /// silently ignored for the lifetime of the view to avoid per-frame chatter;
+    /// state remains pane-local so other views are unaffected.
+    fn report_error_once(&self, message: impl fmt::Display) {
+        if !self.error_reported.replace(true) {
+            (self.error_sink.borrow())(format!("{message}"));
+        }
+    }
+
+    /// Keep the last successfully captured frame. If none exists yet, show the
+    /// ordinary empty terminal surface rather than inventing a second error UI.
+    fn fallback_frame(
+        &self,
+        scrollbar: Option<crate::terminal::selection::ScrollbarGeometry>,
+        metrics: &CellMetrics,
+        rows: u16,
+    ) -> FrameState {
+        let cache = self.cache.borrow();
+        if cache.generation == 0 && cache.shaped_rows.is_empty() {
+            let empty: Vec<Arc<CachedRow>> = (0..usize::from(rows))
+                .map(|_| Arc::new(CachedRow::default()))
+                .collect();
+            FrameState {
+                rows: Arc::new(empty),
+                image_below_background: Arc::new(Vec::new()),
+                image_below_text: Arc::new(Vec::new()),
+                image_above_text: Arc::new(Vec::new()),
+                cursor: None,
+                preedit: None,
+                line_height: px(metrics.line_height),
+                background: cache.background,
+                scrollbar,
+            }
+        } else {
+            FrameState {
+                rows: cache.shaped_rows.clone(),
+                image_below_background: cache.image_below_background.clone(),
+                image_below_text: cache.image_below_text.clone(),
+                image_above_text: cache.image_above_text.clone(),
+                cursor: cache.cursor.clone(),
+                preedit: None,
+                line_height: cache.line_height,
+                background: cache.background,
+                scrollbar,
+            }
+        }
     }
 
     /// Restart the epoch-based cursor timer. No timer runs for a
@@ -1055,10 +1124,39 @@ impl Element for TerminalElement {
         // Ghostty's cell geometry is terminal pixels; GPUI drawing below stays
         // in logical pixels.
         let (cell_width_device, cell_height_device) = geometry.cell_device_pixels();
-        let _ = session
-            .apply_layout_geometry(cols, rows, cell_width_device, cell_height_device)
-            .expect("terminal geometry applied");
-        let snapshot = session.render_snapshot().expect("render snapshot");
+        let outcome = match session.apply_layout_geometry(
+            cols,
+            rows,
+            cell_width_device,
+            cell_height_device,
+        ) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                // Preserve the previous frame and do not mark it complete: the
+                // failed geometry leaves Ghostty dirty for a later recovery.
+                view.report_error_once(TerminalError::Ghostty(error));
+                counters.prepaint_micros(
+                    u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX),
+                );
+                return view.fallback_frame(bar, &metrics, rows);
+            }
+        };
+        // The host owns the PTY grid relationship. A grid change is reported
+        // to the view's host callback in a later composition step; prepaint
+        // still must not know which transport is attached.
+        let _ = outcome;
+        let snapshot = match session.render_snapshot() {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                // Leave Ghostty dirty: no `mark_frame_complete` for a frame we
+                // did not capture. The next successful frame rebuilds it.
+                view.report_error_once(TerminalError::Ghostty(error));
+                counters.prepaint_micros(
+                    u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX),
+                );
+                return view.fallback_frame(bar, &metrics, rows);
+            }
+        };
         // Upload only missing generations and drop stale textures. This never
         // touches Ghostty image pointers past the terminal lock.
         let image_layers = view.images.borrow_mut().prepare(
@@ -1196,6 +1294,15 @@ impl Element for TerminalElement {
         let image_below_text = Arc::new(image_layers.below_text);
         let image_above_text = Arc::new(image_layers.above_text);
 
+        // Only a fully captured frame may clear Ghostty's dirty flags. If the
+        // clean call fails, keep the prior cache and leave the state dirty so
+        // the next frame can rebuild it.
+        if let Err(error) = session.mark_frame_complete() {
+            view.report_error_once(TerminalError::Ghostty(error));
+            counters
+                .prepaint_micros(u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX));
+            return view.fallback_frame(bar, &metrics, rows);
+        }
         let frame_rows = view.cache.borrow().shaped_rows.clone();
         {
             let mut cache = view.cache.borrow_mut();
@@ -1211,7 +1318,6 @@ impl Element for TerminalElement {
             cache.image_below_text = image_below_text.clone();
             cache.image_above_text = image_above_text.clone();
         }
-        session.mark_frame_complete().expect("frame consumed");
         counters.prepaint_micros(u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX));
         if blink_changed {
             let entity = self.view.clone();
@@ -1263,15 +1369,20 @@ impl Element for TerminalElement {
         paint_image_list(window, &prepaint.image_below_text);
         for row in prepaint.rows.iter() {
             for (origin, line) in &row.lines {
-                line.paint(
+                if let Err(error) = line.paint(
                     *origin,
                     prepaint.line_height,
                     TextAlign::Left,
                     None,
                     window,
                     cx,
-                )
-                .expect("paint shaped terminal line");
+                ) {
+                    // A single unshapable row must not crash the pane or the
+                    // window; skip it and report once to the host.
+                    self.view
+                        .read(cx)
+                        .report_error_once(format!("terminal line paint failed: {error}"));
+                }
             }
         }
         paint_image_list(window, &prepaint.image_above_text);
@@ -1279,15 +1390,18 @@ impl Element for TerminalElement {
             window.paint_quad(cursor.clone());
         }
         if let Some((origin, line)) = &prepaint.preedit {
-            line.paint(
+            if let Err(error) = line.paint(
                 *origin,
                 prepaint.line_height,
                 TextAlign::Left,
                 None,
                 window,
                 cx,
-            )
-            .expect("paint local IME preedit");
+            ) {
+                self.view
+                    .read(cx)
+                    .report_error_once(format!("IME preedit paint failed: {error}"));
+            }
         }
         if let Some(bar) = &prepaint.scrollbar {
             // Track and thumb stay a thin view over Ghostty's viewport state.

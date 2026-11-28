@@ -142,7 +142,7 @@ impl PtyResizeMailbox {
     pub fn new(
         apply: Arc<dyn Fn(u16, u16, u32, u32) -> Result<(), PtyError> + Send + Sync>,
         events: PtyEventSink,
-    ) -> Self {
+    ) -> Result<Self, PtyError> {
         let state = Arc::new(PtyResizeState {
             pending: Mutex::new(None),
             wake: Condvar::new(),
@@ -195,14 +195,14 @@ impl PtyResizeMailbox {
                     }
                 }
             })
-            .expect("spawn PTY resize worker");
-        Self {
+            .map_err(|error| PtyError::new("spawn PTY resize worker", error.to_string()))?;
+        Ok(Self {
             state,
             worker: Mutex::new(Some(worker)),
             requested,
             applied,
             failed,
-        }
+        })
     }
 
     /// Update only the pending size and signal the worker. Never blocks on the
@@ -441,7 +441,8 @@ mod tests {
                 Ok(())
             }),
             Arc::new(|_| {}),
-        );
+        )
+        .expect("resize mailbox worker");
         for cols in 80..200u16 {
             mailbox
                 .request(cols, 24, 10, 20)
@@ -475,7 +476,8 @@ mod tests {
         let mailbox = PtyResizeMailbox::new(
             Arc::new(|_, _, _, _| Err(PtyError::new("ResizePseudoConsole", "Access denied"))),
             sink,
-        );
+        )
+        .expect("resize mailbox worker");
         mailbox
             .request(100, 30, 10, 20)
             .expect("request accepted by mailbox");
@@ -500,7 +502,8 @@ mod tests {
 
     #[test]
     fn request_resize_reports_mailbox_shutdown() {
-        let mailbox = PtyResizeMailbox::new(Arc::new(|_, _, _, _| Ok(())), Arc::new(|_| {}));
+        let mailbox = PtyResizeMailbox::new(Arc::new(|_, _, _, _| Ok(())), Arc::new(|_| {}))
+            .expect("resize mailbox worker");
         mailbox.shutdown();
         assert!(mailbox.request(80, 24, 0, 0).is_err());
     }

@@ -290,9 +290,12 @@ fn load_conpty_api() -> ConPtyApi {
             crate::log::log("WARN", "conpty", CONPTY_FALLBACK_WARNING);
         }
     }
-    let module = load_kernel32().expect("kernel32 is always loadable");
-    let (create, resize, close) =
-        resolve_pseudo_console(module).expect("kernel32 exports the ConPTY entry points");
+    // Platform invariant: kernel32 is part of Windows and ConPTY entry points
+    // are present on every supported version. A panic here means the host OS
+    // cannot provide ConPTY at all, not a routine recoverable failure.
+    let module = load_kernel32().expect("kernel32 must load on Windows for ConPTY");
+    let (create, resize, close) = resolve_pseudo_console(module)
+        .expect("kernel32 exports the ConPTY entry points on supported Windows");
     ConPtyApi {
         create,
         resize,
@@ -538,7 +541,7 @@ impl WindowsPty {
 
         let stop = Arc::new(AtomicBool::new(false));
         let reader_thread = Arc::new(Mutex::new(None));
-        let threads = start_threads(
+        let threads = match start_threads(
             &session,
             Arc::clone(&input_write),
             Arc::clone(&output_read),
@@ -546,7 +549,16 @@ impl WindowsPty {
             Arc::clone(&reader_thread),
             Arc::clone(&stop),
             Arc::clone(&events),
-        );
+        ) {
+            Ok(threads) => threads,
+            Err(error) => {
+                // Partial initialization must not leave a child running: the
+                // workers are already torn down by `start_threads`.
+                // SAFETY: `process` is our own child handle, still open here.
+                let _ = unsafe { TerminateProcess(process.as_raw(), 1) };
+                return Err(error);
+            }
+        };
         let size = Arc::new(Mutex::new((config.cols.max(1), config.rows.max(1))));
         let resize_size = Arc::clone(&size);
         let resize_conpty = Arc::clone(&conpty);
@@ -568,7 +580,7 @@ impl WindowsPty {
                 Ok(())
             }),
             resize_events,
-        ));
+        )?);
         Ok(Self {
             _conpty: conpty,
             _input_read: input_read,
@@ -584,6 +596,23 @@ impl WindowsPty {
     }
 }
 
+/// Stop and join a reader that was already started while a later worker failed
+/// to spawn. Cancelling its synchronous read is required: `ReadFile` is
+/// blocking and would otherwise keep the thread (and child handle) alive.
+fn cancel_reader(
+    stop: &AtomicBool,
+    reader_thread: &Mutex<Option<OwnedHandle>>,
+    reader: JoinHandle<()>,
+) {
+    stop.store(true, Ordering::Release);
+    if let Some(handle) = reader_thread.lock().expect("reader slot poisoned").as_ref() {
+        // SAFETY: the handle targets our own reader thread; cancelling its
+        // synchronous I/O unblocks ReadFile with an error.
+        let _ = unsafe { CancelSynchronousIo(handle.as_raw()) };
+    }
+    let _ = reader.join();
+}
+
 fn start_threads(
     session: &Arc<TerminalSession>,
     input_write: Arc<OwnedHandle>,
@@ -592,7 +621,7 @@ fn start_threads(
     reader_thread: Arc<Mutex<Option<OwnedHandle>>>,
     stop: Arc<AtomicBool>,
     events: PtyEventSink,
-) -> Threads {
+) -> Result<Threads, PtyError> {
     let reader_session = Arc::clone(session);
     let reader_output = Arc::clone(&output_read);
     let reader_stop = Arc::clone(&stop);
@@ -657,8 +686,11 @@ fn start_threads(
                     }
                 }
             }
-        })
-        .expect("spawn ConPTY reader");
+        });
+    let reader = match reader {
+        Ok(handle) => handle,
+        Err(error) => return Err(PtyError::new("spawn ConPTY reader", error.to_string())),
+    };
 
     let writer_session = Arc::clone(session);
     let writer_input = Arc::clone(&input_write);
@@ -703,8 +735,14 @@ fn start_threads(
                     }
                 }
             }
-        })
-        .expect("spawn ConPTY writer");
+        });
+    let writer = match writer {
+        Ok(handle) => handle,
+        Err(error) => {
+            cancel_reader(&stop, &reader_thread, reader);
+            return Err(PtyError::new("spawn ConPTY writer", error.to_string()));
+        }
+    };
 
     let waiter_session = Arc::clone(session);
     let waiter_process = Arc::clone(&process);
@@ -733,14 +771,23 @@ fn start_threads(
                 // synchronous I/O unblocks ReadFile with an error.
                 let _ = unsafe { CancelSynchronousIo(handle.as_raw()) };
             }
-        })
-        .expect("spawn child waiter");
+        });
+    let waiter = match waiter {
+        Ok(handle) => handle,
+        Err(error) => {
+            cancel_reader(&stop, &reader_thread, reader);
+            // Wake the writer so it can observe the failed start and exit.
+            session.close_writer();
+            let _ = writer.join();
+            return Err(PtyError::new("spawn child waiter", error.to_string()));
+        }
+    };
 
-    Threads {
+    Ok(Threads {
         reader,
         writer,
         waiter,
-    }
+    })
 }
 
 impl PlatformPty for WindowsPty {

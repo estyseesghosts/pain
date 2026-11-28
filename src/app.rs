@@ -14,7 +14,8 @@ use crate::config::{parse_args, usage, version_line, Config};
 use crate::log;
 use crate::platform::profiles::{self, ShellProfile};
 use crate::platform::{
-    default_shell, spawn_pty, PlatformPty, PtyConfig, PtyEvent, PtyEventSink, ShellCommand,
+    default_shell, spawn_pty, PlatformPty, PtyConfig, PtyError, PtyEvent, PtyEventSink,
+    ShellCommand,
 };
 use crate::preferences::{self, SessionGlobal, ShellProfilesGlobal};
 use crate::terminal::fixtures::Fixture;
@@ -145,15 +146,19 @@ pub fn run() {
             scrollback_bytes: config.scrollback_bytes,
             ..SessionConfig::default()
         };
-        let session = Arc::new(
-            TerminalSession::new_with_config(
-                session_config,
-                Box::new(move || {
-                    let _ = wake_tx.try_send(());
-                }),
-            )
-            .expect("terminal session created"),
-        );
+        let session = match TerminalSession::new_with_config(
+            session_config,
+            Box::new(move || {
+                let _ = wake_tx.try_send(());
+            }),
+        ) {
+            Ok(session) => Arc::new(session),
+            Err(error) => {
+                log::error("startup", &format!("terminal session failed: {error}"));
+                cx.quit();
+                return;
+            }
+        };
         cx.set_global(SessionGlobal(Arc::clone(&session)));
         preferences::apply(cx);
         // Terminal replies and OSC title changes are effect callbacks. They
@@ -161,11 +166,13 @@ pub fn run() {
         let (title_tx, title_rx) = async_channel::bounded::<()>(1);
         let titles = Arc::new(TitleMailbox::new(title_tx));
         let title_sink = Arc::clone(&titles);
-        session
-            .install_callbacks(Box::new(move |title| {
-                title_sink.post(title);
-            }))
-            .expect("install terminal effect callbacks");
+        if let Err(error) = session.install_callbacks(Box::new(move |title| {
+            title_sink.post(title);
+        })) {
+            log::error("startup", &format!("callback installation failed: {error}"));
+            cx.quit();
+            return;
+        }
 
         let stop = Arc::new(AtomicBool::new(false));
         let pty_holder: Arc<Mutex<Option<Box<dyn PlatformPty>>>> = Arc::new(Mutex::new(None));
@@ -192,8 +199,10 @@ pub fn run() {
                 // The first frame renders this fixture unconditionally from an
                 // empty cache, so discard its initial wakeup here.
                 let _ = session.take_wakeup();
-            } else {
-                start_producer(Arc::clone(&session), Arc::clone(&stop));
+            } else if let Err(error) = start_producer(Arc::clone(&session), Arc::clone(&stop)) {
+                log::error("fixture", &format!("could not start producer: {error}"));
+                cx.quit();
+                return;
             }
         }
 
@@ -205,15 +214,21 @@ pub fn run() {
             cx,
         );
         let holder_for_view = Arc::clone(&pty_holder);
-        let view = open_window(options, cx, |window: &mut Window, cx| {
+        let view = match open_window(options, cx, |window: &mut Window, cx| {
             let terminal = cx.new(|cx| TerminalView::new(Arc::clone(&session), window, cx));
             cx.new(|_| AppView {
                 terminal,
                 pty: holder_for_view,
                 title: SharedString::from("pain"),
             })
-        })
-        .expect("open terminal window");
+        }) {
+            Ok(view) => view,
+            Err(error) => {
+                log::error("startup", &format!("window creation failed: {error:?}"));
+                cx.quit();
+                return;
+            }
+        };
 
         if let Some(size) = config.font_size {
             let _ = view.update(cx, |app, _, cx| {
@@ -272,7 +287,13 @@ pub fn run() {
                     }
                 });
             })
-            .expect("schedule shell start");
+            .unwrap_or_else(|error| {
+                log::error(
+                    "shell",
+                    &format!("could not schedule shell start: {error:?}"),
+                );
+                cx.quit();
+            });
         }
 
         cx.bind_keys([
@@ -446,7 +467,7 @@ impl Render for AppView {
 
 /// Synthetic byte producer: exactly the entry point a ConPTY/POSIX reader will
 /// use, but with fixture chunks instead of OS output.
-fn start_producer(session: Arc<TerminalSession>, stop: Arc<AtomicBool>) {
+fn start_producer(session: Arc<TerminalSession>, stop: Arc<AtomicBool>) -> Result<(), PtyError> {
     std::thread::Builder::new()
         .name("pain-fixture-producer".into())
         .spawn(move || {
@@ -458,7 +479,8 @@ fn start_producer(session: Arc<TerminalSession>, stop: Arc<AtomicBool>) {
                 std::thread::sleep(Duration::from_millis(2));
             }
         })
-        .expect("spawn synthetic fixture producer");
+        .map(|_| ())
+        .map_err(|error| PtyError::new("spawn fixture producer", error.to_string()))
 }
 
 #[cfg(test)]

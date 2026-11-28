@@ -245,13 +245,24 @@ impl LinuxPty {
 
         let master = Arc::new(MasterFd::new(master_fd));
         let stop = Arc::new(AtomicBool::new(false));
-        let threads = start_threads(
+        let threads = match start_threads(
             &session,
             Arc::clone(&master),
             Arc::clone(&stop),
             child.id(),
             Arc::clone(&events),
-        );
+        ) {
+            Ok(threads) => threads,
+            Err(error) => {
+                // Workers are torn down before returning; kill the child's
+                // private process group so it cannot outlive a failed spawn.
+                // SAFETY: negative pid targets only our own setsid group.
+                unsafe {
+                    libc::kill(-(child.id() as libc::pid_t), libc::SIGHUP);
+                }
+                return Err(error);
+            }
+        };
 
         let size = Arc::new(Mutex::new(initial));
         let resize_master = Arc::clone(&master);
@@ -281,7 +292,7 @@ impl LinuxPty {
                 Ok(())
             }),
             resize_events,
-        ));
+        )?);
         Ok(Self {
             _master: master,
             child: child.id() as pid_t,
@@ -300,7 +311,7 @@ fn start_threads(
     stop: Arc<AtomicBool>,
     child: u32,
     events: PtyEventSink,
-) -> Threads {
+) -> Result<Threads, PtyError> {
     let reader_session = Arc::clone(session);
     let reader_master = Arc::clone(&master);
     let reader_stop = Arc::clone(&stop);
@@ -341,8 +352,11 @@ fn start_threads(
                     }
                 }
             }
-        })
-        .expect("spawn PTY reader");
+        });
+    let reader = match reader {
+        Ok(handle) => handle,
+        Err(error) => return Err(PtyError::new("spawn PTY reader", error.to_string())),
+    };
 
     let writer_session = Arc::clone(session);
     let writer_master = Arc::clone(&master);
@@ -362,8 +376,17 @@ fn start_threads(
                     break;
                 }
             }
-        })
-        .expect("spawn PTY writer");
+        });
+    let writer = match writer {
+        Ok(handle) => handle,
+        Err(error) => {
+            // The poll loop checks `stop` at most 100 ms later; join it rather
+            // than leaving a reader holding the master fd.
+            stop.store(true, Ordering::Release);
+            let _ = reader.join();
+            return Err(PtyError::new("spawn PTY writer", error.to_string()));
+        }
+    };
 
     let waiter_session = Arc::clone(session);
     let waiter_events = Arc::clone(&events);
@@ -384,14 +407,23 @@ fn start_threads(
             // event becomes the authoritative lifecycle notification.
             waiter_session.mark_process_exited();
             waiter_events(PtyEvent::ProcessExited { exit_code });
-        })
-        .expect("spawn child waiter");
+        });
+    let waiter = match waiter {
+        Ok(handle) => handle,
+        Err(error) => {
+            stop.store(true, Ordering::Release);
+            session.close_writer();
+            let _ = reader.join();
+            let _ = writer.join();
+            return Err(PtyError::new("spawn child waiter", error.to_string()));
+        }
+    };
 
-    Threads {
+    Ok(Threads {
         reader,
         writer,
         waiter,
-    }
+    })
 }
 
 impl PlatformPty for LinuxPty {
