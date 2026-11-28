@@ -10,7 +10,7 @@ use gpui::{
     HeadlessAppContext, NoopTextSystem, Render, Window,
 };
 use pain_terminal_core::session::{NoopWakeup, TerminalSession};
-use pain_terminal_gpui::{IncreaseFont, TerminalFont, TerminalView};
+use pain_terminal_gpui::{IncreaseFont, SelectAllTerminal, TerminalFont, TerminalView};
 
 fn serial() -> MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -48,8 +48,12 @@ impl Render for TwoPanes {
     }
 }
 
-fn make_session() -> Arc<TerminalSession> {
-    Arc::new(TerminalSession::new(80, 24, Box::new(NoopWakeup)).expect("session"))
+fn make_session(marker: &[u8]) -> Arc<TerminalSession> {
+    let session = Arc::new(TerminalSession::new(80, 24, Box::new(NoopWakeup)).expect("session"));
+    // Distinguishable content so a session-mutating action is observable per
+    // pane rather than only through view-local state.
+    session.write_vt(marker);
+    session
 }
 
 #[test]
@@ -57,13 +61,15 @@ fn two_views_keep_independent_focus_and_session_state() {
     run_render_test(|| {
         let mut app = HeadlessAppContext::new(Arc::new(NoopTextSystem::new()));
 
-        let first_session = make_session();
-        let second_session = Arc::clone(&first_session);
+        let first_session = make_session(b"FIRST_PANE_MARKER\r\n");
+        let second_session = make_session(b"SECOND_PANE_MARKER\r\n");
+        let first_for_view = Arc::clone(&first_session);
+        let second_for_view = Arc::clone(&second_session);
         let handle = app
             .open_window(size(px(800.0), px(400.0)), move |window, cx| {
                 let first = cx.new(|cx| {
                     TerminalView::new(
-                        Arc::clone(&first_session),
+                        first_for_view,
                         TerminalFont::new("monospace", 14.0),
                         window,
                         cx,
@@ -71,7 +77,7 @@ fn two_views_keep_independent_focus_and_session_state() {
                 });
                 let second = cx.new(|cx| {
                     TerminalView::new(
-                        second_session,
+                        second_for_view,
                         TerminalFont::new("monospace", 14.0),
                         window,
                         cx,
@@ -109,12 +115,46 @@ fn two_views_keep_independent_focus_and_session_state() {
         })
         .expect("verify first pane focus");
 
-        // A local action reaches only the focused pane's session.
+        // An intrinsic action with a session-side effect (select-all) must
+        // reach only the focused pane's TerminalSession, not a shared one.
+        // Initially neither session has a selection.
+        assert!(
+            first_session
+                .copy_selection()
+                .expect("first selection")
+                .is_empty(),
+            "first pane starts with no selection"
+        );
+        assert!(
+            second_session
+                .copy_selection()
+                .expect("second selection")
+                .is_empty(),
+            "second pane starts with no selection"
+        );
+        app.update_window(window, |_, window, cx| {
+            window.dispatch_action(Box::new(SelectAllTerminal), cx);
+            window.draw(cx).clear(cx);
+        })
+        .expect("dispatch select-all to first pane");
+        app.run_until_parked();
+        let first_text = first_session.copy_selection().expect("first selection");
+        let second_text = second_session.copy_selection().expect("second selection");
+        assert!(
+            first_text.contains("FIRST_PANE_MARKER"),
+            "focused pane's session must receive select-all: {first_text:?}"
+        );
+        assert!(
+            second_text.is_empty(),
+            "unfocused pane's session must be untouched: {second_text:?}"
+        );
+
+        // View-local state remains independent too.
         app.update_window(window, |_, window, cx| {
             window.dispatch_action(Box::new(IncreaseFont), cx);
             window.draw(cx).clear(cx);
         })
-        .expect("dispatch to first pane");
+        .expect("dispatch font increase to first pane");
         app.run_until_parked();
         let (first_size, second_size) = app.update(|cx: &mut App| {
             (
@@ -125,17 +165,34 @@ fn two_views_keep_independent_focus_and_session_state() {
         assert!(first_size > 14.0, "focused pane must receive the action");
         assert_eq!(second_size, 14.0, "unfocused pane must not change");
 
-        // Focusing the other pane routes the next action to it instead.
+        // Focusing the other pane routes the next session action to it.
         app.update_window(window, |_, window, cx| {
             window.focus(&second_focus, cx);
             window.draw(cx).clear(cx);
         })
         .expect("focus second pane");
         app.update_window(window, |_, window, cx| {
+            window.dispatch_action(Box::new(SelectAllTerminal), cx);
+            window.draw(cx).clear(cx);
+        })
+        .expect("dispatch select-all to second pane");
+        app.run_until_parked();
+        let second_text = second_session.copy_selection().expect("second selection");
+        let first_text_after = first_session.copy_selection().expect("first selection");
+        assert!(
+            second_text.contains("SECOND_PANE_MARKER"),
+            "focused second pane's session must receive select-all: {second_text:?}"
+        );
+        assert!(
+            first_text_after == first_text,
+            "first pane's session must keep its own selection"
+        );
+
+        app.update_window(window, |_, window, cx| {
             window.dispatch_action(Box::new(IncreaseFont), cx);
             window.draw(cx).clear(cx);
         })
-        .expect("dispatch to second pane");
+        .expect("dispatch font increase to second pane");
         app.run_until_parked();
         let (first_after, second_after) = app.update(|cx: &mut App| {
             (
