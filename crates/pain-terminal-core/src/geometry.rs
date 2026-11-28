@@ -158,15 +158,6 @@ impl TerminalGeometry {
         self.metrics().span_bounds(self.origin, col, row, cells)
     }
 
-    /// Pixel size of the content area, used by Ghostty's mouse encoder.
-    #[must_use]
-    pub fn content_size_px(&self) -> (u32, u32) {
-        (
-            (f32::from(self.cols) * self.cell_width).max(1.0) as u32,
-            (f32::from(self.rows) * self.cell_height).max(1.0) as u32,
-        )
-    }
-
     /// Cell size in terminal/device pixels. Ghostty's `CELL_OFFSET_*`,
     /// `PIXEL_WIDTH/HEIGHT` and size-report geometry all use these units, while
     /// GPUI drawing coordinates stay in logical pixels.
