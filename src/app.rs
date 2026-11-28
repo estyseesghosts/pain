@@ -11,6 +11,7 @@ use silvestris::chrome::{open_window, window_options, WindowFrame};
 use silvestris::ThemePreference;
 
 use crate::config::{parse_args, usage, version_line, Config};
+use crate::gpui::render::TerminalView;
 use crate::log;
 use crate::platform::profiles::{self, ShellProfile};
 use crate::platform::{
@@ -19,7 +20,6 @@ use crate::platform::{
 };
 use crate::preferences::{self, SessionGlobal, ShellProfilesGlobal};
 use crate::terminal::fixtures::Fixture;
-use crate::terminal::render::TerminalView;
 use crate::terminal::session::{SessionConfig, TerminalSession};
 
 // Deliberately whitelisted app commands. Every other key reaches the terminal.
@@ -336,7 +336,7 @@ pub fn run() {
         // a window that GPUI has already leased for key dispatch. The actual
         // command is dispatched on the focused view after this dispatch ends.
         cx.intercept_keystrokes(move |event: &gpui::KeystrokeEvent, window, cx| {
-            let Some(focus) = cx.try_global::<crate::terminal::render::TerminalFocusGlobal>()
+            let Some(focus) = cx.try_global::<crate::gpui::render::TerminalFocusGlobal>()
             else {
                 return;
             };

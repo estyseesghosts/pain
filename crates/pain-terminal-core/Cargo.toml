@@ -1,0 +1,13 @@
+[package]
+name = "pain-terminal-core"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.98"
+description = "Ghostty-owned terminal semantics without GPUI, PTY or application policy"
+publish = false
+
+[dependencies]
+ghostty-vt-sys = { path = "../ghostty-vt-sys" }
+serde = { version = "1", features = ["derive"] }
+# Only the PNG decoder required by Ghostty's process-global decode callback.
+image = { version = "=0.25.10", default-features = false, features = ["png"] }

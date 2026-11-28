@@ -16,7 +16,7 @@ use std::sync::{Condvar, Mutex};
 
 /// Default implementation limit for pending outbound bytes. This is a resource
 /// guard, not a user preference; callers can override it through
-/// [`SessionConfig`](crate::terminal::session::SessionConfig) or
+/// [`SessionConfig`](crate::session::SessionConfig) or
 /// [`WriterQueue::with_byte_budget`].
 pub const DEFAULT_WRITER_BYTE_BUDGET: usize = 4 * 1024 * 1024;
 

@@ -6,7 +6,7 @@
 //! *display width* is a rendering policy here; the grapheme string itself is
 //! always Ghostty's, so this is not a second terminal parser.
 
-use crate::terminal::ghostty::{Cell, ColorSpec, RowSelection};
+use crate::ghostty::{Cell, ColorSpec, RowSelection};
 
 /// Font-size policy for the Ctrl+= / Ctrl+- commands. Kept here so the clamp
 /// is testable without a GPUI window.
@@ -481,7 +481,7 @@ mod sys {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::terminal::ghostty::Style;
+    use crate::ghostty::Style;
 
     fn cell(text: &str, bold: bool, bg: Option<ColorSpec>) -> Cell {
         Cell {

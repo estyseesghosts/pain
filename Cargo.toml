@@ -8,14 +8,16 @@ publish = false
 
 [workspace]
 resolver = "2"
-members = ["crates/ghostty-vt-sys"]
+members = ["crates/ghostty-vt-sys", "crates/pain-terminal-core"]
 
 [dependencies]
 ghostty-vt-sys = { path = "crates/ghostty-vt-sys" }
+pain-terminal-core = { path = "crates/pain-terminal-core" }
 serde = { version = "1", features = ["derive"] }
-# Already in the lockfile through GPUI. Pain only uses the PNG decoder, which
-# feeds Ghostty's process-global GhosttySysDecodePngFn.
+# The GPUI image cache decodes frames for display; the PNG decoder used by
+# Ghostty's system callback lives in pain-terminal-core.
 image = { version = "=0.25.10", default-features = false, features = ["png"] }
+
 
 [build-dependencies]
 # Only used on MSVC hosts to locate the Windows SDK's rc.exe for the icon.

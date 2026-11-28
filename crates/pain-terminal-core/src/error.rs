@@ -4,8 +4,8 @@
 
 use std::fmt;
 
-use crate::terminal::ghostty::GhosttyError;
-use crate::terminal::writer::WriterQueueError;
+use crate::ghostty::GhosttyError;
+use crate::writer::WriterQueueError;
 
 /// A recoverable failure reported by terminal-session operations.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

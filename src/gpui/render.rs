@@ -25,12 +25,12 @@ use crate::app::{
     CopySelection, DecreaseFont, IncreaseFont, OpenPreferences, PasteClipboard, ResetFont,
     SelectAllTerminal,
 };
+use crate::gpui::images::{ImageCache, ImageDraw};
 use crate::terminal::geometry::{
     adjust_font_size, background_runs, batch_row, line_height_for, selection_span, BgRun,
     CellMetrics, InputGeometry, RowCache, TerminalGeometry, TextRun as CellRun, FONT_SIZE_STEP,
 };
 use crate::terminal::ghostty::{Cursor, KeyEvent};
-use crate::terminal::images::{ImageCache, ImageDraw};
 use crate::terminal::input::{
     is_app_shortcut_with_char, key_for_keystroke, key_release_for_keystroke, mouse_escape,
     Modifiers as InputModifiers, MouseAction, MouseButton as PtyButton,

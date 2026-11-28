@@ -3660,9 +3660,19 @@ dependencies = [
  "gpui_platform",
  "image",
  "libc",
+ "pain-terminal-core",
  "serde",
  "silvestris",
  "windows 0.61.3",
+]
+
+[[package]]
+name = "pain-terminal-core"
+version = "0.1.0"
+dependencies = [
+ "ghostty-vt-sys",
+ "image",
+ "serde",
 ]
 
 [[package]]

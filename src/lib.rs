@@ -1,16 +1,18 @@
 //! Pain: a minimal Windows/Linux terminal.
 //!
-//! M0 proved the `libghostty-vt` dependency from Rust. M1 adds a static GPUI
-//! terminal element inside one Silvestris window; M2 adds the shared session,
-//! two-phase render update and coalesced wakeup model. Platform PTY transport
-//! (M3/M4) is not part of this build.
+//! Terminal semantics live in `pain-terminal-core`. This crate owns the
+//! application: shell/profile policy, preferences, Silvestris composition and
+//! the GPUI surface. PTY transport and the GPUI view are extracted into their
+//! own crates after the terminal boundary is clean.
 
 #[cfg(feature = "shell")]
 pub mod app;
 pub mod config;
+#[cfg(feature = "shell")]
+pub mod gpui;
 pub mod log;
 pub mod platform;
 #[cfg(feature = "shell")]
 pub mod preferences;
-pub mod terminal;
+pub use pain_terminal_core as terminal;
 pub mod version;

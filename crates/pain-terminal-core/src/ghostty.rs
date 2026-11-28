@@ -19,7 +19,7 @@ use std::sync::{Arc, OnceLock};
 
 use ghostty_vt_sys as sys;
 
-use crate::terminal::writer::WriterQueue;
+use crate::writer::WriterQueue;
 
 /// Per-row selection range in viewport columns, queried once per row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,7 +46,7 @@ pub struct Colors {
 }
 
 /// A Ghostty call failure. The raw C result is private: consumers use the
-/// stable [`TerminalError`](crate::terminal::TerminalError) contract instead.
+/// stable [`TerminalError`](crate::TerminalError) contract instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GhosttyError(sys::GhosttyResult);
 
@@ -935,7 +935,7 @@ impl GhosttyTerminal {
     /// OSC overrides from child programs still take precedence at runtime.
     pub fn set_colors(
         &mut self,
-        colors: Option<&crate::terminal::palette::Palette>,
+        colors: Option<&crate::palette::Palette>,
     ) -> Result<(), GhosttyError> {
         let Some(colors) = colors else {
             // Setting explicit defaults matters: clearing the options leaves
@@ -977,7 +977,7 @@ impl GhosttyTerminal {
                 .store(sys::GHOSTTY_COLOR_SCHEME_DARK as u8, Ordering::Release);
             return Ok(());
         };
-        let rgb = |c: crate::terminal::palette::Rgb| sys::GhosttyColorRgb {
+        let rgb = |c: crate::palette::Rgb| sys::GhosttyColorRgb {
             r: c.r,
             g: c.g,
             b: c.b,

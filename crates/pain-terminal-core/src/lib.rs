@@ -1,22 +1,22 @@
-//! Terminal engine layer. Ghostty owns all terminal semantics; this module
-//! only owns the handles and translates data into plain Rust values.
+//! Terminal semantics and Ghostty adaptation.
+//!
+//! This crate owns terminal parsing state, input translation, geometry,
+//! instrumentation and the outbound byte queue. It does **not** know about
+//! GPUI, PTYs, shells, preferences, logging frameworks or any application.
+//! Ghostty remains authoritative for the screen, scrollback, modes and
+//! selection; this crate only translates between Ghostty and plain Rust data.
 
 pub mod counters;
 pub mod error;
 pub mod ghostty;
+pub mod session;
+pub mod writer;
 
 pub mod fixtures;
 pub mod geometry;
 pub mod input;
 pub mod palette;
 pub mod selection;
-pub mod session;
-pub mod writer;
-
-#[cfg(feature = "shell")]
-pub mod images;
-#[cfg(feature = "shell")]
-pub mod render;
 
 // Narrow public surface: consumers get terminal-domain values and session
 // operations, never raw Ghostty handles or C constants.
@@ -27,7 +27,7 @@ pub use ghostty::{
     RenderSnapshot, RowSelection, ScrollbarState, Style,
 };
 pub use session::{
-    AppliedGeometry, CountersSnapshot, MouseInput, MouseRoute, ResizeOutcome, ScrollOutcome,
-    SessionConfig, TerminalSession, WakeupSink,
+    AppliedGeometry, CountersHandle, CountersSnapshot, MouseInput, MouseRoute, ResizeOutcome,
+    ScrollOutcome, SessionConfig, TerminalSession, WakeupSink,
 };
 pub use writer::{WriterQueue, WriterQueueError, WriterQueueState, WriterStats};

@@ -12,15 +12,15 @@ use std::time::Instant;
 
 use ghostty_vt_sys as sys;
 
-use crate::terminal::counters::Counters;
-pub use crate::terminal::counters::{CountersHandle, CountersSnapshot};
-use crate::terminal::error::TerminalError;
-use crate::terminal::ghostty::{
+use crate::counters::Counters;
+pub use crate::counters::{CountersHandle, CountersSnapshot};
+use crate::error::TerminalError;
+use crate::ghostty::{
     CallbackRegistration, GhosttyRenderState, GhosttyTerminal, KeyEncoder, KeyEvent, KittyConfig,
     KittyImagePixels, KittyImageRead, MouseEncoder, MouseEvent, RenderSnapshot, SelectionGesture,
     SizeReportState,
 };
-use crate::terminal::writer::{WriterQueue, WriterQueueError};
+use crate::writer::{WriterQueue, WriterQueueError};
 
 /// UI notification hook. Keep this UI-agnostic: the GPUI integration supplies
 /// a sink that posts to the foreground executor, headless tests use a counter.
@@ -99,7 +99,7 @@ impl WakeState {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ScrollOutcome {
     pub moved: bool,
-    pub scrollbar: crate::terminal::ghostty::ScrollbarState,
+    pub scrollbar: crate::ghostty::ScrollbarState,
 }
 
 /// One pointer event, in the same terms Ghostty's mouse encoder expects.
@@ -145,7 +145,7 @@ impl Default for SessionConfig {
             rows: 24,
             scrollback_lines: 10_000,
             scrollback_bytes: 16 * 1024 * 1024,
-            writer_byte_budget: crate::terminal::writer::DEFAULT_WRITER_BYTE_BUDGET,
+            writer_byte_budget: crate::writer::DEFAULT_WRITER_BYTE_BUDGET,
             kitty: KittyConfig::default(),
         }
     }
@@ -640,7 +640,7 @@ impl TerminalSession {
             let terminal = self.terminal.lock().expect("terminal mutex poisoned");
             terminal.mode(sys::GHOSTTY_MODE_BRACKETED_PASTE)?
         };
-        let bytes = crate::terminal::ghostty::paste_encode(text, bracketed)?;
+        let bytes = crate::ghostty::paste_encode(text, bracketed)?;
         self.enqueue_writer(bytes.clone())?;
         Ok(bytes)
     }
@@ -650,7 +650,7 @@ impl TerminalSession {
     /// rows even when no PTY output arrived.
     pub fn set_colors(
         &self,
-        colors: Option<&crate::terminal::palette::Palette>,
+        colors: Option<&crate::palette::Palette>,
     ) -> Result<(), TerminalError> {
         {
             let mut terminal = self.terminal.lock().expect("terminal mutex poisoned");
@@ -786,7 +786,7 @@ impl TerminalSession {
 
     /// Current scrollbar geometry, read from Ghostty on demand (no second
     /// scroll model and no GPUI `ScrollHandle` as source of truth).
-    pub fn scrollbar(&self) -> Result<crate::terminal::ghostty::ScrollbarState, TerminalError> {
+    pub fn scrollbar(&self) -> Result<crate::ghostty::ScrollbarState, TerminalError> {
         let terminal = self.terminal.lock().expect("terminal mutex poisoned");
         Ok(terminal.scrollbar()?.into())
     }
@@ -1048,7 +1048,7 @@ mod tests {
         );
         assert_eq!(
             session.writer_queue().state(),
-            crate::terminal::writer::WriterQueueState::Failed
+            crate::writer::WriterQueueState::Failed
         );
         assert_eq!(session.snapshot_counters().writer_bytes_rejected, 1);
         // Once failed, ordinary input is rejected instead of silently queued.

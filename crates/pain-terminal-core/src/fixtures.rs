@@ -1,7 +1,7 @@
 //! Canned VT fixtures for M1 rendering and M2 stress tests. No live shell is
 //! involved: every byte here is produced locally and fed to `GhosttyTerminal`.
 
-use crate::terminal::ghostty::GhosttyTerminal;
+use crate::ghostty::GhosttyTerminal;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Fixture {
@@ -56,7 +56,7 @@ impl Fixture {
 
     /// Feed a fixture through the M2 session, preserving Ghostty-owned
     /// selection state where the fixture asks for it.
-    pub fn apply_session(self, session: &crate::terminal::session::TerminalSession) {
+    pub fn apply_session(self, session: &crate::session::TerminalSession) {
         session.write_vt(self.bytes());
         if self == Fixture::Selection {
             session
@@ -94,7 +94,7 @@ impl Fixture {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::terminal::ghostty::GhosttyRenderState;
+    use crate::ghostty::GhosttyRenderState;
 
     #[test]
     fn every_fixture_renders_a_snapshot() {
@@ -127,7 +127,7 @@ mod tests {
         let snapshot = state.snapshot().expect("snapshot");
         assert_eq!(
             snapshot.selections[0],
-            Some(crate::terminal::ghostty::RowSelection {
+            Some(crate::ghostty::RowSelection {
                 start_x: 0,
                 end_x: 7
             })
