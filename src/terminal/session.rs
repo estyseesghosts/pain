@@ -10,11 +10,13 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use ghostty_vt_sys as sys;
+
 use crate::terminal::error::TerminalError;
 use crate::terminal::ghostty::{
-    ghostty_vt_sys as sys, CallbackRegistration, GhosttyError, GhosttyRenderState, GhosttyTerminal,
-    KeyEncoder, KeyEvent, KittyConfig, KittyImagePixels, KittyImageRead, MouseEncoder, MouseEvent,
-    RenderSnapshot, SelectionGesture, SizeReportState,
+    CallbackRegistration, GhosttyRenderState, GhosttyTerminal, KeyEncoder, KeyEvent, KittyConfig,
+    KittyImagePixels, KittyImageRead, MouseEncoder, MouseEvent, RenderSnapshot, SelectionGesture,
+    SizeReportState,
 };
 use crate::terminal::writer::{WriterQueue, WriterQueueError};
 
@@ -42,7 +44,7 @@ type PtyResize = Arc<dyn Fn(u16, u16, u32, u32) + Send + Sync>;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ScrollOutcome {
     pub moved: bool,
-    pub scrollbar: sys::GhosttyTerminalScrollbar,
+    pub scrollbar: crate::terminal::ghostty::ScrollbarState,
 }
 
 /// One pointer event, in the same terms Ghostty's mouse encoder expects.
@@ -367,7 +369,7 @@ pub struct TerminalSession {
 }
 
 impl TerminalSession {
-    pub fn new(cols: u16, rows: u16, wakeup: Box<dyn WakeupSink>) -> Result<Self, GhosttyError> {
+    pub fn new(cols: u16, rows: u16, wakeup: Box<dyn WakeupSink>) -> Result<Self, TerminalError> {
         Self::new_with_config(
             SessionConfig {
                 cols,
@@ -381,7 +383,7 @@ impl TerminalSession {
     pub fn new_with_config(
         config: SessionConfig,
         wakeup: Box<dyn WakeupSink>,
-    ) -> Result<Self, GhosttyError> {
+    ) -> Result<Self, TerminalError> {
         let size_report = Arc::new(SizeReportState::new(config.cols, config.rows));
         let mut terminal = GhosttyTerminal::new(config.cols, config.rows)?;
         let kitty = config.kitty.clone().validated();
@@ -511,7 +513,7 @@ impl TerminalSession {
 
     /// Two-phase render-state update. The terminal lock is held only across
     /// `begin_update`; shaping and painting happen after it is released.
-    pub fn render_snapshot(&self) -> Result<RenderSnapshot, GhosttyError> {
+    pub fn render_snapshot(&self) -> Result<RenderSnapshot, TerminalError> {
         let mut state = self.state.lock().expect("render-state mutex poisoned");
         {
             let terminal = self.terminal.lock().expect("terminal mutex poisoned");
@@ -573,11 +575,12 @@ impl TerminalSession {
     }
 
     /// Clear dirty flags only after the whole frame was consumed successfully.
-    pub fn mark_frame_complete(&self) -> Result<(), GhosttyError> {
-        self.state
+    pub fn mark_frame_complete(&self) -> Result<(), TerminalError> {
+        Ok(self
+            .state
             .lock()
             .expect("render-state mutex poisoned")
-            .clean()
+            .clean()?)
     }
 
     /// Current time on the terminal's single monotonic Kitty clock.
@@ -594,7 +597,7 @@ impl TerminalSession {
 
     /// Query the live policy from Ghostty: storage limit, file medium, shared
     /// memory medium. Used by policy tests and the documented smoke gate.
-    pub fn kitty_policy_state(&self) -> Result<(u64, bool, bool), GhosttyError> {
+    pub fn kitty_policy_state(&self) -> Result<(u64, bool, bool), TerminalError> {
         let terminal = self.terminal.lock().expect("terminal mutex poisoned");
         Ok((
             terminal.kitty_storage_limit()?,
@@ -606,7 +609,7 @@ impl TerminalSession {
     /// Advance Kitty animation by at most one frame. Demand-driven: callers
     /// schedule the returned deadline rather than polling. Returns the next
     /// absolute time on [`Self::kitty_clock_ms`], or `None` when nothing plays.
-    pub fn tick_kitty_animation(&self, now_ms: u64) -> Result<Option<u64>, GhosttyError> {
+    pub fn tick_kitty_animation(&self, now_ms: u64) -> Result<Option<u64>, TerminalError> {
         let start = Instant::now();
         let mut terminal = self.terminal.lock().expect("terminal mutex poisoned");
         Counters::add(&self.counters.terminal_lock_acquisitions, 1);
@@ -688,7 +691,7 @@ impl TerminalSession {
         rows: u16,
         cell_width_px: u32,
         cell_height_px: u32,
-    ) -> Result<ResizeOutcome, GhosttyError> {
+    ) -> Result<ResizeOutcome, TerminalError> {
         Counters::add(&self.counters.bounds_changes_observed, 1);
         let requested = AppliedGeometry {
             cols,
@@ -735,7 +738,7 @@ impl TerminalSession {
                     previous.cell_height_px,
                 );
                 *self.geometry.lock().expect("geometry mutex poisoned") = previous;
-                return Err(error);
+                return Err(error.into());
             }
         }
         Counters::add(&self.counters.ghostty_geometry_updates, 1);
@@ -771,7 +774,7 @@ impl TerminalSession {
         rows: u16,
         cell_width_px: u32,
         cell_height_px: u32,
-    ) -> Result<ResizeOutcome, GhosttyError> {
+    ) -> Result<ResizeOutcome, TerminalError> {
         let outcome = self.apply_layout_geometry(cols, rows, cell_width_px, cell_height_px)?;
         if outcome.changed() {
             self.schedule_wakeup();
@@ -804,9 +807,9 @@ impl TerminalSession {
     }
 
     /// Install a Ghostty-owned selection for the M1 selection fixture.
-    pub fn set_row_selection(&self, y: u16, start_x: u16, end_x: u16) -> Result<(), GhosttyError> {
+    pub fn set_row_selection(&self, y: u16, start_x: u16, end_x: u16) -> Result<(), TerminalError> {
         let mut terminal = self.terminal.lock().expect("terminal mutex poisoned");
-        terminal.set_row_selection(y, start_x, end_x)
+        Ok(terminal.set_row_selection(y, start_x, end_x)?)
     }
 
     /// Bracketed-paste policy comes from the terminal's current mode, never
@@ -827,7 +830,7 @@ impl TerminalSession {
     pub fn set_colors(
         &self,
         colors: Option<&crate::terminal::palette::Palette>,
-    ) -> Result<(), GhosttyError> {
+    ) -> Result<(), TerminalError> {
         {
             let mut terminal = self.terminal.lock().expect("terminal mutex poisoned");
             terminal.set_colors(colors)?;
@@ -882,7 +885,7 @@ impl TerminalSession {
     pub fn install_callbacks(
         &self,
         on_title: Box<dyn Fn(String) + Send + Sync>,
-    ) -> Result<(), GhosttyError> {
+    ) -> Result<(), TerminalError> {
         let registration = {
             let mut terminal = self.terminal.lock().expect("terminal mutex poisoned");
             terminal.install_callbacks(
@@ -897,7 +900,7 @@ impl TerminalSession {
 
     /// Register only the `WRITE_PTY` bridge, with a no-op title sink. Used by
     /// PTY integration tests that do not own a window.
-    pub fn install_pty_writer(&self) -> Result<(), GhosttyError> {
+    pub fn install_pty_writer(&self) -> Result<(), TerminalError> {
         self.install_callbacks(Box::new(|_| {}))
     }
 
@@ -908,7 +911,7 @@ impl TerminalSession {
     fn scroll_with(
         &self,
         behavior: sys::GhosttyTerminalScrollViewport,
-    ) -> Result<ScrollOutcome, GhosttyError> {
+    ) -> Result<ScrollOutcome, TerminalError> {
         let start = Instant::now();
         let mut terminal = self.terminal.lock().expect("terminal mutex poisoned");
         Counters::add(&self.counters.terminal_lock_acquisitions, 1);
@@ -931,13 +934,13 @@ impl TerminalSession {
         }
         Ok(ScrollOutcome {
             moved,
-            scrollbar: after,
+            scrollbar: after.into(),
         })
     }
 
     /// Scroll the Ghostty-owned viewport by `delta_rows` (negative = up into
     /// history). Returns whether the viewport actually moved.
-    pub fn scroll(&self, delta_rows: isize) -> Result<bool, GhosttyError> {
+    pub fn scroll(&self, delta_rows: isize) -> Result<bool, TerminalError> {
         if delta_rows == 0 {
             return Ok(false);
         }
@@ -946,25 +949,25 @@ impl TerminalSession {
             .moved)
     }
 
-    pub fn scroll_to_top(&self) -> Result<ScrollOutcome, GhosttyError> {
+    pub fn scroll_to_top(&self) -> Result<ScrollOutcome, TerminalError> {
         self.scroll_with(sys::GhosttyTerminalScrollViewport::top())
     }
 
-    pub fn scroll_to_bottom(&self) -> Result<ScrollOutcome, GhosttyError> {
+    pub fn scroll_to_bottom(&self) -> Result<ScrollOutcome, TerminalError> {
         self.scroll_with(sys::GhosttyTerminalScrollViewport::bottom())
     }
 
     /// Place the first visible row at an absolute scrollbar offset. This is the
     /// round-trip used by the scrollbar thumb drag.
-    pub fn scroll_to_row(&self, row: usize) -> Result<ScrollOutcome, GhosttyError> {
+    pub fn scroll_to_row(&self, row: usize) -> Result<ScrollOutcome, TerminalError> {
         self.scroll_with(sys::GhosttyTerminalScrollViewport::row(row))
     }
 
     /// Current scrollbar geometry, read from Ghostty on demand (no second
     /// scroll model and no GPUI `ScrollHandle` as source of truth).
-    pub fn scrollbar(&self) -> Result<sys::GhosttyTerminalScrollbar, GhosttyError> {
+    pub fn scrollbar(&self) -> Result<crate::terminal::ghostty::ScrollbarState, TerminalError> {
         let terminal = self.terminal.lock().expect("terminal mutex poisoned");
-        terminal.scrollbar()
+        Ok(terminal.scrollbar()?.into())
     }
 
     /// Current terminal title from OSC 0/2, or an empty string when unset.
@@ -990,9 +993,9 @@ impl TerminalSession {
 
     /// Whether the running program currently reports mouse tracking. The UI
     /// uses this to choose local selection vs terminal mouse encoding.
-    pub fn mouse_tracking_enabled(&self) -> Result<bool, GhosttyError> {
+    pub fn mouse_tracking_enabled(&self) -> Result<bool, TerminalError> {
         let terminal = self.terminal.lock().expect("terminal mutex poisoned");
-        terminal.mouse_tracking()
+        Ok(terminal.mouse_tracking()?)
     }
 
     /// Decide mouse ownership and encode under ONE terminal lock, then move the
@@ -1029,7 +1032,7 @@ impl TerminalSession {
         encoder: &mut MouseEncoder,
         event: &mut MouseEvent,
         input: MouseInput,
-    ) -> Result<Option<Vec<u8>>, GhosttyError> {
+    ) -> Result<Option<Vec<u8>>, TerminalError> {
         encoder.track_last_cell(true)?;
         encoder.set_any_button_pressed(input.any_button_pressed)?;
         let mut size = sys::GhosttyMouseEncoderSize::sized();
@@ -1063,7 +1066,7 @@ impl TerminalSession {
         screen_height: u32,
         cell_width: u32,
         cell_height: u32,
-    ) -> Result<Vec<u8>, GhosttyError> {
+    ) -> Result<Vec<u8>, TerminalError> {
         self.encode_mouse_for_test(MouseInput {
             action,
             button,
@@ -1080,7 +1083,7 @@ impl TerminalSession {
 
     /// Test-only helper: encode without enqueuing so mode behaviour can be
     /// asserted directly from the returned bytes.
-    pub fn encode_mouse_for_test(&self, input: MouseInput) -> Result<Vec<u8>, GhosttyError> {
+    pub fn encode_mouse_for_test(&self, input: MouseInput) -> Result<Vec<u8>, TerminalError> {
         let mut encoder = self.mouse_encoder.lock().expect("mouse encoder poisoned");
         let mut event = self.mouse_event.lock().expect("mouse event poisoned");
         {
@@ -1106,7 +1109,7 @@ impl TerminalSession {
         x: u16,
         y: u16,
         _click_count: usize,
-    ) -> Result<(), GhosttyError> {
+    ) -> Result<(), TerminalError> {
         let terminal = self.terminal.lock().expect("terminal mutex poisoned");
         let gesture = self
             .selection_gesture
@@ -1128,7 +1131,7 @@ impl TerminalSession {
         cols: u16,
         cell_width: f32,
         cell_height: f32,
-    ) -> Result<(), GhosttyError> {
+    ) -> Result<(), TerminalError> {
         let terminal = self.terminal.lock().expect("terminal mutex poisoned");
         let gesture = self
             .selection_gesture
@@ -1180,7 +1183,7 @@ impl TerminalSession {
         start_y: u16,
         end_x: u16,
         end_y: u16,
-    ) -> Result<(), GhosttyError> {
+    ) -> Result<(), TerminalError> {
         let mut terminal = self.terminal.lock().expect("terminal mutex poisoned");
         terminal.set_selection_between(start_x, start_y, end_x, end_y)?;
         drop(terminal);
@@ -1188,7 +1191,7 @@ impl TerminalSession {
         Ok(())
     }
 
-    pub fn select_all(&self) -> Result<(), GhosttyError> {
+    pub fn select_all(&self) -> Result<(), TerminalError> {
         let mut terminal = self.terminal.lock().expect("terminal mutex poisoned");
         terminal.select_all()?;
         drop(terminal);
@@ -1196,7 +1199,7 @@ impl TerminalSession {
         Ok(())
     }
 
-    pub fn clear_selection(&self) -> Result<(), GhosttyError> {
+    pub fn clear_selection(&self) -> Result<(), TerminalError> {
         let mut terminal = self.terminal.lock().expect("terminal mutex poisoned");
         terminal.clear_selection()?;
         drop(terminal);
@@ -1205,9 +1208,9 @@ impl TerminalSession {
     }
 
     /// Copy the active Ghostty selection as plain text.
-    pub fn copy_selection(&self) -> Result<String, GhosttyError> {
+    pub fn copy_selection(&self) -> Result<String, TerminalError> {
         let terminal = self.terminal.lock().expect("terminal mutex poisoned");
-        terminal.selection_text()
+        Ok(terminal.selection_text()?)
     }
 
     pub fn mark_process_exited(&self) {

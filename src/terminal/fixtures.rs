@@ -44,7 +44,8 @@ impl Fixture {
     }
 
     /// Feed the fixture and apply its non-byte state (currently a selection).
-    pub fn apply(self, terminal: &mut GhosttyTerminal) {
+    #[allow(dead_code)]
+    fn apply(self, terminal: &mut GhosttyTerminal) {
         terminal.write(self.bytes());
         if self == Fixture::Selection {
             terminal

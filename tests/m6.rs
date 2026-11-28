@@ -5,8 +5,8 @@
 use std::sync::Arc;
 use std::thread;
 
+use ghostty_vt_sys as sys;
 use pain::terminal::geometry::RowCache;
-use pain::terminal::ghostty::ghostty_vt_sys as sys;
 use pain::terminal::session::{CountersSnapshot, NoopWakeup, TerminalSession};
 fn report(label: &str, counters: &CountersSnapshot) {
     println!(

@@ -5,6 +5,8 @@
 //! algorithm; this module only converts wheel deltas and maps a scrollbar thumb
 //! position to a Ghostty viewport row.
 
+use ghostty_vt_sys;
+
 /// GPUI reports positive Y for wheel up. Ghostty's viewport delta is negative
 /// for up, so invert here. One notch is one row.
 #[must_use]
@@ -16,9 +18,9 @@ pub fn wheel_to_ghostty_delta(up_rows: f64) -> isize {
 #[must_use]
 pub fn wheel_button(up: bool) -> i32 {
     if up {
-        crate::terminal::ghostty::ghostty_vt_sys::GHOSTTY_MOUSE_BUTTON_FOUR
+        ghostty_vt_sys::GHOSTTY_MOUSE_BUTTON_FOUR
     } else {
-        crate::terminal::ghostty::ghostty_vt_sys::GHOSTTY_MOUSE_BUTTON_FIVE
+        ghostty_vt_sys::GHOSTTY_MOUSE_BUTTON_FIVE
     }
 }
 
@@ -112,11 +114,11 @@ mod tests {
     fn scrollbar_is_a_view_over_ghostty_rows() {
         assert_eq!(
             wheel_button(true),
-            crate::terminal::ghostty::ghostty_vt_sys::GHOSTTY_MOUSE_BUTTON_FOUR
+            ghostty_vt_sys::GHOSTTY_MOUSE_BUTTON_FOUR
         );
         assert_eq!(
             wheel_button(false),
-            crate::terminal::ghostty::ghostty_vt_sys::GHOSTTY_MOUSE_BUTTON_FIVE
+            ghostty_vt_sys::GHOSTTY_MOUSE_BUTTON_FIVE
         );
         assert!(scrollbar_geometry(100, 0, 100, 0.0, 0.0, 400.0, 200.0).is_none());
         let geometry =

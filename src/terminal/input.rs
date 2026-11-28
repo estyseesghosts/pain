@@ -3,7 +3,7 @@
 //! by the view layer; no ANSI escape sequence is hand-written here — Ghostty's
 //! encoders own that policy (AGENTS.md).
 
-use crate::terminal::ghostty::ghostty_vt_sys as sys;
+use ghostty_vt_sys as sys;
 
 /// Platform-neutral modifier set. Mirrors GPUI's `Modifiers` without importing
 /// GPUI so these rules can be tested in headless M0/M3/M4 builds.

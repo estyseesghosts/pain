@@ -25,7 +25,6 @@ use crate::app::{
     CopySelection, DecreaseFont, IncreaseFont, OpenPreferences, PasteClipboard, ResetFont,
     SelectAllTerminal,
 };
-use crate::terminal::error::TerminalError;
 use crate::terminal::geometry::{
     adjust_font_size, background_runs, batch_row, line_height_for, selection_span, BgRun,
     CellMetrics, InputGeometry, RowCache, TerminalGeometry, TextRun as CellRun, FONT_SIZE_STEP,
@@ -175,8 +174,7 @@ pub struct TerminalView {
     /// Ghostty-derived scrollbar thumb and the state behind it, both
     /// recomputed once in prepaint or from a scroll operation's result.
     scrollbar: RefCell<Option<ScrollbarGeometry>>,
-    scroll_state:
-        RefCell<Option<crate::terminal::ghostty::ghostty_vt_sys::GhosttyTerminalScrollbar>>,
+    scroll_state: RefCell<Option<crate::terminal::ghostty::ScrollbarState>>,
     /// Explicit capture state for the scrollbar thumb.
     capture: PointerCapture,
     /// Kept alive so focus loss / deactivation can always cancel a drag.
@@ -1134,7 +1132,7 @@ impl Element for TerminalElement {
             Err(error) => {
                 // Preserve the previous frame and do not mark it complete: the
                 // failed geometry leaves Ghostty dirty for a later recovery.
-                view.report_error_once(TerminalError::Ghostty(error));
+                view.report_error_once(error);
                 counters.prepaint_micros(
                     u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX),
                 );
@@ -1150,7 +1148,7 @@ impl Element for TerminalElement {
             Err(error) => {
                 // Leave Ghostty dirty: no `mark_frame_complete` for a frame we
                 // did not capture. The next successful frame rebuilds it.
-                view.report_error_once(TerminalError::Ghostty(error));
+                view.report_error_once(error);
                 counters.prepaint_micros(
                     u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX),
                 );
@@ -1298,7 +1296,7 @@ impl Element for TerminalElement {
         // clean call fails, keep the prior cache and leave the state dirty so
         // the next frame can rebuild it.
         if let Err(error) = session.mark_frame_complete() {
-            view.report_error_once(TerminalError::Ghostty(error));
+            view.report_error_once(error);
             counters
                 .prepaint_micros(u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX));
             return view.fallback_frame(bar, &metrics, rows);

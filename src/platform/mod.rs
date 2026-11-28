@@ -127,6 +127,8 @@ struct PtyResizeState {
     stopping: AtomicBool,
 }
 
+type ResizeApply = Arc<dyn Fn(u16, u16, u32, u32) -> Result<(), PtyError> + Send + Sync>;
+
 pub struct PtyResizeMailbox {
     state: Arc<PtyResizeState>,
     worker: Mutex<Option<JoinHandle<()>>>,
@@ -138,11 +140,7 @@ pub struct PtyResizeMailbox {
 impl PtyResizeMailbox {
     /// `apply` runs on the worker and reports the real OS result. Failures go
     /// to `events` once; the mailbox never logs them itself.
-    #[must_use]
-    pub fn new(
-        apply: Arc<dyn Fn(u16, u16, u32, u32) -> Result<(), PtyError> + Send + Sync>,
-        events: PtyEventSink,
-    ) -> Result<Self, PtyError> {
+    pub fn new(apply: ResizeApply, events: PtyEventSink) -> Result<Self, PtyError> {
         let state = Arc::new(PtyResizeState {
             pending: Mutex::new(None),
             wake: Condvar::new(),

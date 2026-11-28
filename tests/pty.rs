@@ -513,10 +513,7 @@ fn linux_kitten_unicode_placeholder_reaches_ghostty() {
     let virtual_placement = snapshot
         .image_placements
         .iter()
-        .any(|placement| {
-            placement.kind
-                == pain::terminal::ghostty::ghostty_vt_sys::GHOSTTY_RENDER_STATE_KITTY_PLACEMENT_KIND_VIRTUAL
-        });
+        .any(|placement| placement.kind == pain::terminal::ImagePlacementKind::Virtual);
     session.mark_frame_complete().expect("frame complete");
     pty.shutdown();
     let _ = std::fs::remove_file(&path);

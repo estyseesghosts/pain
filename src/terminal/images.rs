@@ -13,7 +13,9 @@ use std::sync::Arc;
 use gpui::{point, px, size, Bounds, Pixels, RenderImage, Window};
 use image::{Frame, ImageBuffer, Rgba};
 
-use crate::terminal::ghostty::{ghostty_vt_sys as sys, ImagePlacement, KittyImagePixels};
+use ghostty_vt_sys as sys;
+
+use crate::terminal::ghostty::{ImagePlacement, KittyImagePixels};
 use crate::terminal::session::{CountersHandle, TerminalSession};
 
 /// One texture identity. The protocol is part of the key because image IDs are
@@ -384,7 +386,7 @@ mod tests {
             source_width: 10,
             source_height: 10,
             placement_id: 1,
-            kind: sys::GHOSTTY_RENDER_STATE_KITTY_PLACEMENT_KIND_FIXED,
+            kind: crate::terminal::ImagePlacementKind::Fixed,
         }
     }
 

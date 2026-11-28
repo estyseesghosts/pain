@@ -18,7 +18,6 @@ use std::sync::atomic::{AtomicU16, AtomicU32, AtomicU8, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use ghostty_vt_sys as sys;
-pub use ghostty_vt_sys;
 
 use crate::terminal::writer::WriterQueue;
 
@@ -46,9 +45,10 @@ pub struct Colors {
     pub palette: [(u8, u8, u8); 256],
 }
 
-/// A `GhosttyResult` that is not `GHOSTTY_SUCCESS`.
+/// A Ghostty call failure. The raw C result is private: consumers use the
+/// stable [`TerminalError`](crate::terminal::TerminalError) contract instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct GhosttyError(pub sys::GhosttyResult);
+pub struct GhosttyError(sys::GhosttyResult);
 
 impl fmt::Display for GhosttyError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -218,6 +218,12 @@ fn decode_png_raw(data: &[u8]) -> Option<(u32, u32, image::ColorType, Vec<u8>)> 
 
 /// `GhosttySysDecodePngFn`. Returns false on every failure and never lets a
 /// panic cross the C boundary.
+///
+/// Every malformed-image, decode and allocation condition below is already
+/// converted into a checked `Option`/`Result` and returns `false` without
+/// unwinding. `catch_unwind` is kept only as defense in depth at this C
+/// callback boundary; correctness does not rely on unwind recovery, and this
+/// pattern is not used elsewhere.
 unsafe extern "C" fn decode_png_callback(
     _userdata: *mut c_void,
     allocator: *const c_void,
@@ -412,6 +418,45 @@ impl RenderFrame {
     }
 }
 
+/// Kitty placement kinds as a Pain-domain value. Consumers never need the
+/// raw `GHOSTTY_RENDER_STATE_KITTY_PLACEMENT_KIND_*` constants.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImagePlacementKind {
+    Virtual,
+    Relative,
+    Fixed,
+}
+
+impl ImagePlacementKind {
+    #[must_use]
+    fn from_raw(raw: i32) -> Self {
+        match raw {
+            sys::GHOSTTY_RENDER_STATE_KITTY_PLACEMENT_KIND_VIRTUAL => Self::Virtual,
+            sys::GHOSTTY_RENDER_STATE_KITTY_PLACEMENT_KIND_RELATIVE => Self::Relative,
+            _ => Self::Fixed,
+        }
+    }
+}
+
+/// Ghostty scrollbar geometry in Pain's own type. The raw C struct never
+/// crosses the terminal API boundary.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ScrollbarState {
+    pub total: u64,
+    pub offset: u64,
+    pub len: u64,
+}
+
+impl From<sys::GhosttyTerminalScrollbar> for ScrollbarState {
+    fn from(raw: sys::GhosttyTerminalScrollbar) -> Self {
+        Self {
+            total: raw.total,
+            offset: raw.offset,
+            len: raw.len,
+        }
+    }
+}
+
 /// One renderer-relevant image placement, copied out of Ghostty's render
 /// state. Coordinates are exactly Ghostty's: `viewport_col`/`viewport_row` may
 /// be negative, destination pixel sizes are device pixels, and source
@@ -437,8 +482,8 @@ pub struct ImagePlacement {
     pub source_height: u32,
     /// Kitty only: the placement ID, 0 when the program did not give one.
     pub placement_id: u32,
-    /// Kitty only: the placement kind (`GHOSTTY_RENDER_STATE_KITTY_PLACEMENT_KIND_*`).
-    pub kind: i32,
+    /// Kitty only: the placement kind, without raw C constants.
+    pub kind: ImagePlacementKind,
 }
 
 /// Result of refreshing the render state's placement cache.
@@ -565,7 +610,7 @@ pub enum KittyImageRead {
 }
 
 /// Owns one `GhosttyTerminal` handle.
-pub struct GhosttyTerminal {
+pub(crate) struct GhosttyTerminal {
     raw: Option<sys::GhosttyTerminal>,
     cols: u16,
     rows: u16,
@@ -593,6 +638,8 @@ impl GhosttyTerminal {
         })
     }
 
+    // Exercised by the internal FFI unit tests; not part of the session path.
+    #[allow(dead_code)]
     #[must_use]
     pub fn cols(&self) -> u16 {
         self.cols
@@ -784,6 +831,7 @@ impl GhosttyTerminal {
     /// Copy one image's raw pixels out of the active Kitty storage. The caller
     /// must hold the terminal lock; this is the only place Ghostty image
     /// pointers are touched.
+    #[allow(dead_code)]
     pub fn read_kitty_image(
         &self,
         image_id: u32,
@@ -992,6 +1040,7 @@ impl GhosttyTerminal {
     /// # Safety
     /// `value` must have the type the Ghostty option expects and must remain
     /// valid for as long as the terminal can call it.
+    #[allow(dead_code)]
     pub unsafe fn set_option(
         &mut self,
         option: i32,
@@ -1002,6 +1051,7 @@ impl GhosttyTerminal {
         check(unsafe { sys::ghostty_terminal_set(self.as_raw(), option, value) })
     }
 
+    #[allow(dead_code)]
     pub fn get_u16(&self, data: i32) -> Result<u16, GhosttyError> {
         let mut out = 0u16;
         // SAFETY: the handle is valid and `out` points at a `uint16_t`, which
@@ -1525,7 +1575,7 @@ unsafe extern "C" fn title_changed_callback(terminal: sys::GhosttyTerminal, user
 }
 
 /// Holds the strong Arc reference leaked to Ghostty as callback userdata.
-pub struct CallbackRegistration {
+pub(crate) struct CallbackRegistration {
     userdata: *mut c_void,
 }
 
@@ -1559,7 +1609,7 @@ impl Drop for GhosttyTerminal {
 /// One reusable Ghostty-owned selection gesture plus reusable press/drag/
 /// release events. Allocated once per session, never per click, and every call
 /// is serialized with other terminal access by `TerminalSession`.
-pub struct SelectionGesture {
+pub(crate) struct SelectionGesture {
     gesture: Option<sys::GhosttySelectionGesture>,
     press: Option<sys::GhosttySelectionGestureEvent>,
     drag: Option<sys::GhosttySelectionGestureEvent>,
@@ -1753,7 +1803,7 @@ impl Drop for SelectionGesture {
 
 /// Owns one `GhosttyRenderState` handle plus its reusable image-placement
 /// iterator and resolved placement cache.
-pub struct GhosttyRenderState {
+pub(crate) struct GhosttyRenderState {
     raw: Option<sys::GhosttyRenderState>,
     image_iterator: Option<sys::GhosttyRenderStateImageIterator>,
     image_placements_generation: u64,
@@ -1805,6 +1855,7 @@ impl GhosttyRenderState {
 
     /// Two-phase update: the begin call is the only one that needs the
     /// terminal, which is why M2 can hold its lock just around this method.
+    #[allow(dead_code)]
     pub fn update(&mut self, terminal: &GhosttyTerminal) -> Result<(), GhosttyError> {
         self.begin_update(terminal)?;
         self.end_update()
@@ -2018,7 +2069,7 @@ impl GhosttyRenderState {
                 source_width,
                 source_height,
                 placement_id,
-                kind,
+                kind: ImagePlacementKind::from_raw(kind),
             });
         }
         // Ghostty explicitly says iterator order is not draw order.
@@ -2162,17 +2213,12 @@ impl GhosttyRenderState {
     }
 
     /// Convenience full snapshot for headless tests and initial frames.
+    #[allow(dead_code)]
     pub fn snapshot(&mut self) -> Result<RenderSnapshot, GhosttyError> {
         let meta = self.snapshot_meta()?;
         let all = vec![true; usize::from(meta.rows)];
         let rows = self.materialize_rows(&all, &meta.selections)?;
         Ok(RenderFrame { meta, rows })
-    }
-}
-
-impl Default for GhosttyRenderState {
-    fn default() -> Self {
-        Self::new().expect("default render state allocation succeeded")
     }
 }
 
@@ -2464,7 +2510,7 @@ impl Drop for RowCells {
 }
 
 /// Owns one key encoder. Sync it from terminal modes before encoding.
-pub struct KeyEncoder {
+pub(crate) struct KeyEncoder {
     raw: Option<sys::GhosttyKeyEncoder>,
 }
 
@@ -2507,6 +2553,7 @@ impl KeyEncoder {
     }
 
     /// Encode a key event into `buf`; returns the number of bytes written.
+    #[allow(dead_code)]
     pub fn encode(&mut self, event: &KeyEvent, buf: &mut [u8]) -> Result<usize, GhosttyError> {
         let (result, written) = self.encode_into(event, buf);
         check(result)?;
@@ -2538,12 +2585,6 @@ impl KeyEncoder {
 // SAFETY: the encoder has no thread affinity; `TerminalSession` serializes
 // every call behind one mutex and never exposes the raw handle.
 unsafe impl Send for KeyEncoder {}
-
-impl Default for KeyEncoder {
-    fn default() -> Self {
-        Self::new().expect("default key encoder allocation succeeded")
-    }
-}
 
 impl Drop for KeyEncoder {
     fn drop(&mut self) {
@@ -2628,12 +2669,6 @@ impl KeyEvent {
     }
 }
 
-impl Default for KeyEvent {
-    fn default() -> Self {
-        Self::new().expect("default key event allocation succeeded")
-    }
-}
-
 impl Drop for KeyEvent {
     fn drop(&mut self) {
         if let Some(raw) = self.raw.take() {
@@ -2696,7 +2731,7 @@ pub fn paste_encode(text: &str, bracketed: bool) -> Result<Vec<u8>, GhosttyError
 
 /// Owns one `GhosttyMouseEncoder`. Synced from terminal tracking modes before
 /// each event; the terminal decides whether to emit X10/SGR/UTF-8 sequences.
-pub struct MouseEncoder {
+pub(crate) struct MouseEncoder {
     raw: Option<sys::GhosttyMouseEncoder>,
 }
 
@@ -2779,12 +2814,6 @@ impl MouseEncoder {
 // access behind one mutex.
 unsafe impl Send for MouseEncoder {}
 
-impl Default for MouseEncoder {
-    fn default() -> Self {
-        Self::new().expect("default mouse encoder allocation succeeded")
-    }
-}
-
 impl Drop for MouseEncoder {
     fn drop(&mut self) {
         if let Some(raw) = self.raw.take() {
@@ -2795,7 +2824,7 @@ impl Drop for MouseEncoder {
 }
 
 /// Owns one `GhosttyMouseEvent`, reused across pointer events.
-pub struct MouseEvent {
+pub(crate) struct MouseEvent {
     raw: Option<sys::GhosttyMouseEvent>,
 }
 
@@ -2842,12 +2871,6 @@ impl MouseEvent {
 // access behind one mutex and never exposes the raw handle.
 unsafe impl Send for MouseEvent {}
 
-impl Default for MouseEvent {
-    fn default() -> Self {
-        Self::new().expect("default mouse event allocation succeeded")
-    }
-}
-
 impl Drop for MouseEvent {
     fn drop(&mut self) {
         if let Some(raw) = self.raw.take() {
@@ -2879,5 +2902,122 @@ mod decoder_tests {
             .expect("rgba");
         assert_eq!(rgba, vec![0x10, 0x20, 0x30, 0x40]);
         assert!(rgba_from_decoded(2, 2, image::ColorType::Rgba8, &[0; 4]).is_none());
+    }
+}
+
+/// Ownership/drop and raw-adapter semantics belong inside this crate. The
+/// public integration gates exercise the session/domain API instead.
+#[cfg(test)]
+mod ffi_tests {
+    use super::*;
+
+    fn line_text(snapshot: &RenderSnapshot, y: usize) -> String {
+        snapshot
+            .line(y)
+            .iter()
+            .map(|cell| cell.text.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn create_feed_render_and_inspect_styled_cells() {
+        let mut terminal = GhosttyTerminal::new(80, 24).expect("terminal created");
+        assert_eq!(terminal.cols(), 80);
+        assert_eq!(terminal.rows(), 24);
+
+        terminal.write(b"Hi \x1b[1;32mGreen\x1b[0m\r\nBye");
+
+        let mut state = GhosttyRenderState::new().expect("render state created");
+        state.update(&terminal).expect("render state updated");
+        let snapshot = state.snapshot().expect("snapshot read");
+
+        assert_eq!(snapshot.cols, 80);
+        assert_eq!(snapshot.meta.rows, 24);
+        assert_ne!(snapshot.dirty, sys::GHOSTTY_RENDER_STATE_DIRTY_FALSE);
+        assert_eq!(line_text(&snapshot, 0), "Hi Green");
+        assert_eq!(line_text(&snapshot, 1), "Bye");
+
+        let green = &snapshot.line(0)[3];
+        assert_eq!(green.text, "G");
+        assert!(green.has_styling);
+        assert_eq!(green.style.foreground, Some(ColorSpec::Palette(2)));
+        assert!(green.style.is_bold());
+        assert!(snapshot.cursor.has_value);
+        assert!(snapshot.cursor.visible);
+        assert_eq!((snapshot.cursor.x, snapshot.cursor.y), (3, 1));
+
+        state.clean().expect("render state cleaned");
+        let clean = state.snapshot().expect("clean snapshot read");
+        assert_eq!(clean.dirty, sys::GHOSTTY_RENDER_STATE_DIRTY_FALSE);
+        assert_eq!(line_text(&clean, 0), "Hi Green");
+    }
+
+    #[test]
+    fn true_color_and_bold_survive_the_render_bridge() {
+        let mut terminal = GhosttyTerminal::new(20, 4).expect("terminal created");
+        terminal.write(b"\x1b[1;38;2;255;16;32mR\x1b[0m");
+        let mut state = GhosttyRenderState::new().expect("render state created");
+        state.update(&terminal).expect("render state updated");
+        let snapshot = state.snapshot().expect("snapshot read");
+        let cell = &snapshot.line(0)[0];
+        assert_eq!(cell.text, "R");
+        assert!(cell.style.is_bold());
+        assert_eq!(cell.style.foreground, Some(ColorSpec::Rgb(255, 16, 32)));
+        assert_eq!(cell.foreground, Some((255, 16, 32)));
+    }
+
+    #[test]
+    fn resize_updates_grid_dimensions() {
+        let mut terminal = GhosttyTerminal::new(80, 24).expect("terminal created");
+        terminal
+            .resize(40, 10, 8, 16)
+            .expect("terminal resized with cell pixels");
+        assert_eq!(
+            (
+                terminal.get_u16(sys::GHOSTTY_TERMINAL_DATA_COLS).unwrap(),
+                terminal.get_u16(sys::GHOSTTY_TERMINAL_DATA_ROWS).unwrap(),
+            ),
+            (40, 10)
+        );
+        let mut state = GhosttyRenderState::new().expect("render state created");
+        state.update(&terminal).expect("render state updated");
+        let snapshot = state.snapshot().expect("snapshot read");
+        assert_eq!((snapshot.cols, snapshot.meta.rows), (40, 10));
+    }
+
+    #[test]
+    fn key_encoder_syncs_and_encodes_without_a_window() {
+        let terminal = GhosttyTerminal::new(80, 24).expect("terminal created");
+        let mut encoder = KeyEncoder::new().expect("encoder created");
+        encoder
+            .sync_from_terminal(&terminal)
+            .expect("encoder synced from terminal modes");
+        let mut event = KeyEvent::new().expect("key event created");
+        event.press(sys::GHOSTTY_KEY_A, 0).expect("key configured");
+        event.set_utf8("a").expect("key text set");
+        let mut buf = [0u8; 128];
+        let written = encoder.encode(&event, &mut buf).expect("key encoded");
+        assert!(written > 0, "encoder produced no bytes");
+        assert_eq!(&buf[..written], b"a");
+    }
+
+    #[test]
+    fn repeated_create_free_loop_keeps_every_handle_accounted_for() {
+        const ITERATIONS: usize = 256;
+        assert!(!version().is_empty());
+        for _ in 0..ITERATIONS {
+            let mut terminal = GhosttyTerminal::new(80, 24).expect("terminal created");
+            terminal.write(b"loop\r\n");
+            let mut state = GhosttyRenderState::new().expect("render state created");
+            state.update(&terminal).expect("render state updated");
+            let snapshot = state.snapshot().expect("snapshot read");
+            assert_eq!(line_text(&snapshot, 0), "loop");
+        }
+    }
+
+    #[test]
+    fn error_results_stay_as_typed_errors() {
+        let error: Result<GhosttyTerminal, GhosttyError> = GhosttyTerminal::new(0, 0);
+        assert!(error.is_err());
     }
 }

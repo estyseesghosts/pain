@@ -3,10 +3,11 @@
 //! libghostty-vt parser, the render-state placement cache, the bounded PNG
 //! decoder and the batched pixel-copy API.
 
+use ghostty_vt_sys as sys;
 use image::codecs::png::PngEncoder;
 use image::{ExtendedColorType, ImageEncoder};
-use pain::terminal::ghostty::{ghostty_vt_sys as sys, ImagePlacement, KittyConfig};
 use pain::terminal::session::{NoopWakeup, SessionConfig, TerminalSession};
+use pain::terminal::{ImagePlacement, KittyConfig};
 
 const CELL_W: u32 = 10;
 const CELL_H: u32 = 20;
@@ -462,7 +463,7 @@ fn unicode_placeholder_placement_comes_from_the_render_state() {
     let placements = snapshot(&session);
     let virtuals: Vec<&ImagePlacement> = placements
         .iter()
-        .filter(|p| p.kind == sys::GHOSTTY_RENDER_STATE_KITTY_PLACEMENT_KIND_VIRTUAL)
+        .filter(|p| p.kind == pain::terminal::ImagePlacementKind::Virtual)
         .collect();
     assert!(
         !virtuals.is_empty(),
@@ -487,10 +488,7 @@ fn relative_placement_tracks_its_parent() {
         .iter()
         .find(|p| p.image_id == 51)
         .expect("relative placement");
-    assert_eq!(
-        relative.kind,
-        sys::GHOSTTY_RENDER_STATE_KITTY_PLACEMENT_KIND_RELATIVE
-    );
+    assert_eq!(relative.kind, pain::terminal::ImagePlacementKind::Relative);
     assert!(placements.iter().any(|p| p.image_id == 50));
 }
 

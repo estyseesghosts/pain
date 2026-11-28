@@ -17,12 +17,16 @@ pub mod images;
 #[cfg(feature = "shell")]
 pub mod render;
 
+// Narrow public surface: consumers get terminal-domain values and session
+// operations, never raw Ghostty handles or C constants.
 pub use error::TerminalError;
 pub use ghostty::{
-    paste_encode, paste_is_safe, CallbackRegistration, Cell, Colors, Cursor, FrameMeta,
-    GhosttyError, GhosttyRenderState, GhosttyTerminal, ImagePlacement, ImagePlacementCache,
-    KeyEncoder, KeyEvent, KittyConfig, KittyImagePixels, MouseEncoder, MouseEvent, RenderFrame,
-    RenderSnapshot, RowSelection, Style,
+    paste_encode, paste_is_safe, Cell, Colors, Cursor, FrameMeta, ImagePlacement,
+    ImagePlacementCache, ImagePlacementKind, KeyEvent, KittyConfig, KittyImagePixels, RenderFrame,
+    RenderSnapshot, RowSelection, ScrollbarState, Style,
 };
-pub use session::{CountersSnapshot, TerminalSession, WakeupSink};
+pub use session::{
+    AppliedGeometry, CountersSnapshot, MouseInput, MouseRoute, ResizeOutcome, ScrollOutcome,
+    SessionConfig, TerminalSession, WakeupSink,
+};
 pub use writer::{WriterQueue, WriterQueueError, WriterQueueState, WriterStats};
