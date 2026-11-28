@@ -185,10 +185,15 @@ impl ResizeOutcome {
 /// every Ghostty handle stays behind a private mutex and the raw pointers are
 /// never exposed to callers.
 pub struct TerminalSession {
-    // `input` is declared before `terminal` so its gesture drops FIRST: its
-    // free call needs the terminal to release tracked grid refs. `terminal`
-    // still drops before `callbacks`, so the registration token outlives every
-    // callback the terminal can invoke.
+    // LOCK INVARIANT: when both are needed, acquire `terminal` first, then
+    // `input`, without exception. `with_terminal_and_input` is the only helper
+    // that takes both and enforces this order mechanically. No Ghostty callback
+    // acquires either lock.
+    //
+    // `input` is still declared before `terminal` so it drops FIRST: the
+    // gesture's free call needs the terminal to release tracked grid refs.
+    // `terminal` drops before `callbacks`, so the registration token outlives
+    // every callback the terminal can invoke.
     input: Mutex<InputState>,
     terminal: Mutex<GhosttyTerminal>,
     callbacks: Mutex<Option<CallbackRegistration>>,
@@ -264,12 +269,17 @@ impl TerminalSession {
         })
     }
 
-    /// All input helpers share one lock. Callers keep the documented lock order:
-    /// key encoding locks terminal then input; mouse/selection lock input then
-    /// terminal. No Ghostty callback acquires this lock.
-    fn with_input<R>(&self, f: impl FnOnce(&mut InputState) -> R) -> R {
+    /// The ONLY way to hold both locks: acquire `terminal` first, then `input`.
+    /// Keeping the nested acquisition here makes a `terminal ↔ input` wait
+    /// cycle mechanically impossible. Input-only operations do not need a
+    /// helper; no operation takes `input` without `terminal` in this crate.
+    fn with_terminal_and_input<R>(
+        &self,
+        f: impl FnOnce(&mut GhosttyTerminal, &mut InputState) -> R,
+    ) -> R {
+        let mut terminal = self.terminal.lock().expect("terminal mutex poisoned");
         let mut input = self.input.lock().expect("input state mutex poisoned");
-        f(&mut input)
+        f(&mut terminal, &mut input)
     }
 
     /// Cheap handle for recording renderer-side counters without borrowing the
@@ -615,14 +625,11 @@ impl TerminalSession {
     /// Encode a key against current Ghostty modes and queue the bytes for the
     /// (future) PTY writer. Returning the bytes keeps this testable.
     pub fn encode_key(&self, event: &KeyEvent) -> Result<Vec<u8>, TerminalError> {
-        let bytes = {
-            let terminal = self.terminal.lock().expect("terminal mutex poisoned");
-            self.with_input(|input| {
-                input.encoder.sync_from_terminal(&terminal)?;
-                let bytes = input.encoder.encode_owned(event)?;
-                Ok::<_, TerminalError>(bytes)
-            })?
-        };
+        let bytes = self.with_terminal_and_input(|terminal, input| {
+            input.encoder.sync_from_terminal(terminal)?;
+            let bytes = input.encoder.encode_owned(event)?;
+            Ok::<_, TerminalError>(bytes)
+        })?;
         self.enqueue_writer(bytes.clone())?;
         Ok(bytes)
     }
@@ -824,17 +831,22 @@ impl TerminalSession {
     /// "tracking enabled" flag that could drift from Ghostty's modes.
     pub fn route_mouse(&self, input: MouseInput) -> Result<MouseRoute, TerminalError> {
         Counters::add(&self.counters.mouse_events_offered, 1);
-        {
-            let terminal = self.terminal.lock().expect("terminal mutex poisoned");
+        // One terminal guard: check tracking, then encode with input helpers,
+        // all under the canonical terminal → input order. The `bool` records
+        // whether tracking owned the event so a deduplicated motion is still
+        // Reported rather than misclassified after the guard is released.
+        let (tracking, bytes) = self.with_terminal_and_input(|terminal, state| {
             if !terminal.mouse_tracking()? {
-                return Ok(MouseRoute::NotTracking);
+                return Ok::<_, TerminalError>((false, None));
             }
-        }
-        let bytes = self.with_input(|state| {
-            let terminal = self.terminal.lock().expect("terminal mutex poisoned");
-            state.mouse_encoder.sync_from_terminal(&terminal)?;
-            self.encode_with_encoder(&mut state.mouse_encoder, &mut state.mouse_event, input)
+            state.mouse_encoder.sync_from_terminal(terminal)?;
+            let bytes =
+                self.encode_with_encoder(&mut state.mouse_encoder, &mut state.mouse_event, input)?;
+            Ok((true, bytes))
         })?;
+        if !tracking {
+            return Ok(MouseRoute::NotTracking);
+        }
         let Some(bytes) = bytes else {
             // Tracking owns the event but Ghostty deduplicated the motion.
             return Ok(MouseRoute::Reported { bytes_queued: 0 });
@@ -908,9 +920,8 @@ impl TerminalSession {
     /// asserted directly from the returned bytes.
     pub fn encode_mouse_for_test(&self, input: MouseInput) -> Result<Vec<u8>, TerminalError> {
         Ok(self
-            .with_input(|state| {
-                let terminal = self.terminal.lock().expect("terminal mutex poisoned");
-                state.mouse_encoder.sync_from_terminal(&terminal)?;
+            .with_terminal_and_input(|terminal, state| {
+                state.mouse_encoder.sync_from_terminal(terminal)?;
                 self.encode_with_encoder(&mut state.mouse_encoder, &mut state.mouse_event, input)
             })?
             .unwrap_or_default())
@@ -933,9 +944,9 @@ impl TerminalSession {
         y: u16,
         _click_count: usize,
     ) -> Result<(), TerminalError> {
-        let terminal = self.terminal.lock().expect("terminal mutex poisoned");
-        self.with_input(|state| state.selection_gesture.press(&terminal, x, y))?;
-        drop(terminal);
+        self.with_terminal_and_input(|terminal, state| {
+            state.selection_gesture.press(terminal, x, y)
+        })?;
         self.notify_changed();
         Ok(())
     }
@@ -950,34 +961,30 @@ impl TerminalSession {
         cell_width: f32,
         cell_height: f32,
     ) -> Result<(), TerminalError> {
-        let terminal = self.terminal.lock().expect("terminal mutex poisoned");
-        let geometry = sys::GhosttySelectionGestureGeometry {
-            columns: cols.max(1) as u32,
-            cell_width: cell_width.max(1.0) as u32,
-            padding_left: 0,
-            screen_height: (f32::from(terminal.rows()) * cell_height.max(1.0)) as u32,
-        };
-        self.with_input(|state| state.selection_gesture.drag(&terminal, x, y, geometry))?;
-        drop(terminal);
+        self.with_terminal_and_input(|terminal, state| {
+            let geometry = sys::GhosttySelectionGestureGeometry {
+                columns: cols.max(1) as u32,
+                cell_width: cell_width.max(1.0) as u32,
+                padding_left: 0,
+                screen_height: (f32::from(terminal.rows()) * cell_height.max(1.0)) as u32,
+            };
+            state.selection_gesture.drag(terminal, x, y, geometry)
+        })?;
         self.notify_changed();
         Ok(())
     }
 
     /// Finish the gesture. Release never forwards to Ghostty's mouse reporting.
     pub fn end_selection_gesture(&self) {
-        let terminal = self.terminal.lock().expect("terminal mutex poisoned");
-        self.with_input(|state| {
-            let _ = state.selection_gesture.release(&terminal);
+        self.with_terminal_and_input(|terminal, state| {
+            let _ = state.selection_gesture.release(terminal);
         });
-        drop(terminal);
         self.notify_changed();
     }
 
     /// Cancel a gesture after focus loss or deactivation.
     pub fn cancel_selection_gesture(&self) {
-        let terminal = self.terminal.lock().expect("terminal mutex poisoned");
-        self.with_input(|state| state.selection_gesture.reset());
-        drop(terminal);
+        self.with_terminal_and_input(|_terminal, state| state.selection_gesture.reset());
     }
 
     /// Local selection between two viewport cells (used when mouse reporting
@@ -1387,5 +1394,53 @@ mod tests {
         let final_frame = last_frame.expect("at least one frame");
         assert!(!final_frame.line(0).is_empty());
         assert!(session.snapshot_counters().render_state_updates >= 8);
+    }
+
+    #[test]
+    fn concurrent_key_and_mouse_encoding_never_deadlock() {
+        // Structural guard for the single `terminal → input` lock invariant.
+        // Threads interleave both paths on one session after enabling Ghostty
+        // mouse tracking. Bounded iterations; no sleeps to coax a race.
+        let session =
+            Arc::new(TerminalSession::new(80, 24, Box::new(NoopWakeup)).expect("session"));
+        session.write_vt(b"\x1b[?1003h\x1b[?1006h");
+        assert!(session.mouse_tracking_enabled().expect("tracking mode"));
+
+        let mut threads = Vec::new();
+        for thread_index in 0..4 {
+            let shared = Arc::clone(&session);
+            threads.push(std::thread::spawn(move || {
+                // KeyEvent owns a raw Ghostty handle, so construct it inside
+                // the thread rather than sending it across the boundary.
+                let key = KeyEvent::new().expect("key event");
+                for i in 0..200u32 {
+                    if thread_index % 2 == 0 {
+                        shared.encode_key(&key).expect("key encoding");
+                    } else {
+                        shared
+                            .route_mouse(MouseInput {
+                                action: sys::GHOSTTY_MOUSE_ACTION_MOTION,
+                                button: None,
+                                mods: 0,
+                                x: (i % 80) as f32 + 0.5,
+                                y: 10.0,
+                                any_button_pressed: false,
+                                surface_width: 800,
+                                surface_height: 480,
+                                cell_width: 10,
+                                cell_height: 20,
+                            })
+                            .expect("mouse encoding");
+                    }
+                }
+            }));
+        }
+        for thread in threads {
+            thread.join().expect("encoder thread finished");
+        }
+
+        let counters = session.snapshot_counters();
+        assert_eq!(counters.mouse_events_offered, 400, "two mouse threads");
+        assert!(counters.mouse_events_encoded > 0, "tracking encoded events");
     }
 }
