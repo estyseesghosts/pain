@@ -716,7 +716,21 @@ fn start_threads(
     let writer = thread::Builder::new()
         .name("pain-conpty-writer".into())
         .spawn(move || {
-            while let Some(bytes) = writer_session.wait_writer() {
+            loop {
+                let bytes = match writer_session.wait_writer() {
+                    Ok(Some(bytes)) => bytes,
+                    // Normal shutdown: flush is complete, this is not an error.
+                    Ok(None) => break,
+                    // The failure originated inside Ghostty's WRITE_PTY path,
+                    // which cannot call the host. The worker owns the event.
+                    Err(error) => {
+                        writer_events(PtyEvent::WriterFailed(PtyError::new(
+                            "writer queue",
+                            error.to_string(),
+                        )));
+                        return;
+                    }
+                };
                 let mut written = 0usize;
                 while written < bytes.len() {
                     let mut chunk = 0u32;

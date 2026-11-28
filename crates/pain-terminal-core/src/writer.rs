@@ -73,6 +73,10 @@ struct Inner {
     pending_bytes: usize,
     byte_budget: usize,
     state: WriterQueueState,
+    /// Set exactly when `state == Failed`. The platform writer needs to know
+    /// whether the failure came from a Ghostty-generated buffer overflow or
+    /// from the OS writer itself, so it can emit one accurate lifecycle event.
+    failure: Option<WriterQueueError>,
 }
 
 /// A bounded-by-consumer, bounded-in-memory queue. The wakeup condvar lets the
@@ -115,6 +119,7 @@ impl WriterQueue {
                 pending_bytes: 0,
                 byte_budget: byte_budget.max(1),
                 state: WriterQueueState::Open,
+                failure: None,
             }),
             changed: Condvar::new(),
             stats: WriterStatsAtomics::default(),
@@ -143,6 +148,10 @@ impl WriterQueue {
             if inner.pending_bytes.saturating_add(byte_count) > inner.byte_budget {
                 let budget = inner.byte_budget;
                 inner.state = WriterQueueState::Failed;
+                inner.failure = Some(WriterQueueError::ByteBudgetExceeded {
+                    len: byte_count,
+                    budget,
+                });
                 drop(inner);
                 self.reject();
                 // Wake the writer so it observes the failed state and exits.
@@ -171,25 +180,36 @@ impl WriterQueue {
         self.stats.rejected.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Block until one message is available. `None` means the queue was closed
-    /// or failed *and* every already-queued buffer has been drained, which is
-    /// the writer thread's shutdown signal.
-    #[must_use]
-    pub fn pop_blocking(&self) -> Option<Vec<u8>> {
+    /// Block until one message is available or the queue stops accepting data.
+    /// Already-accepted buffers always drain first, so a reply queued before
+    /// the overflow cannot leap behind later input. Once they are drained:
+    /// `Ok(None)` is normal close, `Err(reason)` is a terminal-side failure.
+    pub fn pop_blocking(&self) -> Result<Option<Vec<u8>>, WriterQueueError> {
         let mut inner = self.inner.lock().expect("writer mutex poisoned");
         loop {
             if let Some(bytes) = inner.messages.pop_front() {
                 inner.pending_bytes = inner.pending_bytes.saturating_sub(bytes.len());
-                return Some(bytes);
+                return Ok(Some(bytes));
             }
-            if inner.state != WriterQueueState::Open {
-                return None;
+            match inner.state {
+                WriterQueueState::Open => {
+                    inner = self
+                        .changed
+                        .wait(inner)
+                        .expect("writer mutex poisoned while waiting");
+                }
+                WriterQueueState::Closed => return Ok(None),
+                WriterQueueState::Failed => {
+                    return Err(inner.failure.unwrap_or(WriterQueueError::Failed));
+                }
             }
-            inner = self
-                .changed
-                .wait(inner)
-                .expect("writer mutex poisoned while waiting");
         }
+    }
+
+    /// The stored reason for a failed queue. `None` while open or closed.
+    #[must_use]
+    pub fn failure(&self) -> Option<WriterQueueError> {
+        self.inner.lock().expect("writer mutex poisoned").failure
     }
 
     /// Non-blocking drain used by tests and headless sessions.
@@ -252,7 +272,10 @@ impl WriterQueue {
     /// lock.
     pub fn fail(&self) {
         let mut inner = self.inner.lock().expect("writer mutex poisoned");
-        inner.state = WriterQueueState::Failed;
+        if inner.state != WriterQueueState::Failed {
+            inner.state = WriterQueueState::Failed;
+            inner.failure = Some(WriterQueueError::Failed);
+        }
         drop(inner);
         self.changed.notify_all();
     }
@@ -294,7 +317,10 @@ mod tests {
         assert_eq!(queue.push(b"abcd".to_vec()), Ok(1));
         assert_eq!(queue.push(b"ef".to_vec()), Ok(2));
         assert_eq!(queue.pending_bytes(), 6);
-        assert_eq!(queue.pop_blocking().expect("first"), b"abcd");
+        assert_eq!(
+            queue.pop_blocking().expect("drain").expect("first"),
+            b"abcd"
+        );
         assert_eq!(queue.pending_bytes(), 2);
         assert_eq!(queue.pop().expect("second"), b"ef");
         assert_eq!(queue.pending_bytes(), 0);
@@ -311,7 +337,11 @@ mod tests {
         // Give the writer a chance to block; close must still wake it.
         std::thread::sleep(std::time::Duration::from_millis(10));
         queue.close();
-        assert!(handle.join().expect("writer thread").is_none());
+        assert_eq!(
+            handle.join().expect("writer thread"),
+            Ok(None),
+            "normal close is not an error"
+        );
     }
 
     #[test]
@@ -319,8 +349,11 @@ mod tests {
         let queue = WriterQueue::new();
         assert_eq!(queue.push(b"pending".to_vec()), Ok(1));
         queue.close();
-        assert_eq!(queue.pop_blocking().expect("flushed"), b"pending");
-        assert_eq!(queue.pop_blocking(), None);
+        assert_eq!(
+            queue.pop_blocking().expect("drain").expect("flushed"),
+            b"pending"
+        );
+        assert_eq!(queue.pop_blocking(), Ok(None));
         assert_eq!(
             queue.push(b"ignored".to_vec()),
             Err(WriterQueueError::Closed)
@@ -372,7 +405,11 @@ mod tests {
         let handle = std::thread::spawn(move || waiter.pop_blocking());
         std::thread::sleep(std::time::Duration::from_millis(10));
         queue.fail();
-        assert!(handle.join().expect("writer thread").is_none());
+        assert_eq!(
+            handle.join().expect("writer thread"),
+            Err(WriterQueueError::Failed)
+        );
+        assert_eq!(queue.failure(), Some(WriterQueueError::Failed));
     }
 
     #[test]
@@ -383,5 +420,46 @@ mod tests {
         assert_eq!(queue.push(b"b".to_vec()), Err(WriterQueueError::Failed));
         assert_eq!(queue.stats().rejected, 2);
         assert_eq!(queue.state(), WriterQueueState::Failed);
+    }
+
+    #[test]
+    fn accepted_buffers_drain_before_the_failure_is_surfaced() {
+        let queue = WriterQueue::with_byte_budget(8);
+        assert_eq!(queue.push(b"reply".to_vec()), Ok(1));
+        let reason = WriterQueueError::ByteBudgetExceeded { len: 7, budget: 8 };
+        assert_eq!(queue.push(b"too big".to_vec()), Err(reason));
+        assert_eq!(queue.failure(), Some(reason));
+        // The reply accepted before the overflow must not leap behind it.
+        assert_eq!(
+            queue.pop_blocking().expect("drain").expect("reply"),
+            b"reply"
+        );
+        assert_eq!(queue.pop_blocking(), Err(reason));
+        assert_eq!(queue.push(b"later".to_vec()), Err(WriterQueueError::Failed));
+    }
+
+    #[test]
+    fn normal_close_has_no_failure_reason() {
+        let queue = WriterQueue::new();
+        queue.close();
+        assert_eq!(queue.pop_blocking(), Ok(None));
+        assert_eq!(queue.failure(), None);
+    }
+
+    #[test]
+    fn platform_failure_is_distinguishable_from_budget_failure() {
+        let budget = WriterQueue::with_byte_budget(4);
+        assert_eq!(
+            budget.push(b"too large".to_vec()),
+            Err(WriterQueueError::ByteBudgetExceeded { len: 9, budget: 4 })
+        );
+        assert!(matches!(
+            budget.failure(),
+            Some(WriterQueueError::ByteBudgetExceeded { .. })
+        ));
+
+        let platform = WriterQueue::new();
+        platform.fail();
+        assert_eq!(platform.failure(), Some(WriterQueueError::Failed));
     }
 }

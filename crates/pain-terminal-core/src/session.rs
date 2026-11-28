@@ -694,9 +694,10 @@ impl TerminalSession {
         self.writer.len()
     }
 
-    /// Blocking drain for the platform writer thread. `None` after `close_writer`.
-    #[must_use]
-    pub fn wait_writer(&self) -> Option<Vec<u8>> {
+    /// Blocking drain for the platform writer thread. `Ok(None)` after
+    /// `close_writer`; `Err` when a terminal-side write failed and the platform
+    /// worker must emit the single lifecycle event.
+    pub fn wait_writer(&self) -> Result<Option<Vec<u8>>, WriterQueueError> {
         self.writer.pop_blocking()
     }
 
@@ -1061,6 +1062,53 @@ mod tests {
             session.enqueue_writer(b"x".to_vec()),
             Err(WriterQueueError::Failed)
         );
+    }
+
+    #[test]
+    fn ordinary_write_budget_failure_reaches_the_blocking_consumer() {
+        let session = TerminalSession::new_with_config(
+            SessionConfig {
+                writer_byte_budget: 4,
+                ..SessionConfig::default()
+            },
+            Box::new(NoopWakeup),
+        )
+        .expect("session");
+        assert_eq!(session.enqueue_writer(b"abc".to_vec()), Ok(1));
+        let reason = WriterQueueError::ByteBudgetExceeded { len: 4, budget: 4 };
+        assert_eq!(session.enqueue_writer(b"defg".to_vec()), Err(reason));
+        // The reply accepted before the overflow must drain first.
+        assert_eq!(session.wait_writer(), Ok(Some(b"abc".to_vec())));
+        assert_eq!(session.wait_writer(), Err(reason));
+    }
+
+    #[test]
+    fn ghostty_callback_budget_failure_reaches_the_blocking_consumer() {
+        let session = TerminalSession::new_with_config(
+            SessionConfig {
+                writer_byte_budget: 1,
+                ..SessionConfig::default()
+            },
+            Box::new(NoopWakeup),
+        )
+        .expect("session");
+        session.install_pty_writer().expect("pty writer bridge");
+        // DECRQM is answered through WRITE_PTY. The C callback cannot return
+        // an error, so the queue must retain it for the platform worker.
+        session.write_vt(b"\x1b[?7$p");
+        let failure = session
+            .writer_queue()
+            .failure()
+            .expect("callback failure was recorded");
+        assert!(
+            matches!(
+                failure,
+                WriterQueueError::ByteBudgetExceeded { budget: 1, .. }
+            ),
+            "unexpected failure reason: {failure:?}"
+        );
+        // Confirm the failure is observable before blocking on the drain.
+        assert_eq!(session.wait_writer(), Err(failure));
     }
 
     #[test]

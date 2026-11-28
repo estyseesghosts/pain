@@ -370,7 +370,21 @@ fn start_threads(
     let writer = thread::Builder::new()
         .name("pain-pty-writer".into())
         .spawn(move || {
-            while let Some(bytes) = writer_session.wait_writer() {
+            loop {
+                let bytes = match writer_session.wait_writer() {
+                    Ok(Some(bytes)) => bytes,
+                    // Normal shutdown: the accepted buffers are flushed.
+                    Ok(None) => break,
+                    // Ghostty's WRITE_PTY callback cannot call the host; the
+                    // worker reports the terminal-side failure exactly once.
+                    Err(error) => {
+                        writer_events(PtyEvent::WriterFailed(PtyError::new(
+                            "writer queue",
+                            error.to_string(),
+                        )));
+                        break;
+                    }
+                };
                 if let Err(error) = writer_master.write_all(&bytes) {
                     // The transport is gone: fail the queue so no later input,
                     // paste or Ghostty reply is accepted into a dead writer.
