@@ -313,8 +313,10 @@ pub enum MouseAction {
 }
 
 impl MouseAction {
+    /// The numeric encoding belongs to core's Ghostty adapter. GPUI consumers
+    /// work in [`MouseAction`] and never see this value.
     #[must_use]
-    pub fn ghostty(self) -> i32 {
+    pub(crate) fn ghostty(self) -> i32 {
         match self {
             Self::Press => sys::GHOSTTY_MOUSE_ACTION_PRESS,
             Self::Release => sys::GHOSTTY_MOUSE_ACTION_RELEASE,
@@ -328,16 +330,23 @@ pub enum MouseButton {
     Left,
     Right,
     Middle,
+    /// Wheel up/down are reported as buttons 4/5 by terminal protocols.
+    WheelUp,
+    WheelDown,
     None,
 }
 
 impl MouseButton {
+    /// The numeric encoding belongs to core's Ghostty adapter. GPUI consumers
+    /// work in [`MouseButton`] and never see this value.
     #[must_use]
-    pub fn ghostty(self) -> Option<i32> {
+    pub(crate) fn ghostty(self) -> Option<i32> {
         match self {
             Self::Left => Some(sys::GHOSTTY_MOUSE_BUTTON_LEFT),
             Self::Right => Some(sys::GHOSTTY_MOUSE_BUTTON_RIGHT),
             Self::Middle => Some(sys::GHOSTTY_MOUSE_BUTTON_MIDDLE),
+            Self::WheelUp => Some(sys::GHOSTTY_MOUSE_BUTTON_FOUR),
+            Self::WheelDown => Some(sys::GHOSTTY_MOUSE_BUTTON_FIVE),
             Self::None => None,
         }
     }
@@ -351,7 +360,9 @@ impl MouseButton {
             Self::Left => 1,
             Self::Right => 2,
             Self::Middle => 4,
-            Self::None => 0,
+            // Wheel events are instantaneous; they never participate in a held
+            // drag and must not set `any_button_pressed`.
+            Self::WheelUp | Self::WheelDown | Self::None => 0,
         }
     }
 }

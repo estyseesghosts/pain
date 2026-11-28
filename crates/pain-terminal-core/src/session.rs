@@ -15,11 +15,13 @@ use ghostty_vt_sys as sys;
 use crate::counters::Counters;
 pub use crate::counters::{CountersHandle, CountersSnapshot};
 use crate::error::TerminalError;
+use crate::geometry::PointerSample;
 use crate::ghostty::{
     CallbackRegistration, GhosttyRenderState, GhosttyTerminal, KeyEncoder, KeyEvent, KittyConfig,
     KittyImagePixels, KittyImageRead, MouseEncoder, MouseEvent, RenderSnapshot, SelectionGesture,
     SizeReportState,
 };
+use crate::input::{Modifiers, MouseAction, MouseButton};
 use crate::writer::{WriterQueue, WriterQueueError};
 
 /// UI notification hook. Keep this UI-agnostic: the GPUI integration supplies
@@ -102,19 +104,26 @@ pub struct ScrollOutcome {
     pub scrollbar: crate::ghostty::ScrollbarState,
 }
 
-/// One pointer event, in the same terms Ghostty's mouse encoder expects.
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// One pointer event in terminal-domain terms. Ghostty numeric action/button
+/// codes are produced inside the Ghostty adapter, never by the caller. The
+/// pointer geometry is a single [`PointerSample`] so reporting and selection
+/// cannot derive different coordinates for the same event.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MouseInput {
-    pub action: i32,
-    pub button: Option<i32>,
-    pub mods: u16,
-    pub x: f32,
-    pub y: f32,
+    pub action: MouseAction,
+    pub button: Option<MouseButton>,
+    pub mods: Modifiers,
+    /// Normalized position/geometry in the terminal's device-pixel lattice.
+    pub pointer: PointerSample,
+    /// Drags that leave the surface are only reported while a button is held.
     pub any_button_pressed: bool,
-    pub surface_width: u32,
-    pub surface_height: u32,
-    pub cell_width: u32,
-    pub cell_height: u32,
+}
+
+impl MouseInput {
+    #[must_use]
+    pub fn cell(&self) -> (u16, u16) {
+        self.pointer.cell
+    }
 }
 
 /// Who owns a pointer event. An empty encoded buffer can still mean "reported
@@ -871,48 +880,24 @@ impl TerminalSession {
         encoder.track_last_cell(true)?;
         encoder.set_any_button_pressed(input.any_button_pressed)?;
         let mut size = sys::GhosttyMouseEncoderSize::sized();
-        size.screen_width = input.surface_width;
-        size.screen_height = input.surface_height;
-        size.cell_width = input.cell_width.max(1);
-        size.cell_height = input.cell_height.max(1);
+        size.screen_width = input.pointer.surface_size.0;
+        size.screen_height = input.pointer.surface_size.1;
+        size.cell_width = input.pointer.cell_size.0;
+        size.cell_height = input.pointer.cell_size.1;
         encoder.set_size(&size)?;
-        event.configure(input.action, input.button, input.mods, input.x, input.y)?;
+        event.configure(
+            input.action.ghostty(),
+            input.button.and_then(MouseButton::ghostty),
+            input.mods.ghostty_bits(),
+            input.pointer.position.0 as f32,
+            input.pointer.position.1 as f32,
+        )?;
         let mut buf = [0u8; 128];
         let written = encoder.encode(event, &mut buf)?;
         Ok(if written == 0 {
             None
         } else {
             Some(buf[..written].to_vec())
-        })
-    }
-
-    /// Backwards-compatible test helper with the historian's flat argument
-    /// list; production code uses `route_mouse`.
-    #[allow(clippy::too_many_arguments)]
-    pub fn encode_mouse(
-        &self,
-        action: i32,
-        button: Option<i32>,
-        mods: u16,
-        x: f32,
-        y: f32,
-        any_button_pressed: bool,
-        screen_width: u32,
-        screen_height: u32,
-        cell_width: u32,
-        cell_height: u32,
-    ) -> Result<Vec<u8>, TerminalError> {
-        self.encode_mouse_for_test(MouseInput {
-            action,
-            button,
-            mods,
-            x,
-            y,
-            any_button_pressed,
-            surface_width: screen_width,
-            surface_height: screen_height,
-            cell_width,
-            cell_height,
         })
     }
 
@@ -951,22 +936,22 @@ impl TerminalSession {
         Ok(())
     }
 
-    /// Continue the same gesture. Geometry comes from the canonical display
-    /// geometry measured in prepaint; the view suppresses repeated cells.
+    /// Continue the same gesture. The pointer sample is the same one used for
+    /// mouse reporting, so Ghostty's selection geometry cannot describe a
+    /// different cell lattice than the event that reached the encoder.
     pub fn drag_selection_gesture(
         &self,
         x: u16,
         y: u16,
-        cols: u16,
-        cell_width: f32,
-        cell_height: f32,
+        pointer: PointerSample,
     ) -> Result<(), TerminalError> {
         self.with_terminal_and_input(|terminal, state| {
+            let surface = pointer.selection_surface();
             let geometry = sys::GhosttySelectionGestureGeometry {
-                columns: cols.max(1) as u32,
-                cell_width: cell_width.max(1.0) as u32,
+                columns: surface.columns.max(1),
+                cell_width: surface.cell_width,
                 padding_left: 0,
-                screen_height: (f32::from(terminal.rows()) * cell_height.max(1.0)) as u32,
+                screen_height: surface.screen_height,
             };
             state.selection_gesture.drag(terminal, x, y, geometry)
         })?;
@@ -1029,7 +1014,20 @@ impl TerminalSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::geometry::{CellMetrics, TerminalGeometry};
     use std::sync::atomic::AtomicUsize;
+
+    /// One canonical pointer geometry shared by the mouse tests: a named
+    /// sample replaces the old seven independent raw arguments.
+    fn test_pointer(position: (f32, f32)) -> PointerSample {
+        TerminalGeometry::new(
+            (0.0, 0.0),
+            (800.0, 480.0),
+            &CellMetrics::new(10.0, 20.0),
+            1.0,
+        )
+        .pointer_sample(position)
+    }
 
     struct CountingWakeup(AtomicUsize);
     impl WakeupSink for CountingWakeup {
@@ -1245,32 +1243,22 @@ mod tests {
     fn mouse_route_reports_tracking_and_queues_without_cloning() {
         let session = TerminalSession::new(80, 24, Box::new(NoopWakeup)).expect("session");
         let not_tracking = session.route_mouse(MouseInput {
-            action: sys::GHOSTTY_MOUSE_ACTION_MOTION,
+            action: MouseAction::Motion,
             button: None,
-            mods: 0,
-            x: 10.0,
-            y: 10.0,
+            mods: Modifiers::default(),
+            pointer: test_pointer((10.0, 10.0)),
             any_button_pressed: false,
-            surface_width: 800,
-            surface_height: 480,
-            cell_width: 10,
-            cell_height: 20,
         });
         assert_eq!(not_tracking.expect("route"), MouseRoute::NotTracking);
 
         session.write_vt(b"\x1b[?1003h\x1b[?1006h");
         let route = session
             .route_mouse(MouseInput {
-                action: sys::GHOSTTY_MOUSE_ACTION_MOTION,
+                action: MouseAction::Motion,
                 button: None,
-                mods: 0,
-                x: 10.0,
-                y: 10.0,
+                mods: Modifiers::default(),
+                pointer: test_pointer((10.0, 10.0)),
                 any_button_pressed: false,
-                surface_width: 800,
-                surface_height: 480,
-                cell_width: 10,
-                cell_height: 20,
             })
             .expect("route in 1003");
         assert!(matches!(route, MouseRoute::Reported { bytes_queued } if bytes_queued > 0));
@@ -1329,8 +1317,15 @@ mod tests {
         session
             .begin_selection_gesture(0, 0, 1)
             .expect("gesture press");
+        let sample = TerminalGeometry::new(
+            (0.0, 0.0),
+            (800.0, 480.0),
+            &CellMetrics::new(9.5, 19.0),
+            1.0,
+        )
+        .pointer_sample((45.0, 5.0));
         session
-            .drag_selection_gesture(4, 0, 80, 9.5, 19.0)
+            .drag_selection_gesture(4, 0, sample)
             .expect("gesture drag");
         session.end_selection_gesture();
         session.select_between(0, 0, 4, 0).expect("plain selection");
@@ -1419,16 +1414,11 @@ mod tests {
                     } else {
                         shared
                             .route_mouse(MouseInput {
-                                action: sys::GHOSTTY_MOUSE_ACTION_MOTION,
+                                action: MouseAction::Motion,
                                 button: None,
-                                mods: 0,
-                                x: (i % 80) as f32 + 0.5,
-                                y: 10.0,
+                                mods: Modifiers::default(),
+                                pointer: test_pointer(((i % 80) as f32 + 0.5, 10.0)),
                                 any_button_pressed: false,
-                                surface_width: 800,
-                                surface_height: 480,
-                                cell_width: 10,
-                                cell_height: 20,
                             })
                             .expect("mouse encoding");
                     }

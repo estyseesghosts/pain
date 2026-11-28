@@ -778,6 +778,8 @@ impl GhosttyTerminal {
         self.cols
     }
 
+    // Exercised by the internal FFI unit tests; not part of the session path.
+    #[allow(dead_code)]
     #[must_use]
     pub fn rows(&self) -> u16 {
         self.rows

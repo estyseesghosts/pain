@@ -145,33 +145,7 @@ impl TerminalGeometry {
     /// final cell instead of an out-of-range index.
     #[must_use]
     pub fn cell_at(&self, position: (f32, f32)) -> (u16, u16) {
-        let clamp = |value: f32, origin: f32, cell: f32, last: u16| -> u16 {
-            if !value.is_finite() {
-                return 0;
-            }
-            let raw = ((value - origin) / cell.max(f32::MIN_POSITIVE)).floor();
-            if raw <= 0.0 {
-                0
-            } else if raw >= f32::from(last) {
-                last
-            } else {
-                raw as u16
-            }
-        };
-        (
-            clamp(
-                position.0,
-                self.origin.0,
-                self.cell_width,
-                self.cols.saturating_sub(1),
-            ),
-            clamp(
-                position.1,
-                self.origin.1,
-                self.cell_height,
-                self.rows.saturating_sub(1),
-            ),
-        )
+        self.pointer_sample(position).cell
     }
 
     #[must_use]
@@ -198,18 +172,163 @@ impl TerminalGeometry {
     /// GPUI drawing coordinates stay in logical pixels.
     #[must_use]
     pub fn cell_device_pixels(&self) -> (u32, u32) {
-        let convert = |logical: f32| -> u32 {
-            let scaled = (logical * self.scale).round();
-            if !scaled.is_finite() || scaled < 1.0 {
-                1
-            } else if scaled >= u32::MAX as f32 {
-                u32::MAX
-            } else {
-                scaled as u32
-            }
-        };
-        (convert(self.cell_width), convert(self.cell_height))
+        (
+            device_pixels(self.cell_width, self.scale),
+            device_pixels(self.cell_height, self.scale),
+        )
     }
+
+    /// Normalize one window-space point into the terminal's device-pixel
+    /// lattice. This is the only pointer→terminal coordinate conversion: the
+    /// reported cell, surface position, surface size and cell size all come
+    /// from the same rounded device cell, so they can never disagree.
+    #[must_use]
+    pub fn pointer_sample(&self, position: (f32, f32)) -> PointerSample {
+        let (cell_width, cell_height) = self.cell_device_pixels();
+        let (col, x) = normalize_axis(
+            position.0,
+            self.origin.0,
+            self.cell_width,
+            cell_width,
+            self.cols,
+            self.content_width,
+        );
+        let (row, y) = normalize_axis(
+            position.1,
+            self.origin.1,
+            self.cell_height,
+            cell_height,
+            self.rows,
+            self.content_height,
+        );
+        PointerSample {
+            cell: (col, row),
+            position: (x, y),
+            surface_size: (
+                u32::from(self.cols).saturating_mul(cell_width),
+                u32::from(self.rows).saturating_mul(cell_height),
+            ),
+            cell_size: (cell_width, cell_height),
+        }
+    }
+}
+
+/// Convert one logical length to the terminal/device-pixel lattice, rounded
+/// once and clamped to a usable pixel.
+fn device_pixels(logical: f32, scale: f32) -> u32 {
+    let scaled = (logical * scale).round();
+    if !scaled.is_finite() || scaled < 1.0 {
+        1
+    } else if scaled >= u32::MAX as f32 {
+        u32::MAX
+    } else {
+        scaled as u32
+    }
+}
+
+/// Resolve one axis. The logical cell index and the pointer's fraction inside
+/// that cell are derived first, then the device position is reconstructed from
+/// `index * rounded_cell + fraction * rounded_cell`. Scaling an absolute
+/// position independently would drift at fractional metrics.
+///
+/// Two distinct outside cases matter and must not be conflated:
+/// * the *remainder strip* inside the terminal child but past the last full
+///   cell is clamped into that last cell, so hit-test cell and reported pixel
+///   cannot contradict each other;
+/// * a point genuinely outside the child keeps a surface position outside the
+///   surface, so Ghostty can still apply its held/unheld viewport policy.
+fn normalize_axis(
+    value: f32,
+    origin: f32,
+    logical_cell: f32,
+    device_cell: u32,
+    cells: u16,
+    content_extent: f32,
+) -> (u16, i32) {
+    let surface = u32::from(cells).saturating_mul(device_cell);
+    if !value.is_finite() {
+        return (0, 0);
+    }
+    let offset = value - origin;
+    let raw = offset / logical_cell.max(f32::MIN_POSITIVE);
+    let index = if raw <= 0.0 {
+        0u16
+    } else if raw >= f32::from(cells) {
+        cells.saturating_sub(1)
+    } else {
+        raw as u16
+    };
+    let position = if offset < 0.0 {
+        signed_device(raw * device_cell as f32, false)
+    } else if offset > content_extent {
+        signed_device(raw * device_cell as f32, true)
+    } else if raw >= f32::from(cells) {
+        // Interior remainder strip: clamp into the last complete cell.
+        i32::try_from(surface.saturating_sub(1)).unwrap_or(i32::MAX)
+    } else {
+        let fraction = (raw - raw.floor()).clamp(0.0, 1.0);
+        signed_device((f32::from(index) + fraction) * device_cell as f32, false)
+    };
+    (index, position)
+}
+
+/// Project a device-space coordinate into `i32` without letting rounding move
+/// a point across the surface boundary. `away` rounds positive outside points
+/// up so they stay outside.
+fn signed_device(scaled: f32, away: bool) -> i32 {
+    let rounded = if away {
+        scaled.ceil()
+    } else if scaled < 0.0 {
+        scaled.floor()
+    } else {
+        scaled.trunc()
+    };
+    if rounded <= i32::MIN as f32 {
+        i32::MIN
+    } else if rounded >= i32::MAX as f32 {
+        i32::MAX
+    } else {
+        rounded as i32
+    }
+}
+
+/// One GPUI/window-space pointer point normalized into the terminal lattice.
+/// Every consumer (mouse reporting, local selection, scrollbar hit-testing)
+/// uses this single value so they cannot disagree about the same cell.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PointerSample {
+    /// Resolved terminal cell (column, row).
+    pub cell: (u16, u16),
+    /// Surface-space pointer position in device pixels, relative to the
+    /// terminal origin. Negative or past-surface values are preserved so
+    /// Ghostty can apply its own outside-viewport policy.
+    pub position: (i32, i32),
+    /// Full terminal surface in device pixels (`cols × cell`, `rows × cell`).
+    pub surface_size: (u32, u32),
+    /// Exact cell dimensions in device pixels supplied to Ghostty.
+    pub cell_size: (u32, u32),
+}
+
+impl PointerSample {
+    /// Surface values Ghostty's selection-drag API consumes. They come from
+    /// the same normalized sample as mouse reporting, so local selection and
+    /// TUI reporting cannot describe different cell lattices.
+    #[must_use]
+    pub(crate) fn selection_surface(&self) -> SelectionSurface {
+        SelectionSurface {
+            columns: self.surface_size.0 / self.cell_size.0.max(1),
+            cell_width: self.cell_size.0,
+            screen_height: self.surface_size.1,
+        }
+    }
+}
+
+/// Selection-drag geometry in surface pixels, derived from [`PointerSample`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SelectionSurface {
+    pub columns: u32,
+    pub cell_width: u32,
+    pub screen_height: u32,
 }
 
 /// Everything that forces two adjacent cells into different text runs.
@@ -730,5 +849,150 @@ mod tests {
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].text, "A B");
         assert_eq!(runs[0].cells, 3);
+    }
+
+    /// Ghostty derives a cell from a normalized surface pixel by integer
+    /// division. This helper is the test oracle for that derivation; it must
+    /// stay independent of the implementation's hit-testing path.
+    fn ghostty_cell(sample: &PointerSample) -> (u16, u16) {
+        let cols = (sample.surface_size.0 / sample.cell_size.0.max(1)) as u16;
+        let rows = (sample.surface_size.1 / sample.cell_size.1.max(1)) as u16;
+        let col = (sample.position.0.max(0) as u32 / sample.cell_size.0.max(1)) as u16;
+        let row = (sample.position.1.max(0) as u32 / sample.cell_size.1.max(1)) as u16;
+        (
+            col.min(cols.saturating_sub(1)),
+            row.min(rows.saturating_sub(1)),
+        )
+    }
+
+    #[test]
+    fn pointer_sample_agrees_with_ghostty_at_fractional_metrics_and_scales() {
+        // Awkward metrics deliberately: an implementation that only works for
+        // 10×20 cells will fail here.
+        let metrics = CellMetrics::new(9.7, 18.4);
+        for scale in [1.0f32, 1.25, 1.5, 2.0] {
+            let geometry = TerminalGeometry::new((37.0, 19.0), (773.0, 441.0), &metrics, scale);
+            let (cols, rows) = geometry.grid();
+            let (cw, ch) = geometry.cell_device_pixels();
+            let sample = geometry.pointer_sample((37.0, 19.0));
+            assert_eq!(sample.cell, (0, 0), "origin at scale {scale}");
+            assert_eq!(sample.cell_size, (cw, ch), "one cell size at scale {scale}");
+            assert_eq!(
+                sample.surface_size,
+                (u32::from(cols) * cw, u32::from(rows) * ch),
+                "surface from the same device lattice at scale {scale}"
+            );
+
+            for col in 0..cols {
+                for row in 0..rows {
+                    // Exact cell boundary, one point before it and one after.
+                    let (ox, oy) = geometry.cell_origin(col, row);
+                    for point in [
+                        (ox, oy),
+                        (ox - 0.01, oy - 0.01),
+                        (ox + 0.01, oy + 0.01),
+                        (
+                            ox + metrics.cell_width * 0.5,
+                            oy + metrics.line_height * 0.5,
+                        ),
+                    ] {
+                        let sample = geometry.pointer_sample(point);
+                        assert_eq!(
+                            sample.cell,
+                            ghostty_cell(&sample),
+                            "hit-test and Ghostty derivation disagree for {point:?} at scale {scale}"
+                        );
+                        assert_eq!(geometry.cell_at(point), sample.cell);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn pointer_sample_clamps_remainder_but_preserves_outside_points() {
+        // 100/9.7 leaves 3px of unused strip after the last full column and
+        // 95/18.4 leaves 3px after the last full row.
+        let metrics = CellMetrics::new(9.7, 18.4);
+        let geometry = TerminalGeometry::new((50.0, 30.0), (100.0, 95.0), &metrics, 1.5);
+        let (cols, rows) = geometry.grid();
+        let (cw, ch) = geometry.cell_device_pixels();
+        let surface = (u32::from(cols) * cw, u32::from(rows) * ch);
+
+        // Interior remainder strip: clamped into the final complete cell so
+        // the cell and the reported pixel cannot contradict each other.
+        let remainder = geometry.pointer_sample((50.0 + 99.5, 30.0 + 94.5));
+        assert_eq!(remainder.cell, (cols - 1, rows - 1));
+        assert_eq!(
+            remainder.position,
+            (surface.0 as i32 - 1, surface.1 as i32 - 1)
+        );
+        assert_eq!(remainder.cell, ghostty_cell(&remainder));
+
+        // Just outside the child before the origin: the cell clamps to zero
+        // but the surface position stays negative so Ghostty drops an unheld
+        // motion and still reports a held drag.
+        let before = geometry.pointer_sample((49.9, 29.9));
+        assert_eq!(before.cell, (0, 0));
+        assert!(before.position.0 < 0 && before.position.1 < 0);
+
+        // Beyond the far edge: the cell clamps to the last one, the position
+        // stays outside the surface.
+        let past = geometry.pointer_sample((200.0, 200.0));
+        assert_eq!(past.cell, (cols - 1, rows - 1));
+        assert!(past.position.0 > surface.0 as i32);
+        assert!(past.position.1 > surface.1 as i32);
+    }
+
+    #[test]
+    fn pointer_sample_remaps_the_same_point_after_a_live_geometry_change() {
+        let point = (137.0, 88.0);
+        let before = TerminalGeometry::new(
+            (20.0, 10.0),
+            (600.0, 360.0),
+            &CellMetrics::new(10.0, 20.0),
+            1.0,
+        );
+        let after = TerminalGeometry::new(
+            (20.0, 10.0),
+            (600.0, 360.0),
+            &CellMetrics::new(9.7, 18.4),
+            1.5,
+        );
+        let first = before.pointer_sample(point);
+        let second = after.pointer_sample(point);
+        assert_eq!(first.cell, ghostty_cell(&first));
+        assert_eq!(second.cell, ghostty_cell(&second));
+        assert_ne!(first.cell, second.cell, "new geometry must remap the point");
+        assert_eq!(first.cell, before.cell_at(point));
+        assert_eq!(second.cell, after.cell_at(point));
+    }
+
+    #[test]
+    fn selection_drag_surface_uses_the_same_lattice_as_mouse_reporting() {
+        // The old selection path truncated logical `cell_width` and computed
+        // screen height independently, so at fractional metrics it disagreed
+        // with the encoder. Both now come from one PointerSample.
+        let metrics = CellMetrics::new(9.7, 18.4);
+        for scale in [1.0f32, 1.25, 1.5, 2.0] {
+            let geometry = TerminalGeometry::new((37.0, 19.0), (773.0, 441.0), &metrics, scale);
+            let (cols, rows) = geometry.grid();
+            let (cw, ch) = geometry.cell_device_pixels();
+            let sample = geometry.pointer_sample((37.0 + 40.0 * 9.7, 19.0 + 3.0 * 18.4));
+            let surface = sample.selection_surface();
+
+            assert_eq!(surface.columns, u32::from(cols));
+            assert_eq!(surface.cell_width, cw);
+            assert_eq!(surface.screen_height, u32::from(rows) * ch);
+            assert_eq!(surface.screen_height, sample.surface_size.1);
+            // Ghostty maps a drag's surface pixel back to a cell by integer
+            // division with this same cell width; it must be the reported cell.
+            let drag_cell = (sample.position.0 as u32 / surface.cell_width.max(1)) as u16;
+            assert_eq!(
+                drag_cell, sample.cell.0,
+                "selection and reporting at scale {scale}"
+            );
+            assert_eq!(drag_cell, ghostty_cell(&sample).0);
+        }
     }
 }

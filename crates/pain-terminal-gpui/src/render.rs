@@ -23,7 +23,8 @@ use gpui::{
 };
 use pain_terminal_core::geometry::{
     adjust_font_size, background_runs, batch_row, line_height_for, selection_span, BgRun,
-    CellMetrics, InputGeometry, RowCache, TerminalGeometry, TextRun as CellRun, FONT_SIZE_STEP,
+    CellMetrics, InputGeometry, PointerSample, RowCache, TerminalGeometry, TextRun as CellRun,
+    FONT_SIZE_STEP,
 };
 use pain_terminal_core::ghostty::{Cursor, KeyEvent};
 use pain_terminal_core::input::{
@@ -558,12 +559,6 @@ impl TerminalView {
         *self.shortcut_filter.borrow_mut() = filter;
     }
 
-    fn cell_at(&self, position: Point<Pixels>) -> (u16, u16) {
-        self.geometry
-            .borrow()
-            .cell_at((f32::from(position.x), f32::from(position.y)))
-    }
-
     /// Control keys are encoded by Ghostty against the terminal's current
     /// modes. Plain printable text propagates to GPUI's native text handler.
     /// App shortcuts (including font keys) are claimed by the raw interceptor
@@ -718,23 +713,17 @@ impl TerminalView {
             // One terminal mouse wheel report per whole row. The session owns
             // the tracking decision under the terminal lock.
             let button = wheel_button(rows < 0);
-            let (x, _y, w, h, px, py, mods) = self.mouse_event(event.position, event.modifiers);
+            let (pointer, mods) = self.pointer_event(event.position, event.modifiers);
             let mut reported = false;
             for _ in 0..rows.unsigned_abs() {
-                let route = self.route_pointer(MouseInput {
-                    action: MouseAction::Press.ghostty(),
-                    button: Some(button),
-                    mods: mods.ghostty_bits(),
-                    x: px,
-                    y: py,
-                    any_button_pressed: self.held_mouse.get() != 0,
-                    surface_width: w,
-                    surface_height: h,
-                    cell_width: self.geometry.borrow().cell_width.max(1.0) as u32,
-                    cell_height: self.geometry.borrow().cell_height.max(1.0) as u32,
-                });
+                let route = self.route_pointer(self.pointer_input(
+                    MouseAction::Press,
+                    Some(button),
+                    mods,
+                    pointer,
+                    self.held_mouse.get() != 0,
+                ));
                 reported |= matches!(route, MouseRoute::Reported { .. });
-                let _ = x;
             }
             if reported {
                 cx.stop_propagation();
@@ -747,29 +736,23 @@ impl TerminalView {
         cx.stop_propagation();
     }
 
-    fn mouse_event(
+    /// One GPUI event → one canonical pointer sample. No caller derives a
+    /// cell, a surface position or a cell size a second time: they all read
+    /// this same normalized value.
+    fn pointer_event(
         &self,
         position: Point<Pixels>,
         modifiers: gpui::Modifiers,
-    ) -> (u16, u16, u32, u32, f32, f32, InputModifiers) {
+    ) -> (PointerSample, InputModifiers) {
         let geometry = *self.geometry.borrow();
-        let (x, y) = self.cell_at(position);
-        let (surface_width, surface_height) = geometry.content_size_px();
+        let pointer = geometry.pointer_sample((f32::from(position.x), f32::from(position.y)));
         let mods = InputModifiers::new(
             modifiers.shift,
             modifiers.control,
             modifiers.alt,
             modifiers.platform,
         );
-        (
-            x,
-            y,
-            surface_width,
-            surface_height,
-            f32::from(position.x) - geometry.origin.0,
-            f32::from(position.y) - geometry.origin.1,
-            mods,
-        )
+        (pointer, mods)
     }
 
     /// One pointer event to the session: it decides routing and queues bytes
@@ -785,30 +768,22 @@ impl TerminalView {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
+    /// Wrap one pointer sample in a domain mouse event. Ghostty's numeric
+    /// action/button codes are added by core, not by the view.
     fn pointer_input(
         &self,
         action: MouseAction,
         button: Option<PtyButton>,
         mods: InputModifiers,
-        px: f32,
-        py: f32,
-        w: u32,
-        h: u32,
+        pointer: PointerSample,
         held: bool,
     ) -> MouseInput {
-        let g = *self.geometry.borrow();
         MouseInput {
-            action: action.ghostty(),
-            button: button.and_then(PtyButton::ghostty),
-            mods: mods.ghostty_bits(),
-            x: px,
-            y: py,
+            action,
+            button,
+            mods,
+            pointer,
             any_button_pressed: held,
-            surface_width: w,
-            surface_height: h,
-            cell_width: g.cell_width.max(1.0) as u32,
-            cell_height: g.cell_height.max(1.0) as u32,
         }
     }
 
@@ -832,7 +807,8 @@ impl TerminalView {
     ) {
         window.focus(&self.focus, cx);
         self.restart_blink(window, cx);
-        let (x, y, w, h, px, py, mods) = self.mouse_event(event.position, event.modifiers);
+        let (pointer, mods) = self.pointer_event(event.position, event.modifiers);
+        let (x, y) = pointer.cell;
         if event.button == MouseButton::Left {
             if let Some(bar) = *self.scrollbar.borrow() {
                 let local_x = f32::from(event.position.x) - bar.track_x;
@@ -856,10 +832,7 @@ impl TerminalView {
                 MouseAction::Press,
                 Some(button),
                 mods,
-                px,
-                py,
-                w,
-                h,
+                pointer,
                 held,
             ));
             if matches!(route, MouseRoute::Reported { .. }) {
@@ -892,17 +865,15 @@ impl TerminalView {
             self.drag_scrollbar_to(f32::from(event.position.y));
             return;
         }
-        let (x, y, w, h, px, py, mods) = self.mouse_event(event.position, event.modifiers);
+        let (pointer, mods) = self.pointer_event(event.position, event.modifiers);
+        let (x, y) = pointer.cell;
         let held = self.held_mouse.get() != 0;
         if !mouse_escape(mods) {
             let route = self.route_pointer(self.pointer_input(
                 MouseAction::Motion,
                 event.pressed_button.and_then(pty_button),
                 mods,
-                px,
-                py,
-                w,
-                h,
+                pointer,
                 held,
             ));
             if matches!(route, MouseRoute::Reported { .. }) {
@@ -914,10 +885,7 @@ impl TerminalView {
             // actually enters a different terminal cell.
             if self.last_drag_cell.get() != Some((x, y)) {
                 self.last_drag_cell.set(Some((x, y)));
-                let g = *self.geometry.borrow();
-                let _ =
-                    self.session
-                        .drag_selection_gesture(x, y, g.cols, g.cell_width, g.cell_height);
+                let _ = self.session.drag_selection_gesture(x, y, pointer);
             }
         }
     }
@@ -929,7 +897,7 @@ impl TerminalView {
             self.capture = PointerCapture::None;
             return;
         }
-        let (_x, _y, w, h, px, py, mods) = self.mouse_event(event.position, event.modifiers);
+        let (pointer, mods) = self.pointer_event(event.position, event.modifiers);
         let Some(button) = pty_button(event.button) else {
             return;
         };
@@ -940,10 +908,7 @@ impl TerminalView {
                 MouseAction::Release,
                 Some(button),
                 mods,
-                px,
-                py,
-                w,
-                h,
+                pointer,
                 held,
             ));
             if matches!(route, MouseRoute::Reported { .. }) {

@@ -142,23 +142,28 @@ fn selected_palette_reaches_ghostty_render_state() {
 /// 1003. This guards the "mouse reporting feels off" regression.
 #[test]
 fn mouse_motion_follows_terminal_tracking_modes() {
-    use pain::terminal::input::{MouseAction, MouseButton};
+    use pain::terminal::geometry::{CellMetrics, TerminalGeometry};
+    use pain::terminal::input::{Modifiers, MouseAction, MouseButton};
+    use pain::terminal::session::MouseInput;
 
     let session = TerminalSession::new(80, 24, Box::new(NoopWakeup)).expect("session");
+    // One canonical geometry for the whole test: the encoder sees the same
+    // normalized sample the view would have produced.
+    let geometry = TerminalGeometry::new(
+        (0.0, 0.0),
+        (800.0, 600.0),
+        &CellMetrics::new(10.0, 25.0),
+        1.0,
+    );
     let encode = |session: &TerminalSession, button, held, x, y| {
         session
-            .encode_mouse(
-                MouseAction::Motion.ghostty(),
+            .encode_mouse_for_test(MouseInput {
+                action: MouseAction::Motion,
                 button,
-                0,
-                x,
-                y,
-                held,
-                800,
-                600,
-                10,
-                25,
-            )
+                mods: Modifiers::default(),
+                pointer: geometry.pointer_sample((x, y)),
+                any_button_pressed: held,
+            })
             .expect("encode motion")
     };
 
@@ -189,7 +194,7 @@ fn mouse_motion_follows_terminal_tracking_modes() {
     // 1002 button-event: hover is dropped, a held-button drag is reported.
     session.write_vt(b"\x1b[?1003l\x1b[?1002h");
     assert!(encode(&session, None, false, 300.0, 300.0).is_empty());
-    let drag = encode(&session, MouseButton::Left.ghostty(), true, 300.0, 300.0);
+    let drag = encode(&session, Some(MouseButton::Left), true, 300.0, 300.0);
     assert!(
         drag.starts_with(b"\x1b[<32;"),
         "left drag should be SGR button 32, got {drag:?}"

@@ -5,7 +5,7 @@
 //! algorithm; this module only converts wheel deltas and maps a scrollbar thumb
 //! position to a Ghostty viewport row.
 
-use ghostty_vt_sys;
+use crate::input::MouseButton;
 
 /// GPUI reports positive Y for wheel up. Ghostty's viewport delta is negative
 /// for up, so invert here. One notch is one row.
@@ -14,13 +14,14 @@ pub fn wheel_to_ghostty_delta(up_rows: f64) -> isize {
     -(up_rows.round() as isize)
 }
 
-/// Terminal protocols report wheel up/down as buttons 4/5.
+/// Terminal protocols report wheel up/down as buttons 4/5. Return the domain
+/// button; the Ghostty constant is supplied inside core's adapter.
 #[must_use]
-pub fn wheel_button(up: bool) -> i32 {
+pub fn wheel_button(up: bool) -> MouseButton {
     if up {
-        ghostty_vt_sys::GHOSTTY_MOUSE_BUTTON_FOUR
+        MouseButton::WheelUp
     } else {
-        ghostty_vt_sys::GHOSTTY_MOUSE_BUTTON_FIVE
+        MouseButton::WheelDown
     }
 }
 
@@ -112,14 +113,10 @@ mod tests {
 
     #[test]
     fn scrollbar_is_a_view_over_ghostty_rows() {
-        assert_eq!(
-            wheel_button(true),
-            ghostty_vt_sys::GHOSTTY_MOUSE_BUTTON_FOUR
-        );
-        assert_eq!(
-            wheel_button(false),
-            ghostty_vt_sys::GHOSTTY_MOUSE_BUTTON_FIVE
-        );
+        assert_eq!(wheel_button(true), MouseButton::WheelUp);
+        assert_eq!(wheel_button(false), MouseButton::WheelDown);
+        assert_eq!(wheel_button(true).ghostty(), Some(4));
+        assert_eq!(wheel_button(false).ghostty(), Some(5));
         assert!(scrollbar_geometry(100, 0, 100, 0.0, 0.0, 400.0, 200.0).is_none());
         let geometry =
             scrollbar_geometry(200, 50, 100, 0.0, 0.0, 400.0, 200.0).expect("history is present");
