@@ -216,40 +216,57 @@ fn windows_conpty_runs_vim_alternate_screen_and_mouse_mode() {
     };
 
     // Vim draws an alternate screen immediately; wait for the first frame.
-    // Hosted runners can ship a `vim.exe` that exits without rendering (for
-    // example a GUI launcher or a build with no matching terminfo). The
-    // transport itself is covered by the other ConPTY gates and by the
-    // deterministic mouse-mode test, so treat an unrenderable optional editor
-    // as a skip rather than a failure.
+    // Distinguish an unusable host tool from a Pain transport regression by
+    // watching the child as well as the terminal. Hosted runners can ship a
+    // `vim.exe` that exits without rendering (a GUI launcher or a build with
+    // no matching terminfo): that is an environment skip. A child which is
+    // still alive at the deadline but delivered no bytes is a transport
+    // failure, so the gate must fail instead of silently skipping.
     let mut saw_output = false;
+    let mut child_exited = false;
     let deadline = Instant::now() + Duration::from_secs(5);
-    while Instant::now() < deadline {
+    loop {
+        // Check output before exit so a child that emits a frame and then
+        // exits immediately is still classified as "output arrived".
         if !snapshot_text(&session).is_empty() {
             saw_output = true;
+            break;
+        }
+        if pty.process_exited() {
+            child_exited = true;
+            break;
+        }
+        if Instant::now() >= deadline {
             break;
         }
         std::thread::sleep(Duration::from_millis(20));
     }
     if !saw_output {
         pty.shutdown();
-        eprintln!("SKIP vim smoke test: vim produced no output in this environment");
-        return;
+        if child_exited {
+            eprintln!("SKIP vim smoke test: vim exited without rendering a frame");
+            return;
+        }
+        panic!(
+            "vim produced no terminal output while the ConPTY child was still \
+             running: Pain is not transporting PTY bytes"
+        );
     }
 
     // A mouse TUI enables tracking through a terminal mode report, which
     // Ghostty owns. The session must observe it without any Rust-side table.
+    // Capture the observed state before shutdown so every path tears the
+    // child down even when the assertion fails.
     session.enqueue_writer(b":set mouse=a\r".to_vec());
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline && !session.mouse_tracking_enabled().unwrap_or(false) {
         std::thread::sleep(Duration::from_millis(20));
     }
-    assert!(
-        session.mouse_tracking_enabled().unwrap_or(false),
-        "vim did not enable mouse reporting"
-    );
+    let mouse_enabled = session.mouse_tracking_enabled().unwrap_or(false);
 
     session.enqueue_writer(b":q!\r".to_vec());
     pty.shutdown();
+    assert!(mouse_enabled, "vim did not enable mouse reporting");
 }
 
 #[cfg(target_os = "windows")]
@@ -321,13 +338,23 @@ fn wsl_client_apc_survives_wsl_pty_and_conpty() {
     // with a plain child process first: when bash cannot start there is no
     // Linux client to exercise, so skip instead of reporting a transport
     // failure. The bundled-ConPTY APC gate above still covers this host.
-    let wsl_ready = std::process::Command::new("wsl.exe")
+    // Success status alone is not evidence: a wrapper that exits zero without
+    // executing bash would make this gate pass while exercising nothing. The
+    // marker must actually appear on stdout.
+    let probe = std::process::Command::new("wsl.exe")
         .args(["-e", "bash", "-c", "printf PAIN_WSL_READY"])
-        .output()
-        .map(|out| out.status.success())
+        .output();
+    let wsl_ready = probe
+        .as_ref()
+        .map(|out| {
+            out.status.success() && String::from_utf8_lossy(&out.stdout).contains("PAIN_WSL_READY")
+        })
         .unwrap_or(false);
     if !wsl_ready {
-        eprintln!("SKIP WSL APC gate: no usable WSL distro is installed");
+        eprintln!(
+            "SKIP WSL APC gate: no usable WSL distro is installed (expected \
+             PAIN_WSL_READY on stdout)"
+        );
         return;
     }
     // Linux client -> WSL PTY -> ConPTY -> Pain -> libghostty-vt. This is the
