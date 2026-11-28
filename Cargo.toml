@@ -8,11 +8,16 @@ publish = false
 
 [workspace]
 resolver = "2"
-members = ["crates/ghostty-vt-sys", "crates/pain-terminal-core"]
+members = [
+    "crates/ghostty-vt-sys",
+    "crates/pain-terminal-core",
+    "crates/pain-terminal-pty",
+]
 
 [dependencies]
 ghostty-vt-sys = { path = "crates/ghostty-vt-sys" }
 pain-terminal-core = { path = "crates/pain-terminal-core" }
+pain-terminal-pty = { path = "crates/pain-terminal-pty" }
 serde = { version = "1", features = ["derive"] }
 # The GPUI image cache decodes frames for display; the PNG decoder used by
 # Ghostty's system callback lives in pain-terminal-core.
@@ -43,10 +48,6 @@ windows = { version = "0.61.3", features = [
     "Win32_UI_Shell_Common",
     "Win32_UI_Shell_PropertiesSystem",
 ] }
-
-# M4 POSIX PTY transport. Only libc primitives; no GTK/X11/Wayland code.
-[target.'cfg(target_os = "linux")'.dependencies]
-libc = "0.2"
 
 # Pinned to a pushed Silvestris revision so a fresh clone builds without a
 # sibling checkout, matching Chaus. This revision's config/pins.toml carries

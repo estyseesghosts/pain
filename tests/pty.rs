@@ -145,7 +145,7 @@ fn linux_pty_runs_shell_input_resize_and_shutdown() {
         snapshot_text(&session)
     );
 
-    pty.shutdown();
+    pty.shutdown().expect("PTY shutdown completed");
     assert!(
         exited.load(std::sync::atomic::Ordering::SeqCst),
         "child exit was not observed and reaped"
@@ -185,7 +185,7 @@ fn windows_conpty_runs_cmd_input_resize_and_shutdown() {
     pty.request_resize(100, 30, 10, 20)
         .expect("duplicate resize");
 
-    pty.shutdown();
+    pty.shutdown().expect("PTY shutdown completed");
 }
 
 #[cfg(target_os = "windows")]
@@ -212,7 +212,7 @@ fn windows_conpty_runs_powershell() {
         "PowerShell output never reached Ghostty: {}",
         snapshot_text(&session)
     );
-    pty.shutdown();
+    pty.shutdown().expect("PTY shutdown completed");
 }
 
 #[cfg(target_os = "windows")]
@@ -264,7 +264,7 @@ fn windows_conpty_runs_vim_alternate_screen_and_mouse_mode() {
         std::thread::sleep(Duration::from_millis(20));
     }
     if !saw_output {
-        pty.shutdown();
+        pty.shutdown().expect("PTY shutdown completed");
         if child_exited {
             eprintln!("SKIP vim smoke test: vim exited without rendering a frame");
             return;
@@ -291,7 +291,7 @@ fn windows_conpty_runs_vim_alternate_screen_and_mouse_mode() {
     session
         .enqueue_writer(b":q!\r".to_vec())
         .expect("enqueue vim quit");
-    pty.shutdown();
+    pty.shutdown().expect("PTY shutdown completed");
     assert!(mouse_enabled, "vim did not enable mouse reporting");
 }
 
@@ -349,7 +349,7 @@ fn conpty_apc_survives_to_ghostty_graphics() {
         wait_for_image(&session, 77),
         "the bundled ConPTY did not forward the Kitty APC to libghostty-vt"
     );
-    pty.shutdown();
+    pty.shutdown().expect("PTY shutdown completed");
     let _ = std::fs::remove_file(path);
 }
 
@@ -413,7 +413,7 @@ fn wsl_client_apc_survives_wsl_pty_and_conpty() {
         wait_for_image(&session, 78),
         "an APC produced inside WSL did not survive to libghostty-vt"
     );
-    pty.shutdown();
+    pty.shutdown().expect("PTY shutdown completed");
 }
 
 #[cfg(target_os = "linux")]
@@ -461,7 +461,7 @@ fn linux_real_kitty_client_image_reaches_ghostty() {
         }
     };
     let placed = wait_for_any_image(&session);
-    pty.shutdown();
+    pty.shutdown().expect("PTY shutdown completed");
     let _ = std::fs::remove_file(&path);
     assert!(
         placed,
@@ -522,7 +522,7 @@ fn linux_kitten_unicode_placeholder_reaches_ghostty() {
         .iter()
         .any(|placement| placement.kind == pain::terminal::ImagePlacementKind::Virtual);
     session.mark_frame_complete().expect("frame complete");
-    pty.shutdown();
+    pty.shutdown().expect("PTY shutdown completed");
     let _ = std::fs::remove_file(&path);
     assert!(
         placed,

@@ -35,7 +35,7 @@ use super::{
     terminal_environment, PlatformPty, PtyConfig, PtyError, PtyEvent, PtyEventSink,
     PtyResizeMailbox,
 };
-use crate::terminal::session::TerminalSession;
+use pain_terminal_core::session::TerminalSession;
 
 static NEXT_PIPE_ID: AtomicU32 = AtomicU32::new(0);
 
@@ -266,13 +266,6 @@ fn load_conpty_api() -> ConPtyApi {
     if let Some(directory) = executable_directory() {
         if let Some(module) = load_adjacent_conpty(&directory) {
             if let Some((create, resize, close)) = resolve_pseudo_console(module) {
-                crate::log::info(
-                    "conpty",
-                    &format!(
-                        "using bundled {} for ConPTY (Kitty APC forwarding)",
-                        directory.join("conpty.dll").display()
-                    ),
-                );
                 return ConPtyApi {
                     create,
                     resize,
@@ -281,13 +274,6 @@ fn load_conpty_api() -> ConPtyApi {
                     _module: module,
                 };
             }
-            crate::log::log(
-                "WARN",
-                "conpty",
-                "adjacent conpty.dll is missing ConPTY exports; falling back to kernel32",
-            );
-        } else {
-            crate::log::log("WARN", "conpty", CONPTY_FALLBACK_WARNING);
         }
     }
     // Platform invariant: kernel32 is part of Windows and ConPTY entry points
@@ -308,6 +294,17 @@ fn load_conpty_api() -> ConPtyApi {
 #[must_use]
 pub fn conpty_api() -> &'static ConPtyApi {
     CONPTY_API.get_or_init(load_conpty_api)
+}
+
+/// Host-facing fact about transport quality. The host decides whether to log
+/// or surface it; the transport itself does not write to a logging framework.
+#[must_use]
+pub fn conpty_diagnostic() -> Option<&'static str> {
+    if conpty_api().bundled {
+        None
+    } else {
+        Some(CONPTY_FALLBACK_WARNING)
+    }
 }
 
 /// Whether the active transport is the bundled, APC-preserving host. Exposed
@@ -374,6 +371,9 @@ impl WindowsPty {
             || config.command.args.iter().any(|arg| arg.contains('\0'))
         {
             return Err(PtyError::new("CreateProcessW", "NUL in command line"));
+        }
+        if let Some(message) = conpty_diagnostic() {
+            events(PtyEvent::TransportDegraded(message.to_owned()));
         }
 
         // A named pipe for input, matching Wintty's proven ConPTY setup. The
@@ -826,7 +826,10 @@ impl PlatformPty for WindowsPty {
         self.exited.load(Ordering::Acquire)
     }
 
-    fn shutdown(self: Box<Self>) {
+    /// Blocking. Never call from the GPUI foreground thread: it joins workers
+    /// and waits for the child. Returns the first worker join failure so the
+    /// host can report an incomplete teardown.
+    fn shutdown(self: Box<Self>) -> Result<(), PtyError> {
         self.stop.store(true, Ordering::Release);
         // Stop accepting resizes, wake the worker and join before the ConPTY
         // handle can be dropped. This never blocks indefinitely.
@@ -854,11 +857,27 @@ impl PlatformPty for WindowsPty {
             // SAFETY: targeting only our own child process with exit code 1.
             let _ = unsafe { TerminateProcess(self.process.as_raw(), 1) };
         }
-        // HPCON is dropped when `self` is dropped after the joins below.
+        // HPCON is dropped when `self` is dropped after the joins below. Join
+        // every worker even if one panicked: teardown must be complete before
+        // handles are released. Report the first panic to the host.
+        let mut failure: Option<PtyError> = None;
         if let Some(threads) = self.threads.lock().expect("threads mutex poisoned").take() {
-            let _ = threads.reader.join();
-            let _ = threads.writer.join();
-            let _ = threads.waiter.join();
+            for (name, worker) in [
+                ("reader", threads.reader),
+                ("writer", threads.writer),
+                ("waiter", threads.waiter),
+            ] {
+                if worker.join().is_err() && failure.is_none() {
+                    failure = Some(PtyError::new(
+                        "join ConPTY worker",
+                        format!("{name} worker panicked during shutdown"),
+                    ));
+                }
+            }
+        }
+        match failure {
+            Some(error) => Err(error),
+            None => Ok(()),
         }
     }
 }
@@ -866,7 +885,7 @@ impl PlatformPty for WindowsPty {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::ShellCommand;
+    use crate::ShellCommand;
 
     #[test]
     fn quote_argument_handles_spaces_and_quotes() {

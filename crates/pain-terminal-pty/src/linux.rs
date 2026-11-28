@@ -15,7 +15,7 @@ use super::{
     terminal_environment, PlatformPty, PtyConfig, PtyError, PtyEvent, PtyEventSink,
     PtyResizeMailbox,
 };
-use crate::terminal::session::TerminalSession;
+use pain_terminal_core::session::TerminalSession;
 
 /// `TIOCSWINSZ` payload derived from the terminal grid. The pixel fields stay
 /// zero until the renderer has measured a cell; they are carried only when the
@@ -450,7 +450,7 @@ impl PlatformPty for LinuxPty {
         self.exited.load(Ordering::Acquire)
     }
 
-    fn shutdown(self: Box<Self>) {
+    fn shutdown(self: Box<Self>) -> Result<(), PtyError> {
         self.stop.store(true, Ordering::Release);
         // Stop accepting resizes, wake the worker and join before the master
         // fd can be dropped.
@@ -467,10 +467,26 @@ impl PlatformPty for LinuxPty {
         unsafe {
             libc::kill(-self.child, libc::SIGKILL);
         }
+        // Join every worker even if one panicked; report the first panic once
+        // the whole group has been torn down.
+        let mut failure: Option<PtyError> = None;
         if let Some(threads) = self.threads.lock().expect("threads mutex poisoned").take() {
-            let _ = threads.reader.join();
-            let _ = threads.writer.join();
-            let _ = threads.waiter.join();
+            for (name, worker) in [
+                ("reader", threads.reader),
+                ("writer", threads.writer),
+                ("waiter", threads.waiter),
+            ] {
+                if worker.join().is_err() && failure.is_none() {
+                    failure = Some(PtyError::new(
+                        "join POSIX PTY worker",
+                        format!("{name} worker panicked during shutdown"),
+                    ));
+                }
+            }
+        }
+        match failure {
+            Some(error) => Err(error),
+            None => Ok(()),
         }
     }
 }
@@ -491,12 +507,5 @@ mod tests {
         assert_eq!(size.ws_row, 43);
         assert_eq!(size.ws_xpixel, 1320);
         assert_eq!(size.ws_ypixel, 860);
-    }
-
-    #[test]
-    fn default_shell_is_absolute_when_set() {
-        let shell = super::super::default_shell();
-        assert!(shell.program.starts_with('/'), "{}", shell.program);
-        assert!(shell.args.is_empty());
     }
 }

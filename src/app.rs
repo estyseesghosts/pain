@@ -336,8 +336,7 @@ pub fn run() {
         // a window that GPUI has already leased for key dispatch. The actual
         // command is dispatched on the focused view after this dispatch ends.
         cx.intercept_keystrokes(move |event: &gpui::KeystrokeEvent, window, cx| {
-            let Some(focus) = cx.try_global::<crate::gpui::render::TerminalFocusGlobal>()
-            else {
+            let Some(focus) = cx.try_global::<crate::gpui::render::TerminalFocusGlobal>() else {
                 return;
             };
             if !focus.0.is_focused(window) {
@@ -419,7 +418,12 @@ pub fn run() {
                 let holder = Arc::clone(&holder_on_close);
                 std::thread::spawn(move || {
                     if let Some(pty) = holder.lock().expect("pty holder poisoned").take() {
-                        pty.shutdown();
+                        if let Err(error) = pty.shutdown() {
+                            log::error(
+                                "shutdown",
+                                &format!("PTY teardown was incomplete: {error}"),
+                            );
+                        }
                     }
                 });
             }
