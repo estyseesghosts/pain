@@ -1,6 +1,7 @@
 //! Terminal engine layer. Ghostty owns all terminal semantics; this module
 //! only owns the handles and translates data into plain Rust values.
 
+pub mod counters;
 pub mod error;
 pub mod ghostty;
 

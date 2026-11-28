@@ -113,7 +113,14 @@ fn linux_pty_runs_shell_input_resize_and_shutdown() {
         cell_height_px: 0,
         command: ShellCommand::new("/bin/sh"),
     };
-    let pty = spawn_pty(&config, Arc::clone(&session), no_events()).expect("spawn /bin/sh");
+    let exited = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let exit_seen = Arc::clone(&exited);
+    let events: pain::platform::PtyEventSink = Arc::new(move |event| {
+        if matches!(event, pain::platform::PtyEvent::ProcessExited { .. }) {
+            exit_seen.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    });
+    let pty = spawn_pty(&config, Arc::clone(&session), events).expect("spawn /bin/sh");
 
     session
         .enqueue_writer(b"echo PAIN_LINUX_MARKER\n".to_vec())
@@ -140,7 +147,7 @@ fn linux_pty_runs_shell_input_resize_and_shutdown() {
 
     pty.shutdown();
     assert!(
-        session.process_exited(),
+        exited.load(std::sync::atomic::Ordering::SeqCst),
         "child exit was not observed and reaped"
     );
 }

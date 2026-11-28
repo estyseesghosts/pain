@@ -338,6 +338,13 @@ struct Threads {
     waiter: JoinHandle<()>,
 }
 
+/// Shared lifecycle context handed to the three workers.
+struct WorkerContext {
+    stop: Arc<AtomicBool>,
+    exited: Arc<AtomicBool>,
+    events: PtyEventSink,
+}
+
 /// Owns one ConPTY session. `HPCON` never leaves this module.
 pub struct WindowsPty {
     _conpty: Arc<ConPty>,
@@ -348,6 +355,8 @@ pub struct WindowsPty {
     process: Arc<OwnedHandle>,
     reader_thread: Arc<Mutex<Option<OwnedHandle>>>,
     stop: Arc<AtomicBool>,
+    /// Process lifecycle belongs to the PTY layer, not the terminal session.
+    exited: Arc<AtomicBool>,
     session: Arc<TerminalSession>,
     _size: Arc<Mutex<(u16, u16)>>,
     /// Latest-value mailbox; the UI only updates the pending grid.
@@ -541,14 +550,18 @@ impl WindowsPty {
 
         let stop = Arc::new(AtomicBool::new(false));
         let reader_thread = Arc::new(Mutex::new(None));
+        let exited = Arc::new(AtomicBool::new(false));
         let threads = match start_threads(
             &session,
             Arc::clone(&input_write),
             Arc::clone(&output_read),
             Arc::clone(&process),
             Arc::clone(&reader_thread),
-            Arc::clone(&stop),
-            Arc::clone(&events),
+            WorkerContext {
+                stop: Arc::clone(&stop),
+                exited: Arc::clone(&exited),
+                events: Arc::clone(&events),
+            },
         ) {
             Ok(threads) => threads,
             Err(error) => {
@@ -588,6 +601,7 @@ impl WindowsPty {
             process,
             reader_thread,
             stop,
+            exited,
             session,
             _size: size,
             resize_mailbox,
@@ -619,9 +633,13 @@ fn start_threads(
     output_read: Arc<OwnedHandle>,
     process: Arc<OwnedHandle>,
     reader_thread: Arc<Mutex<Option<OwnedHandle>>>,
-    stop: Arc<AtomicBool>,
-    events: PtyEventSink,
+    context: WorkerContext,
 ) -> Result<Threads, PtyError> {
+    let WorkerContext {
+        stop,
+        exited,
+        events,
+    } = context;
     let reader_session = Arc::clone(session);
     let reader_output = Arc::clone(&output_read);
     let reader_stop = Arc::clone(&stop);
@@ -744,7 +762,7 @@ fn start_threads(
         }
     };
 
-    let waiter_session = Arc::clone(session);
+    let waiter_exited = Arc::clone(&exited);
     let waiter_process = Arc::clone(&process);
     let waiter_reader = Arc::clone(&reader_thread);
     let waiter_stop = Arc::clone(&stop);
@@ -759,9 +777,8 @@ fn start_threads(
             let code = unsafe { GetExitCodeProcess(waiter_process.as_raw(), &mut code) }
                 .map(|()| code)
                 .ok();
-            // Transitional: the event is now the authoritative notification;
-            // the session flag is kept temporarily for existing headless gates.
-            waiter_session.mark_process_exited();
+            // The PTY owns process lifecycle state; the event tells the host.
+            waiter_exited.store(true, Ordering::Release);
             waiter_events(PtyEvent::ProcessExited { exit_code: code });
             waiter_stop.store(true, Ordering::Release);
             // Give output a brief chance to drain before cancelling the read.
@@ -806,7 +823,7 @@ impl PlatformPty for WindowsPty {
     }
 
     fn process_exited(&self) -> bool {
-        self.session.process_exited()
+        self.exited.load(Ordering::Acquire)
     }
 
     fn shutdown(self: Box<Self>) {

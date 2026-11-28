@@ -238,21 +238,30 @@ pub fn run() {
         }
 
         if let Some(pty_config) = pending_shell {
-            // Pixel-only resizes never reach the PTY: the session invokes this
-            // hook only after the Ghostty grid changes. Install it before the
-            // first frame so a measured grid is never lost.
+            // The view reports real grid changes to its host. Pain connects
+            // that bridge to its own PTY; terminal code never names a PTY.
+            // Install before the first frame so a measured grid is not lost.
             let resize_holder = Arc::clone(&pty_holder);
-            session.set_pty_resize(Arc::new(
-                move |cols, rows, cell_width_px, cell_height_px| {
-                    if let Some(pty) = resize_holder.lock().expect("pty holder poisoned").as_ref() {
-                        if let Err(error) =
-                            pty.request_resize(cols, rows, cell_width_px, cell_height_px)
-                        {
-                            log::error("resize", &format!("PTY resize request rejected: {error}"));
-                        }
-                    }
-                },
-            ));
+            let _ = view.update(cx, |app, _, cx| {
+                app.terminal.update(cx, |terminal, _| {
+                    terminal.set_grid_change_sink(Arc::new(
+                        move |cols, rows, cell_width_px, cell_height_px| {
+                            if let Some(pty) =
+                                resize_holder.lock().expect("pty holder poisoned").as_ref()
+                            {
+                                if let Err(error) =
+                                    pty.request_resize(cols, rows, cell_width_px, cell_height_px)
+                                {
+                                    log::error(
+                                        "resize",
+                                        &format!("PTY resize request rejected: {error}"),
+                                    );
+                                }
+                            }
+                        },
+                    ));
+                });
+            });
             // The first frame's prepaint applies the measured cell pixels and
             // grid. Only then can a Kitty client's XTWINOPS pixel-size query be
             // answered, so start the shell after that frame and use the grid

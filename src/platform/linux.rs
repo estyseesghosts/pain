@@ -140,6 +140,8 @@ pub struct LinuxPty {
     _master: Arc<MasterFd>,
     child: pid_t,
     stop: Arc<AtomicBool>,
+    /// Process lifecycle belongs to the PTY layer, not the terminal session.
+    exited: Arc<AtomicBool>,
     session: Arc<TerminalSession>,
     _size: Arc<Mutex<GridSize>>,
     /// Latest-value mailbox; the UI only updates the pending grid.
@@ -245,10 +247,12 @@ impl LinuxPty {
 
         let master = Arc::new(MasterFd::new(master_fd));
         let stop = Arc::new(AtomicBool::new(false));
+        let exited = Arc::new(AtomicBool::new(false));
         let threads = match start_threads(
             &session,
             Arc::clone(&master),
             Arc::clone(&stop),
+            Arc::clone(&exited),
             child.id(),
             Arc::clone(&events),
         ) {
@@ -297,6 +301,7 @@ impl LinuxPty {
             _master: master,
             child: child.id() as pid_t,
             stop,
+            exited,
             session,
             _size: size,
             resize_mailbox,
@@ -309,6 +314,7 @@ fn start_threads(
     session: &Arc<TerminalSession>,
     master: Arc<MasterFd>,
     stop: Arc<AtomicBool>,
+    exited: Arc<AtomicBool>,
     child: u32,
     events: PtyEventSink,
 ) -> Result<Threads, PtyError> {
@@ -388,7 +394,7 @@ fn start_threads(
         }
     };
 
-    let waiter_session = Arc::clone(session);
+    let waiter_exited = Arc::clone(&exited);
     let waiter_events = Arc::clone(&events);
     let waiter = thread::Builder::new()
         .name("pain-child-waiter".into())
@@ -403,9 +409,8 @@ fn start_threads(
             } else {
                 None
             };
-            // Transitional: keep the session flag for existing gates while the
-            // event becomes the authoritative lifecycle notification.
-            waiter_session.mark_process_exited();
+            // The PTY owns process lifecycle state; the event tells the host.
+            waiter_exited.store(true, Ordering::Release);
             waiter_events(PtyEvent::ProcessExited { exit_code });
         });
     let waiter = match waiter {
@@ -442,7 +447,7 @@ impl PlatformPty for LinuxPty {
     }
 
     fn process_exited(&self) -> bool {
-        self.session.process_exited()
+        self.exited.load(Ordering::Acquire)
     }
 
     fn shutdown(self: Box<Self>) {

@@ -77,6 +77,10 @@ struct FrameCache {
 /// flooding logs on every frame.
 pub type TerminalErrorSink = Arc<dyn Fn(String) + Send + Sync>;
 
+/// Host-owned grid-change notification. The renderer reports the new grid and
+/// device-pixel cell size; it never names or imports a PTY.
+pub type GridChangeSink = Arc<dyn Fn(u16, u16, u32, u32) + Send + Sync>;
+
 /// Global focus token used by the early raw-keystroke ownership check. The
 /// interceptor never calls into a leased window; it only reads this handle.
 pub struct TerminalFocusGlobal(pub FocusHandle);
@@ -201,6 +205,8 @@ pub struct TerminalView {
     /// Host-owned report path for pane-local recoverable failures.
     error_sink: RefCell<TerminalErrorSink>,
     error_reported: Cell<bool>,
+    /// Host-owned PTY bridge, installed by the application that owns both.
+    grid_change: RefCell<Option<GridChangeSink>>,
 }
 
 impl TerminalView {
@@ -236,6 +242,7 @@ impl TerminalView {
                 crate::log::error("terminal", &message);
             })),
             error_reported: Cell::new(false),
+            grid_change: RefCell::new(None),
         };
         // A lost OS release must never strand a scrollbar drag or a held
         // terminal button. Both focus loss and window deactivation cancel it.
@@ -257,6 +264,12 @@ impl TerminalView {
                 this.restart_blink(window, cx);
             }));
         view
+    }
+
+    /// Install the bridge from terminal grid changes to the host's transport.
+    /// The renderer stays unaware of PTY types and shutdown rules.
+    pub fn set_grid_change_sink(&mut self, sink: GridChangeSink) {
+        *self.grid_change.borrow_mut() = Some(sink);
     }
 
     /// Replace the default reporter. The host can route this to its own log,
@@ -1139,10 +1152,18 @@ impl Element for TerminalElement {
                 return view.fallback_frame(bar, &metrics, rows);
             }
         };
-        // The host owns the PTY grid relationship. A grid change is reported
-        // to the view's host callback in a later composition step; prepaint
-        // still must not know which transport is attached.
-        let _ = outcome;
+        // The host owns the PTY relationship. Report only real grid changes,
+        // with the dimensions Ghostty adopted; never call transport code here.
+        if outcome.grid_changed {
+            if let Some(sink) = view.grid_change.borrow().as_ref() {
+                sink(
+                    outcome.geometry.cols,
+                    outcome.geometry.rows,
+                    outcome.geometry.cell_width_px,
+                    outcome.geometry.cell_height_px,
+                );
+            }
+        }
         let snapshot = match session.render_snapshot() {
             Ok(snapshot) => snapshot,
             Err(error) => {
