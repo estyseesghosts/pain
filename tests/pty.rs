@@ -6,8 +6,15 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use pain::platform::{spawn_pty, PtyConfig, ShellCommand};
+use pain::platform::{spawn_pty, PtyConfig, PtyEventSink, ShellCommand};
 use pain::terminal::session::{NoopWakeup, TerminalSession};
+
+/// These gates exercise transport and parsing, not host presentation. They
+/// supply a sink that deliberately discards events instead of mocking the
+/// real PTY boundary.
+fn no_events() -> PtyEventSink {
+    Arc::new(|_| {})
+}
 
 #[cfg(target_os = "windows")]
 fn b64(data: &[u8]) -> String {
@@ -106,7 +113,7 @@ fn linux_pty_runs_shell_input_resize_and_shutdown() {
         cell_height_px: 0,
         command: ShellCommand::new("/bin/sh"),
     };
-    let pty = spawn_pty(&config, Arc::clone(&session)).expect("spawn /bin/sh");
+    let pty = spawn_pty(&config, Arc::clone(&session), no_events()).expect("spawn /bin/sh");
 
     session
         .enqueue_writer(b"echo PAIN_LINUX_MARKER\n".to_vec())
@@ -119,8 +126,9 @@ fn linux_pty_runs_shell_input_resize_and_shutdown() {
 
     // Distinct grid size reaches the PTY; a duplicate is coalesced by the
     // backend and must not disturb the session.
-    pty.resize(100, 30, 10, 20).expect("resize PTY");
-    pty.resize(100, 30, 10, 20).expect("duplicate resize");
+    pty.request_resize(100, 30, 10, 20).expect("resize PTY");
+    pty.request_resize(100, 30, 10, 20)
+        .expect("duplicate resize");
     session
         .enqueue_writer(b"stty size\n".to_vec())
         .expect("enqueue stty");
@@ -149,7 +157,7 @@ fn windows_conpty_runs_cmd_input_resize_and_shutdown() {
         cell_height_px: 0,
         command: ShellCommand::new("C:\\Windows\\System32\\cmd.exe"),
     };
-    let pty = spawn_pty(&config, Arc::clone(&session)).expect("spawn cmd.exe");
+    let pty = spawn_pty(&config, Arc::clone(&session), no_events()).expect("spawn cmd.exe");
 
     // The ConPTY host (OpenConsole) starts asynchronously; wait for its first
     // output before sending input so the command is not lost during startup.
@@ -166,8 +174,9 @@ fn windows_conpty_runs_cmd_input_resize_and_shutdown() {
         snapshot_text(&session)
     );
 
-    pty.resize(100, 30, 10, 20).expect("resize ConPTY");
-    pty.resize(100, 30, 10, 20).expect("duplicate resize");
+    pty.request_resize(100, 30, 10, 20).expect("resize ConPTY");
+    pty.request_resize(100, 30, 10, 20)
+        .expect("duplicate resize");
 
     pty.shutdown();
 }
@@ -190,7 +199,7 @@ fn windows_conpty_runs_powershell() {
             ],
         },
     };
-    let pty = spawn_pty(&config, Arc::clone(&session)).expect("spawn powershell.exe");
+    let pty = spawn_pty(&config, Arc::clone(&session), no_events()).expect("spawn powershell.exe");
     assert!(
         wait_for(&session, "PAIN_PS_MARKER"),
         "PowerShell output never reached Ghostty: {}",
@@ -213,7 +222,7 @@ fn windows_conpty_runs_vim_alternate_screen_and_mouse_mode() {
             args: vec!["-u".into(), "NONE".into()],
         },
     };
-    let pty = match spawn_pty(&config, Arc::clone(&session)) {
+    let pty = match spawn_pty(&config, Arc::clone(&session), no_events()) {
         Ok(pty) => pty,
         Err(error) => {
             eprintln!("skipping vim smoke test: {error}");
@@ -328,7 +337,7 @@ fn conpty_apc_survives_to_ghostty_graphics() {
             ],
         },
     };
-    let pty = spawn_pty(&config, Arc::clone(&session)).expect("spawn cmd.exe");
+    let pty = spawn_pty(&config, Arc::clone(&session), no_events()).expect("spawn cmd.exe");
     assert!(
         wait_for_image(&session, 77),
         "the bundled ConPTY did not forward the Kitty APC to libghostty-vt"
@@ -386,7 +395,7 @@ fn wsl_client_apc_survives_wsl_pty_and_conpty() {
             args: vec!["-e".into(), "bash".into(), "-c".into(), script.into()],
         },
     };
-    let pty = match spawn_pty(&config, Arc::clone(&session)) {
+    let pty = match spawn_pty(&config, Arc::clone(&session), no_events()) {
         Ok(pty) => pty,
         Err(error) => {
             eprintln!("SKIP WSL APC gate: {error}");
@@ -436,7 +445,7 @@ fn linux_real_kitty_client_image_reaches_ghostty() {
             ],
         },
     };
-    let pty = match spawn_pty(&config, Arc::clone(&session)) {
+    let pty = match spawn_pty(&config, Arc::clone(&session), no_events()) {
         Ok(pty) => pty,
         Err(error) => {
             let _ = std::fs::remove_file(&path);
@@ -491,7 +500,7 @@ fn linux_kitten_unicode_placeholder_reaches_ghostty() {
             ],
         },
     };
-    let pty = match spawn_pty(&config, Arc::clone(&session)) {
+    let pty = match spawn_pty(&config, Arc::clone(&session), no_events()) {
         Ok(pty) => pty,
         Err(error) => {
             let _ = std::fs::remove_file(&path);

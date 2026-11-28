@@ -13,7 +13,9 @@ use silvestris::ThemePreference;
 use crate::config::{parse_args, usage, version_line, Config};
 use crate::log;
 use crate::platform::profiles::{self, ShellProfile};
-use crate::platform::{default_shell, spawn_pty, PlatformPty, PtyConfig, ShellCommand};
+use crate::platform::{
+    default_shell, spawn_pty, PlatformPty, PtyConfig, PtyEvent, PtyEventSink, ShellCommand,
+};
 use crate::preferences::{self, SessionGlobal, ShellProfilesGlobal};
 use crate::terminal::fixtures::Fixture;
 use crate::terminal::render::TerminalView;
@@ -228,8 +230,10 @@ pub fn run() {
             session.set_pty_resize(Arc::new(
                 move |cols, rows, cell_width_px, cell_height_px| {
                     if let Some(pty) = resize_holder.lock().expect("pty holder poisoned").as_ref() {
-                        if let Err(error) = pty.resize(cols, rows, cell_width_px, cell_height_px) {
-                            log::error("resize", &format!("PTY resize failed: {error}"));
+                        if let Err(error) =
+                            pty.request_resize(cols, rows, cell_width_px, cell_height_px)
+                        {
+                            log::error("resize", &format!("PTY resize request rejected: {error}"));
                         }
                     }
                 },
@@ -240,6 +244,13 @@ pub fn run() {
             // Ghostty actually adopted instead of the initial 80x24 guess.
             let spawn_session = Arc::clone(&session);
             let spawn_holder = Arc::clone(&pty_holder);
+            // The host owns presentation: workers report facts once, and Pain
+            // decides the level and wording here rather than logging in the
+            // transport layer.
+            let event_sink: PtyEventSink = Arc::new(|event| match event {
+                PtyEvent::ProcessExited { .. } => log::info("pty", &event.to_string()),
+                _ => log::error("pty", &event.to_string()),
+            });
             view.update(cx, move |_, window, _| {
                 window.on_next_frame(move |_, cx| {
                     let geometry = spawn_session.applied_geometry();
@@ -250,7 +261,7 @@ pub fn run() {
                         cell_height_px: geometry.cell_height_px,
                         ..pty_config
                     };
-                    match spawn_pty(&config, Arc::clone(&spawn_session)) {
+                    match spawn_pty(&config, Arc::clone(&spawn_session), event_sink) {
                         Ok(pty) => {
                             *spawn_holder.lock().expect("pty holder poisoned") = Some(pty);
                         }

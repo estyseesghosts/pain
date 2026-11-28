@@ -11,7 +11,10 @@ use std::thread::{self, JoinHandle};
 
 use libc::{c_int, pid_t};
 
-use super::{terminal_environment, PlatformPty, PtyConfig, PtyError, PtyResizeMailbox};
+use super::{
+    terminal_environment, PlatformPty, PtyConfig, PtyError, PtyEvent, PtyEventSink,
+    PtyResizeMailbox,
+};
 use crate::terminal::session::TerminalSession;
 
 /// `TIOCSWINSZ` payload derived from the terminal grid. The pixel fields stay
@@ -145,7 +148,11 @@ pub struct LinuxPty {
 }
 
 impl LinuxPty {
-    pub fn spawn(config: &PtyConfig, session: Arc<TerminalSession>) -> Result<Self, PtyError> {
+    pub fn spawn(
+        config: &PtyConfig,
+        session: Arc<TerminalSession>,
+        events: PtyEventSink,
+    ) -> Result<Self, PtyError> {
         let mut master_fd: RawFd = -1;
         let mut slave_fd: RawFd = -1;
         let initial = GridSize {
@@ -238,13 +245,20 @@ impl LinuxPty {
 
         let master = Arc::new(MasterFd::new(master_fd));
         let stop = Arc::new(AtomicBool::new(false));
-        let threads = start_threads(&session, Arc::clone(&master), Arc::clone(&stop), child.id());
+        let threads = start_threads(
+            &session,
+            Arc::clone(&master),
+            Arc::clone(&stop),
+            child.id(),
+            Arc::clone(&events),
+        );
 
         let size = Arc::new(Mutex::new(initial));
         let resize_master = Arc::clone(&master);
         let resize_size = Arc::clone(&size);
-        let resize_mailbox = Arc::new(PtyResizeMailbox::new(Arc::new(
-            move |cols, rows, cell_width_px, cell_height_px| {
+        let resize_events = Arc::clone(&events);
+        let resize_mailbox = Arc::new(PtyResizeMailbox::new(
+            Arc::new(move |cols, rows, cell_width_px, cell_height_px| {
                 let next = GridSize {
                     cols: cols.max(1),
                     rows: rows.max(1),
@@ -252,20 +266,22 @@ impl LinuxPty {
                     cell_height_px,
                 };
                 // SAFETY: the winsize value is POD and the master fd is alive until
-                // shutdown joins this worker.
+                // shutdown joins this worker. Unlike ConPTY, TIOCSWINSZ carries
+                // device-pixel dimensions for Kitty size-report clients.
                 let result = unsafe {
                     libc::ioctl(resize_master.raw(), libc::TIOCSWINSZ, &winsize_for(next))
                 };
                 if result != 0 {
-                    crate::log::error(
-                        "resize",
-                        &format!("TIOCSWINSZ failed: {}", io::Error::last_os_error()),
-                    );
-                    return;
+                    return Err(PtyError::new(
+                        "TIOCSWINSZ",
+                        io::Error::last_os_error().to_string(),
+                    ));
                 }
                 *resize_size.lock().expect("PTY size mutex poisoned") = next;
-            },
-        )));
+                Ok(())
+            }),
+            resize_events,
+        ));
         Ok(Self {
             _master: master,
             child: child.id() as pid_t,
@@ -283,10 +299,12 @@ fn start_threads(
     master: Arc<MasterFd>,
     stop: Arc<AtomicBool>,
     child: u32,
+    events: PtyEventSink,
 ) -> Threads {
     let reader_session = Arc::clone(session);
     let reader_master = Arc::clone(&master);
     let reader_stop = Arc::clone(&stop);
+    let reader_events = Arc::clone(&events);
     let reader = thread::Builder::new()
         .name("pain-pty-reader".into())
         .spawn(move || {
@@ -298,13 +316,29 @@ fn start_threads(
                 match reader_master.wait_readable(100) {
                     Ok(false) => continue,
                     Ok(true) => {}
-                    Err(_) => break,
+                    Err(error) => {
+                        if !reader_stop.load(Ordering::Acquire) {
+                            reader_events(PtyEvent::ReaderFailed(PtyError::new(
+                                "poll",
+                                error.to_string(),
+                            )));
+                        }
+                        break;
+                    }
                 }
                 match reader_master.read(&mut buffer) {
                     Ok(0) => break,
                     Ok(count) => reader_session.write_vt(&buffer[..count]),
                     Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                    Err(_) => break,
+                    Err(error) => {
+                        if !reader_stop.load(Ordering::Acquire) {
+                            reader_events(PtyEvent::ReaderFailed(PtyError::new(
+                                "read",
+                                error.to_string(),
+                            )));
+                        }
+                        break;
+                    }
                 }
             }
         })
@@ -312,6 +346,7 @@ fn start_threads(
 
     let writer_session = Arc::clone(session);
     let writer_master = Arc::clone(&master);
+    let writer_events = Arc::clone(&events);
     let writer = thread::Builder::new()
         .name("pain-pty-writer".into())
         .spawn(move || {
@@ -320,7 +355,10 @@ fn start_threads(
                     // The transport is gone: fail the queue so no later input,
                     // paste or Ghostty reply is accepted into a dead writer.
                     writer_session.fail_writer();
-                    crate::log::error("pty-write", &format!("PTY write failed: {error}"));
+                    writer_events(PtyEvent::WriterFailed(PtyError::new(
+                        "write",
+                        error.to_string(),
+                    )));
                     break;
                 }
             }
@@ -328,6 +366,7 @@ fn start_threads(
         .expect("spawn PTY writer");
 
     let waiter_session = Arc::clone(session);
+    let waiter_events = Arc::clone(&events);
     let waiter = thread::Builder::new()
         .name("pain-child-waiter".into())
         .spawn(move || {
@@ -336,7 +375,15 @@ fn start_threads(
             // SAFETY: `pid` is our own direct child; reaping it exactly once
             // here prevents a zombie.
             unsafe { libc::waitpid(pid, &mut status, 0) };
+            let exit_code = if libc::WIFEXITED(status) {
+                Some(libc::WEXITSTATUS(status) as u32)
+            } else {
+                None
+            };
+            // Transitional: keep the session flag for existing gates while the
+            // event becomes the authoritative lifecycle notification.
             waiter_session.mark_process_exited();
+            waiter_events(PtyEvent::ProcessExited { exit_code });
         })
         .expect("spawn child waiter");
 
@@ -348,7 +395,7 @@ fn start_threads(
 }
 
 impl PlatformPty for LinuxPty {
-    fn resize(
+    fn request_resize(
         &self,
         cols: u16,
         rows: u16,
@@ -356,9 +403,10 @@ impl PlatformPty for LinuxPty {
         cell_height_px: u32,
     ) -> Result<(), PtyError> {
         // TIOCSWINSZ runs on the coalescing worker, never on the UI thread.
+        // The immediate result only reports mailbox acceptance; a real ioctl
+        // failure arrives as PtyEvent::ResizeFailed.
         self.resize_mailbox
-            .request(cols, rows, cell_width_px, cell_height_px);
-        Ok(())
+            .request(cols, rows, cell_width_px, cell_height_px)
     }
 
     fn process_exited(&self) -> bool {

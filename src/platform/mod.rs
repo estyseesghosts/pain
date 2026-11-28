@@ -71,12 +71,49 @@ impl fmt::Display for PtyError {
 
 impl std::error::Error for PtyError {}
 
+/// A host-relevant transport transition. This is deliberately a small,
+/// closed set: internal worker bookkeeping is not an event. The host owns
+/// presentation (logging, UI) and receives each fact exactly once.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PtyEvent {
+    /// The outbound writer can no longer reach the OS PTY.
+    WriterFailed(PtyError),
+    /// The reader failed while the child was still running (shutdown and
+    /// expected cancellation are not reported as failures).
+    ReaderFailed(PtyError),
+    /// A resize accepted by the mailbox failed in the OS call.
+    ResizeFailed(PtyError),
+    /// The child exited. The code is `None` when the platform cannot read it.
+    ProcessExited { exit_code: Option<u32> },
+}
+
+impl fmt::Display for PtyEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::WriterFailed(error) => write!(f, "PTY writer failed: {error}"),
+            Self::ReaderFailed(error) => write!(f, "PTY reader failed: {error}"),
+            Self::ResizeFailed(error) => write!(f, "PTY resize failed: {error}"),
+            Self::ProcessExited { exit_code } => match exit_code {
+                Some(code) => write!(f, "child process exited with code {code}"),
+                None => write!(f, "child process exited"),
+            },
+        }
+    }
+}
+
+/// One narrow sink supplied when a PTY is spawned. It is not a general event
+/// bus: there is one host per PTY, and it decides what to do with each fact.
+pub type PtyEventSink = Arc<dyn Fn(PtyEvent) + Send + Sync>;
+
 /// Point-in-time counters for [`PtyResizeMailbox`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PtyResizeCounters {
     pub requested: u64,
     pub coalesced: u64,
     pub applied: u64,
+    /// OS resize calls that failed. A failed resize is never counted as
+    /// applied or coalesced.
+    pub failed: u64,
 }
 
 /// A latest-value mailbox for OS PTY resizes. A drag from 80→200 columns may
@@ -95,11 +132,17 @@ pub struct PtyResizeMailbox {
     worker: Mutex<Option<JoinHandle<()>>>,
     requested: Arc<AtomicU64>,
     applied: Arc<AtomicU64>,
+    failed: Arc<AtomicU64>,
 }
 
 impl PtyResizeMailbox {
+    /// `apply` runs on the worker and reports the real OS result. Failures go
+    /// to `events` once; the mailbox never logs them itself.
     #[must_use]
-    pub fn new(apply: Arc<dyn Fn(u16, u16, u32, u32) + Send + Sync>) -> Self {
+    pub fn new(
+        apply: Arc<dyn Fn(u16, u16, u32, u32) -> Result<(), PtyError> + Send + Sync>,
+        events: PtyEventSink,
+    ) -> Self {
         let state = Arc::new(PtyResizeState {
             pending: Mutex::new(None),
             wake: Condvar::new(),
@@ -107,8 +150,10 @@ impl PtyResizeMailbox {
         });
         let requested = Arc::new(AtomicU64::new(0));
         let applied = Arc::new(AtomicU64::new(0));
+        let failed = Arc::new(AtomicU64::new(0));
         let worker_state = Arc::clone(&state);
         let worker_applied = Arc::clone(&applied);
+        let worker_failed = Arc::clone(&failed);
         let worker = std::thread::Builder::new()
             .name("pain-pty-resize".into())
             .spawn(move || {
@@ -129,13 +174,25 @@ impl PtyResizeMailbox {
                     }
                     let size = pending.take().expect("pending size was checked");
                     drop(pending);
+                    // Shutdown can race a pending request: never apply a resize
+                    // (or emit a success) once stopping has begun.
+                    if worker_state.stopping.load(Ordering::Acquire) {
+                        break;
+                    }
                     // Worker-side dedup: never apply the same grid twice.
                     if last_applied == Some(size) {
                         continue;
                     }
-                    apply(size.0, size.1, size.2, size.3);
-                    last_applied = Some(size);
-                    worker_applied.fetch_add(1, Ordering::Relaxed);
+                    match apply(size.0, size.1, size.2, size.3) {
+                        Ok(()) => {
+                            last_applied = Some(size);
+                            worker_applied.fetch_add(1, Ordering::Relaxed);
+                        }
+                        Err(error) => {
+                            worker_failed.fetch_add(1, Ordering::Relaxed);
+                            events(PtyEvent::ResizeFailed(error));
+                        }
+                    }
                 }
             })
             .expect("spawn PTY resize worker");
@@ -144,14 +201,26 @@ impl PtyResizeMailbox {
             worker: Mutex::new(Some(worker)),
             requested,
             applied,
+            failed,
         }
     }
 
     /// Update only the pending size and signal the worker. Never blocks on the
-    /// OS PTY call, so this is safe to invoke from the UI/session path.
-    pub fn request(&self, cols: u16, rows: u16, cell_width_px: u32, cell_height_px: u32) {
+    /// OS PTY call, so this is safe to invoke from the UI/session path. The
+    /// result reports only whether the request was accepted by the mailbox;
+    /// the OS result arrives later as a [`PtyEvent`].
+    pub fn request(
+        &self,
+        cols: u16,
+        rows: u16,
+        cell_width_px: u32,
+        cell_height_px: u32,
+    ) -> Result<(), PtyError> {
         if self.state.stopping.load(Ordering::Acquire) {
-            return;
+            return Err(PtyError::new(
+                "request_resize",
+                "resize worker is shutting down",
+            ));
         }
         let size = (cols.max(1), rows.max(1), cell_width_px, cell_height_px);
         self.requested.fetch_add(1, Ordering::Relaxed);
@@ -161,11 +230,12 @@ impl PtyResizeMailbox {
             .lock()
             .expect("PTY resize pending mutex poisoned");
         if *pending == Some(size) {
-            return;
+            return Ok(());
         }
         *pending = Some(size);
         drop(pending);
         self.state.wake.notify_one();
+        Ok(())
     }
 
     /// Stop accepting work, wake the worker, and join it. Idempotent.
@@ -197,12 +267,14 @@ impl PtyResizeMailbox {
     pub fn counters(&self) -> PtyResizeCounters {
         let requested = self.requested.load(Ordering::Relaxed);
         let applied = self.applied.load(Ordering::Relaxed);
+        let failed = self.failed.load(Ordering::Relaxed);
         PtyResizeCounters {
             requested,
-            // Every request is either applied by the worker or coalesced
-            // away because a newer grid superseded it before the OS call.
-            coalesced: requested.saturating_sub(applied),
+            // Every request is applied, failed in the OS call, or coalesced
+            // away because a newer grid superseded it first.
+            coalesced: requested.saturating_sub(applied).saturating_sub(failed),
             applied,
+            failed,
         }
     }
 }
@@ -212,7 +284,10 @@ impl PtyResizeMailbox {
 pub trait PlatformPty: Send {
     /// Request a grid resize. The implementation coalesces duplicate sizes and
     /// carries the current device-pixel cell size into the OS PTY winsize.
-    fn resize(
+    /// The immediate result says only whether the request was accepted by the
+    /// mailbox; the real OS call happens on the worker and its failure arrives
+    /// through [`PtyEvent::ResizeFailed`]. Never blocks on the OS call.
+    fn request_resize(
         &self,
         cols: u16,
         rows: u16,
@@ -232,16 +307,19 @@ pub trait PlatformPty: Send {
 pub fn spawn_pty(
     config: &PtyConfig,
     session: Arc<TerminalSession>,
+    events: PtyEventSink,
 ) -> Result<Box<dyn PlatformPty>, PtyError> {
-    linux::LinuxPty::spawn(config, session).map(|pty| Box::new(pty) as Box<dyn PlatformPty>)
+    linux::LinuxPty::spawn(config, session, events).map(|pty| Box::new(pty) as Box<dyn PlatformPty>)
 }
 
 #[cfg(target_os = "windows")]
 pub fn spawn_pty(
     config: &PtyConfig,
     session: Arc<TerminalSession>,
+    events: PtyEventSink,
 ) -> Result<Box<dyn PlatformPty>, PtyError> {
-    windows::WindowsPty::spawn(config, session).map(|pty| Box::new(pty) as Box<dyn PlatformPty>)
+    windows::WindowsPty::spawn(config, session, events)
+        .map(|pty| Box::new(pty) as Box<dyn PlatformPty>)
 }
 
 /// Conservative terminal identity shared by both backends. We do not claim
@@ -354,16 +432,24 @@ mod tests {
         // otherwise-correct mailbox look like it failed to coalesce.
         let release = Arc::new(AtomicBool::new(false));
         let worker_release = Arc::clone(&release);
-        let mailbox = PtyResizeMailbox::new(Arc::new(move |cols, rows, _cw, _ch| {
-            while !worker_release.load(Ordering::Acquire) {
-                std::thread::yield_now();
-            }
-            seen.lock().expect("seen poisoned").push((cols, rows));
-        }));
+        let mailbox = PtyResizeMailbox::new(
+            Arc::new(move |cols, rows, _cw, _ch| {
+                while !worker_release.load(Ordering::Acquire) {
+                    std::thread::yield_now();
+                }
+                seen.lock().expect("seen poisoned").push((cols, rows));
+                Ok(())
+            }),
+            Arc::new(|_| {}),
+        );
         for cols in 80..200u16 {
-            mailbox.request(cols, 24, 10, 20);
+            mailbox
+                .request(cols, 24, 10, 20)
+                .expect("resize request accepted");
         }
-        mailbox.request(200, 24, 10, 20);
+        mailbox
+            .request(200, 24, 10, 20)
+            .expect("final resize request accepted");
         release.store(true, Ordering::Release);
         let deadline = Instant::now() + Duration::from_secs(5);
         while Instant::now() < deadline && mailbox.counters().applied == 0 {
@@ -376,6 +462,47 @@ mod tests {
         let counters = mailbox.counters();
         assert_eq!(counters.requested, 121);
         assert_eq!(counters.coalesced + counters.applied, 121);
+    }
+
+    #[test]
+    fn resize_application_failure_is_an_event_not_a_success() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&events);
+        let sink_events = Arc::clone(&events);
+        let sink: PtyEventSink = Arc::new(move |event| {
+            sink_events.lock().expect("events poisoned").push(event);
+        });
+        let mailbox = PtyResizeMailbox::new(
+            Arc::new(|_, _, _, _| Err(PtyError::new("ResizePseudoConsole", "Access denied"))),
+            sink,
+        );
+        mailbox
+            .request(100, 30, 10, 20)
+            .expect("request accepted by mailbox");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline
+            && seen.lock().expect("events poisoned").is_empty()
+        {
+            std::thread::yield_now();
+        }
+        mailbox.shutdown();
+        let counters = mailbox.counters();
+        assert_eq!(counters.failed, 1);
+        assert_eq!(counters.applied, 0);
+        assert_eq!(counters.coalesced, 0);
+        let seen = seen.lock().expect("events poisoned");
+        assert_eq!(seen.len(), 1, "failure delivered once");
+        assert!(matches!(
+            seen.first(),
+            Some(PtyEvent::ResizeFailed(error)) if error.operation == "ResizePseudoConsole"
+        ));
+    }
+
+    #[test]
+    fn request_resize_reports_mailbox_shutdown() {
+        let mailbox = PtyResizeMailbox::new(Arc::new(|_, _, _, _| Ok(())), Arc::new(|_| {}));
+        mailbox.shutdown();
+        assert!(mailbox.request(80, 24, 0, 0).is_err());
     }
 
     #[test]

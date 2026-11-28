@@ -31,7 +31,10 @@ use windows::Win32::System::Threading::{
 };
 use windows::Win32::System::IO::CancelSynchronousIo;
 
-use super::{terminal_environment, PlatformPty, PtyConfig, PtyError, PtyResizeMailbox};
+use super::{
+    terminal_environment, PlatformPty, PtyConfig, PtyError, PtyEvent, PtyEventSink,
+    PtyResizeMailbox,
+};
 use crate::terminal::session::TerminalSession;
 
 static NEXT_PIPE_ID: AtomicU32 = AtomicU32::new(0);
@@ -350,7 +353,11 @@ pub struct WindowsPty {
 }
 
 impl WindowsPty {
-    pub fn spawn(config: &PtyConfig, session: Arc<TerminalSession>) -> Result<Self, PtyError> {
+    pub fn spawn(
+        config: &PtyConfig,
+        session: Arc<TerminalSession>,
+        events: PtyEventSink,
+    ) -> Result<Self, PtyError> {
         if config.command.program.contains('\0')
             || config.command.args.iter().any(|arg| arg.contains('\0'))
         {
@@ -538,12 +545,14 @@ impl WindowsPty {
             Arc::clone(&process),
             Arc::clone(&reader_thread),
             Arc::clone(&stop),
+            Arc::clone(&events),
         );
         let size = Arc::new(Mutex::new((config.cols.max(1), config.rows.max(1))));
         let resize_size = Arc::clone(&size);
         let resize_conpty = Arc::clone(&conpty);
-        let resize_mailbox = Arc::new(PtyResizeMailbox::new(Arc::new(
-            move |cols, rows, _cell_width_px, _cell_height_px| {
+        let resize_events = Arc::clone(&events);
+        let resize_mailbox = Arc::new(PtyResizeMailbox::new(
+            Arc::new(move |cols, rows, _cell_width_px, _cell_height_px| {
                 let coord = COORD {
                     X: cols as i16,
                     Y: rows as i16,
@@ -551,15 +560,15 @@ impl WindowsPty {
                 // SAFETY: the ConPTY handle stays alive until shutdown joins this
                 // worker, and the COORD is POD. The entry point is process-global.
                 let result = unsafe { (conpty_api().resize)(resize_conpty.raw, coord) };
-                match result.ok() {
-                    Ok(()) => *resize_size.lock().expect("PTY size mutex poisoned") = (cols, rows),
-                    Err(error) => crate::log::error(
-                        "resize",
-                        &format!("ResizePseudoConsole failed: {}", error.message()),
-                    ),
-                }
-            },
-        )));
+                result.ok().map_err(|error| {
+                    PtyError::new("ResizePseudoConsole", error.message().to_string())
+                })?;
+                *resize_size.lock().expect("PTY size mutex poisoned") = (cols, rows);
+                // ConPTY has no device-pixel winsize; only the grid is stored.
+                Ok(())
+            }),
+            resize_events,
+        ));
         Ok(Self {
             _conpty: conpty,
             _input_read: input_read,
@@ -582,11 +591,13 @@ fn start_threads(
     process: Arc<OwnedHandle>,
     reader_thread: Arc<Mutex<Option<OwnedHandle>>>,
     stop: Arc<AtomicBool>,
+    events: PtyEventSink,
 ) -> Threads {
     let reader_session = Arc::clone(session);
     let reader_output = Arc::clone(&output_read);
     let reader_stop = Arc::clone(&stop);
     let reader_slot = Arc::clone(&reader_thread);
+    let reader_events = Arc::clone(&events);
     let reader = thread::Builder::new()
         .name("pain-conpty-reader".into())
         .spawn(move || {
@@ -635,7 +646,15 @@ fn start_threads(
                     Ok(()) if read == 0 => break,
                     Ok(()) => reader_session.write_vt(&buffer[..read as usize]),
                     // ERROR_OPERATION_ABORTED is our own shutdown cancellation.
-                    Err(_) => break,
+                    Err(error) => {
+                        if !reader_stop.load(Ordering::Acquire) {
+                            reader_events(PtyEvent::ReaderFailed(PtyError::new(
+                                "ReadFile",
+                                error.message().to_string(),
+                            )));
+                        }
+                        break;
+                    }
                 }
             }
         })
@@ -643,6 +662,7 @@ fn start_threads(
 
     let writer_session = Arc::clone(session);
     let writer_input = Arc::clone(&input_write);
+    let writer_events = Arc::clone(&events);
     let writer = thread::Builder::new()
         .name("pain-conpty-writer".into())
         .spawn(move || {
@@ -665,11 +685,19 @@ fn start_threads(
                         // and Ghostty replies are rejected instead of piling up.
                         Ok(()) if chunk == 0 => {
                             writer_session.fail_writer();
+                            writer_events(PtyEvent::WriterFailed(PtyError::new(
+                                "WriteFile",
+                                "write made no progress",
+                            )));
                             return;
                         }
                         Ok(()) => written += chunk as usize,
-                        Err(_) => {
+                        Err(error) => {
                             writer_session.fail_writer();
+                            writer_events(PtyEvent::WriterFailed(PtyError::new(
+                                "WriteFile",
+                                error.message().to_string(),
+                            )));
                             return;
                         }
                     }
@@ -682,6 +710,7 @@ fn start_threads(
     let waiter_process = Arc::clone(&process);
     let waiter_reader = Arc::clone(&reader_thread);
     let waiter_stop = Arc::clone(&stop);
+    let waiter_events = Arc::clone(&events);
     let waiter = thread::Builder::new()
         .name("pain-child-waiter".into())
         .spawn(move || {
@@ -689,8 +718,13 @@ fn start_threads(
             unsafe { WaitForSingleObject(waiter_process.as_raw(), INFINITE) };
             let mut code = 0u32;
             // SAFETY: the process handle is owned and still valid here.
-            let _ = unsafe { GetExitCodeProcess(waiter_process.as_raw(), &mut code) };
+            let code = unsafe { GetExitCodeProcess(waiter_process.as_raw(), &mut code) }
+                .map(|()| code)
+                .ok();
+            // Transitional: the event is now the authoritative notification;
+            // the session flag is kept temporarily for existing headless gates.
             waiter_session.mark_process_exited();
+            waiter_events(PtyEvent::ProcessExited { exit_code: code });
             waiter_stop.store(true, Ordering::Release);
             // Give output a brief chance to drain before cancelling the read.
             thread::sleep(std::time::Duration::from_millis(2000));
@@ -710,7 +744,7 @@ fn start_threads(
 }
 
 impl PlatformPty for WindowsPty {
-    fn resize(
+    fn request_resize(
         &self,
         cols: u16,
         rows: u16,
@@ -719,9 +753,9 @@ impl PlatformPty for WindowsPty {
     ) -> Result<(), PtyError> {
         // ConPTY has no pixel winsize; only the cell grid is meaningful.
         // Never call ResizePseudoConsole on the GPUI/session thread: only the
-        // latest requested grid is kept by the worker.
-        self.resize_mailbox.request(cols, rows, 0, 0);
-        Ok(())
+        // latest requested grid is kept by the worker. The immediate result
+        // covers mailbox acceptance only; OS failures arrive as PtyEvent.
+        self.resize_mailbox.request(cols, rows, 0, 0)
     }
 
     fn process_exited(&self) -> bool {
