@@ -268,7 +268,7 @@ The pipeline is:
 - a batched `TerminalSession::read_kitty_images()` that copies raw pixels under
   one terminal lock and skips generation races;
 - a GPUI texture cache keyed by `(protocol, image_id, generation)` in
-  `src/terminal/images.rs`, with explicit `Window::drop_image()` eviction;
+  `crates/pain-terminal-gpui/src/images.rs`, with explicit `Window::drop_image()` eviction;
 - one demand-driven `tick_kitty_animation()` clock, scheduled by `TerminalView`
   with epochs rather than a frame loop.
 

@@ -20,7 +20,7 @@ Kitty graphics is implemented end to end, so a Windows build that always used
 the in-box host would silently lose images. Pain therefore ships a pinned,
 MIT-licensed `Microsoft.Windows.Console.ConPTY` pair (`conpty.dll` plus the
 matching `OpenConsole.exe`) beside `pain.exe`. The resolver in
-`src/platform/windows.rs` loads the module once, holds it for the process
+`crates/pain-terminal-pty/src/windows.rs` loads the module once, holds it for the process
 lifetime, and uses its `CreatePseudoConsole`/`ResizePseudoConsole`/
 `ClosePseudoConsole` exports for the whole session. Provenance, version and
 SHA-256 checksums are in [`windows/conpty/README.md`](../windows/conpty/README.md).

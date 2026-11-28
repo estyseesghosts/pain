@@ -50,7 +50,7 @@ Do not turn these into hard sleeps/frame caps. They are profiling signals.
 ## 3. Required counters
 
 M2 implements these as cheap `AtomicU64` counters in
-`src/terminal/session.rs`; `TerminalSession::snapshot_counters()` returns a
+`crates/pain-terminal-core/src/session.rs`; `TerminalSession::snapshot_counters()` returns a
 point-in-time `CountersSnapshot`, and a `CountersHandle` lets the GPUI element
 record rows rebuilt/cache hits, text batches, `shape_line` calls, background
 quads and prepaint/paint time without borrowing the session. The headless
@@ -185,7 +185,7 @@ PTY. XTWINOPS `CSI 14/16/18/19 t` is answered separately by
 virtual placement supplies their pixels, so the fallback font cannot draw tofu
 over or beside the image. `tests/pty.rs` repeats the real
 `kitten icat --unicode-placeholder` gate; `tests/kitty.rs`, `tests/m6.rs` and
-`tests/gpui_render.rs` cover placeholders, animation and the render path
+`crates/pain-terminal-gpui/tests/gpui_render.rs` cover placeholders, animation and the render path
 deterministically.
 
 

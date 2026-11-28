@@ -20,7 +20,7 @@ Keep `unsafe` code small, documented and mechanically auditable. Raw C handles a
 
 **Ghostty owns terminal semantics.** Do not write a second ANSI/VT parser, terminal grid, scrollback engine, application-mode state machine, bracketed-paste implementation, or key-sequence table. A `GhosttyTerminal` already owns screen, scrollback, cursor, styles and modes while intentionally leaving drawing and PTY transport to the embedder. See [Ghostty `terminal.h`](https://github.com/ghostty-org/ghostty/blob/64a6fedfd26d1fa687733f9f411db5eb8e205ebe/include/ghostty/vt/terminal.h). Use the published render, key, mouse, paste and terminal APIs instead of reaching into Ghostty internals.
 
-**The application owns PTY/process transport.** Windows uses OS ConPTY; Linux uses a POSIX PTY. The common terminal layer may request `write`, `resize`, `close`, and process state, but must not know `HPCON`, POSIX file descriptors, `STARTUPINFOEX`, `TIOCSWINSZ`, or child-pre-exec mechanics.
+**`pain-terminal-pty` owns PTY/process transport.** Windows uses OS ConPTY; Linux uses a POSIX PTY. The terminal core never names `HPCON`, POSIX file descriptors, `STARTUPINFOEX`, `TIOCSWINSZ`, or child-pre-exec mechanics. The host owns the relationship between a PTY and a view; transport facts reach it through the narrow `PtyEvent` sink.
 
 **GPUI owns drawing, focus, platform input and frame scheduling.** The terminal surface is one custom `gpui::Element`. The GPUI `Element` contract is `request_layout`, then `prepaint`, then `paint`; carry only the data required by the next phase. See [GPUI `element.rs`](https://github.com/zed-industries/zed/blob/6b720973027999bae402df23d469026f4cced988/crates/gpui/src/element.rs). Use GPUI text shaping and paint primitives rather than embedding Ghostty/Wintty GPU surfaces.
 
@@ -28,34 +28,47 @@ Keep `unsafe` code small, documented and mechanically auditable. Raw C handles a
 
 ## Scope guard
 
-The active target is one terminal session in one window on Windows and Linux. Do not add tabs, splits, detachable panes, profiles, workspaces, persistent sessions, command palette, plugin API, shell integration, remote control, SSH client, terminal multiplexing, embedded file browser, settings GUI, global hotkey/quick terminal, image protocol rendering, shader effects, ligature configuration matrix, or theme marketplace.
+The active target is one terminal session in one window on Windows and Linux. Do not add tabs, splits, detachable panes, profiles, workspaces, persistent sessions, command palette, plugin API, shell integration, remote control, SSH client, terminal multiplexing, embedded file browser, settings GUI, global hotkey/quick terminal, shader effects, ligature configuration matrix, or theme marketplace. Kitty graphics (inline direct transmission), adjacent ConPTY APC forwarding, and the reusable multi-instance GPUI surface are already implemented and tested; they are not future work.
 
 Do not implement macOS functionality. `docs/OSX-BACKEND.md` is a future design note so the platform abstraction does not become Windows/Linux-specific by accident. macOS is neither built nor tested until real hardware or reliable CI is available.
 
-A feature is allowed in the MVP only when it is required for an ordinary interactive terminal: shell launch/exit, terminal output, keyboard/text, focus, resize, ANSI styles/colors, cursor, alternate screen, scrollback, selection/copy, paste, and enough mouse reporting for mainstream TUIs. Hyperlinks, notifications, semantic prompt metadata, OSC clipboard reads/writes and images are later work.
+A feature is allowed only when it is required for an ordinary interactive terminal: shell launch/exit, terminal output, keyboard/text, focus, resize, ANSI styles/colors, cursor, alternate screen, scrollback, selection/copy, paste, and enough mouse reporting for mainstream TUIs. Hyperlinks, notifications, semantic prompt metadata and OSC clipboard reads/writes remain out of scope. Sixel is not implemented.
 
-## Expected source shape
+## Crate ownership
 
-Keep the implementation shallow. A reasonable first tree is:
+The boundaries are proven and binding. Enforce this dependency direction:
 
 ```text
-src/
-  main.rs
-  app.rs
-  terminal/
-    mod.rs
-    session.rs
-    ghostty.rs
-    input.rs
-    render.rs
-    selection.rs
-  platform/
-    mod.rs
-    windows.rs
-    linux.rs
+ghostty-vt-sys  (raw FFI)
+      ↓
+pain-terminal-core  (terminal semantics, Ghostty adaptation, no GPUI/PTY/app)
+   ↙          ↘
+pain-terminal-pty   pain-terminal-gpui   (siblings: never depend on each other)
+   ↘          ↙
+        pain  (the application: config, preferences, shell profiles, Jump Lists,
+               window composition, Silvestris, keybindings)
 ```
 
-If raw C declarations make `ghostty.rs` unwieldy, a small `ghostty-vt-sys` crate is acceptable. Do not split “core”, “runtime”, “renderer”, “protocol”, “model”, and “platform” into separate crates before the implementation proves those boundaries are useful.
+`pain` is the first real consumer of all three reusable crates. Never add a
+`pain-terminal-core → pain-terminal-pty`, `pain-terminal-core → GPUI`, or
+`pain-terminal-gpui → pain-terminal-pty` edge. Keep shell/profile discovery,
+preferences, Jump Lists, window chrome and Pain logs in `src/`, not in the
+reusable crates. A future consumer (for example Sandcat) must not inherit Pain
+policy merely to embed a terminal.
+
+```text
+crates/
+  ghostty-vt-sys/
+  pain-terminal-core/src/{lib,ghostty,session,writer,input,geometry,palette,selection,counters,error}.rs
+  pain-terminal-pty/src/{lib,windows,linux}.rs
+  pain-terminal-gpui/src/{lib,render,images}.rs
+src/  (pain app: main.rs, app.rs, config.rs, preferences.rs, platform/mod.rs + profiles.rs, shortcuts.rs)
+```
+
+`pain-terminal-core` never names `ghostty_vt_sys` in its public API; consumers
+use Pain-domain values (`TerminalSession`, snapshots, `ScrollbarState`,
+`KittyPixelFormat`, `ImageLayer`, `TerminalError`). Raw C constants stay inside
+the core crate's FFI wrapper.
 
 ## Threading and serialization rules
 
@@ -103,7 +116,7 @@ Do not make GPUI `ScrollHandle` authoritative for terminal history. Ghostty owns
 
 ## Platform rules
 
-Windows starts with the OS-provided ConPTY only. Wintty currently supports an optional adjacent `conpty.dll` to preserve extra graphics protocols that the in-box host may strip; those graphics protocols are out of MVP scope, so do not import that distribution complexity. See [Wintty `src/pty.zig`](https://github.com/pawaca/wintty/blob/047cd33cd1a24602cc4887ac260e2f922943cac0/src/pty.zig).
+Windows bundles a pinned, redistributable OpenConsole `conpty.dll` beside the executable to preserve Kitty graphics APCs that the in-box kernel32 host strips. The in-box fallback remains supported and is reported once as a `PtyEvent::TransportDegraded` fact for the host to present; it never claims full graphics support. See [Wintty `src/pty.zig`](https://github.com/pawaca/wintty/blob/047cd33cd1a24602cc4887ac260e2f922943cac0/src/pty.zig).
 
 Linux uses POSIX PTY primitives. Ghostty's own current PTY code uses `openpty`, `FD_CLOEXEC`, `IUTF8`, `TIOCSWINSZ`, `setsid`, and `TIOCSCTTY`. Use it as a checklist for process/TTY mechanics, not as a module to vendor. See [Ghostty `src/pty.zig`](https://github.com/ghostty-org/ghostty/blob/64a6fedfd26d1fa687733f9f411db5eb8e205ebe/src/pty.zig).
 

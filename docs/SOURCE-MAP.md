@@ -19,6 +19,18 @@ the 1.0.2 API. Pain does not track `main` and does not use the research commit
 as a dependency. `vendor/ghostty-vt/PIN.txt` records the exact source snapshot;
 `crates/ghostty-vt-sys/build.rs` refuses to build if that pin changes.
 
+## Local crate ownership
+
+The reusable boundaries and their dependency direction are final:
+
+- `crates/ghostty-vt-sys` — raw FFI only.
+- `crates/pain-terminal-core` — terminal semantics and Ghostty adaptation; depends on the sys crate, `image` (PNG callback) and `serde` only. No GPUI, PTY, Silvestris, preferences or logging.
+- `crates/pain-terminal-pty` — Windows ConPTY/Linux POSIX PTY transport; depends on core. No GPUI or Pain app code.
+- `crates/pain-terminal-gpui` — `TerminalView`, custom element and image cache; depends on core and the single workspace-pinned GPUI. No PTY, Silvestris or Pain app code.
+- root `pain` — consumes all three; owns config, preferences, shell/profile policy, Jump Lists, Silvestris composition, window wiring, host keybindings and logs.
+
+PTY and GPUI are siblings; neither depends on the other, and core depends on neither. GPUI is pinned once in `[workspace.dependencies]` so root and GPUI crate resolve one revision.
+
 The Silvestris dependency is optional (`shell` feature) so M0's headless tests
 do not compile GPUI. It is pinned to a pushed revision rather than a sibling
 checkout so a fresh GitHub clone can build without local layout assumptions.
@@ -157,7 +169,7 @@ unchanged; no upstream or Silvestris file is modified. Linux needs no shim.
 
 - Snapshot/logical tests: row batching, wide-grapheme tails, background-span
   coalescing, cell-to-pixel geometry and clean-frame row-cache reuse in
-  `src/terminal/geometry.rs`.
+  `crates/pain-terminal-core/src/geometry.rs`.
 - M1 acceptance: canned ANSI/256/true-color, wide-character, underline/bold
   and cursor fixtures render through one `TerminalElement`; unchanged frames
   reuse cached rows (no per-frame full-grid rebuild).
@@ -240,7 +252,7 @@ pinned `vt-1.0.2` header: `ghostty_terminal_scroll_viewport`,
 options are declared in `crates/ghostty-vt-sys/src/lib.rs`, with sizes measured
 with `zig cc` against `vendor/ghostty-vt/include` and asserted by the ABI test.
 
-- M5: `src/terminal/selection.rs` keeps word/line and wheel policy pure;
+- M5: `crates/pain-terminal-core/src/selection.rs` keeps word/line and wheel policy pure;
   `ghostty.rs`/`session.rs` use Ghostty's viewport and title APIs. No GPUI
   `ScrollHandle` is authoritative for history.
 - M6: `tests/m6.rs` is the stress suite and `docs/PERFORMANCE.md` records the
@@ -370,14 +382,14 @@ Use for bracketed paste and unsafe-paste policy. Do not raw-write clipboard text
   - `vendor/ghostty-vt/src/terminal/kitty/graphics_storage.zig` (generations, clipping, relative/virtual placements, animation);
   - `vendor/ghostty-vt/src/terminal/kitty/graphics_unicode.zig` (placeholder cells).
 - Pain integration anchors:
-  - `src/terminal/ghostty.rs` — FFI wrappers, PNG decoder, placement cache, Kitty policy, size-report callback;
-  - `src/terminal/geometry.rs` — device cell pixels and blank shaping for U+10EEEE placeholder cells;
-  - `src/terminal/session.rs` — batched pixel copy, animation clock, counters, geometry-to-PTY handoff;
-  - `src/terminal/images.rs` — BGRA conversion, texture cache, projection/clipping;
-  - `src/terminal/render.rs` — layer paint order and epoch timer;
-  - `src/platform/linux.rs` — `TIOCSWINSZ` `ws_xpixel`/`ws_ypixel` reporting at creation and grid changes; DPI-only changes never reach it;
+  - `crates/pain-terminal-core/src/ghostty.rs` — FFI wrappers, PNG decoder, placement cache, Kitty policy, size-report callback;
+  - `crates/pain-terminal-core/src/geometry.rs` — device cell pixels and blank shaping for U+10EEEE placeholder cells;
+  - `crates/pain-terminal-core/src/session.rs` — batched pixel copy, animation clock, counters, geometry application returning `ResizeOutcome`; the host forwards grid changes to its PTY;
+  - `crates/pain-terminal-gpui/src/images.rs` — BGRA conversion, texture cache, projection/clipping;
+  - `crates/pain-terminal-gpui/src/render.rs` — layer paint order and epoch timer;
+  - `crates/pain-terminal-pty/src/linux.rs` — `TIOCSWINSZ` `ws_xpixel`/`ws_ypixel` reporting at creation and grid changes; DPI-only changes never reach it;
   - `tests/kitty.rs` and `tests/m6.rs` — protocol matrix and invariants;
-  - `tests/gpui_render.rs` — real GPUI window render gates (crop, alpha, layers, negative rows, HiDPI, animation);
+  - `crates/pain-terminal-gpui/tests/gpui_render.rs` — real GPUI window render gates (crop, alpha, layers, negative rows, HiDPI, animation);
   - `tests/pty.rs` — bundled-ConPTY/WSL APC gates and the real `kitten icat` Unicode-placeholder gate.
 
 ### Bundled ConPTY provenance
@@ -386,7 +398,7 @@ Use for bracketed paste and unsafe-paste policy. Do not raw-write clipboard text
   version, MIT license, URL and SHA-256 for both binaries.
 - `build.rs` copies the pinned x64 pair beside the executable and into
   `deps/` for tests.
-- `src/platform/windows.rs` resolves `CreatePseudoConsole`,
+- `crates/pain-terminal-pty/src/windows.rs` resolves `CreatePseudoConsole`,
   `ResizePseudoConsole` and `ClosePseudoConsole` from the adjacent DLL, holds
   the module for the process lifetime, and only falls back to `kernel32` with
   an explicit Kitty-graphics-degraded warning.

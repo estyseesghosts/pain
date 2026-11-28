@@ -22,7 +22,7 @@ plain `cargo test`, and deliberately not mocked):
 - Windows APC / Kitty graphics gate with the bundled ConPTY (`tests/pty.rs`)
 - WSL APC gate, when a usable distro is installed (`tests/pty.rs`)
 - Linux interactive PTY smoke / Kitty client gates (`tests/pty.rs`, `tests/kitty.rs`)
-- GPUI headless render tests (`tests/gpui_render.rs`, `--features gpui-tests`)
+- GPUI headless render tests (`crates/pain-terminal-gpui/tests/gpui_render.rs`, `--features gpui-tests`)
 - Normal interactive Pain use: typing, resize, scrollback, selection,
   copy/paste, IME/dead keys where available, mouse TUI, title changes, font
   resizing and clean shutdown (`docs/SMOKE.md`)
